@@ -1,5 +1,3 @@
-from bson import ObjectId
-from bson.errors import InvalidId
 from fastapi import APIRouter, HTTPException
 
 from claude_exam.api.dependencies import (
@@ -9,6 +7,7 @@ from claude_exam.api.dependencies import (
     IcaClientDep,
     PaginationDep,
     QuestionFiltersDep,
+    QuestionObjectIdDep,
 )
 from claude_exam.api.schemas import (
     Question,
@@ -66,12 +65,9 @@ def list_questions(
 
 
 @router.get("/{question_id}")
-def get_question(question_id: str, collection: ExaminationCollectionDep) -> Question:
-    try:
-        object_id = ObjectId(question_id)
-    except InvalidId as exc:
-        raise HTTPException(status_code=404, detail="question not found") from exc
-
+def get_question(
+    object_id: QuestionObjectIdDep, collection: ExaminationCollectionDep
+) -> Question:
     doc = collection.find_one({"_id": object_id})
     if doc is None:
         raise HTTPException(status_code=404, detail="question not found")
@@ -81,6 +77,7 @@ def get_question(question_id: str, collection: ExaminationCollectionDep) -> Ques
 @router.post("/{question_id}/simplify")
 async def simplify_question(
     question_id: str,
+    object_id: QuestionObjectIdDep,
     collection: AsyncCollectionDep,
     simplified: AsyncSimplifiedCollectionDep,
     ica: IcaClientDep,
@@ -94,11 +91,6 @@ async def simplify_question(
     which replaces it and keeps `created_at`.
     """
     body = body or SimplifyRequest()
-    try:
-        object_id = ObjectId(question_id)
-    except InvalidId as exc:
-        raise HTTPException(status_code=404, detail="question not found") from exc
-
     doc = await collection.find_one({"_id": object_id})
     if doc is None:
         raise HTTPException(status_code=404, detail="question not found")

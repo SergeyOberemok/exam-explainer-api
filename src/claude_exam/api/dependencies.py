@@ -3,7 +3,9 @@ import re
 from dataclasses import dataclass
 from typing import Annotated
 
-from fastapi import Depends, Query, Request
+from bson import ObjectId
+from bson.errors import InvalidId
+from fastapi import Depends, HTTPException, Query, Request
 from pymongo import AsyncMongoClient
 from pymongo.asynchronous.collection import AsyncCollection
 from pymongo.collection import Collection
@@ -66,6 +68,17 @@ def get_async_jobs_collection(request: Request) -> AsyncCollection:
 AsyncJobsCollectionDep = Annotated[
     AsyncCollection, Depends(get_async_jobs_collection)
 ]
+
+
+def get_question_object_id(question_id: str) -> ObjectId:
+    """Path `question_id` as an ObjectId; a malformed id is a 404, not a 422."""
+    try:
+        return ObjectId(question_id)
+    except InvalidId as exc:
+        raise HTTPException(status_code=404, detail="question not found") from exc
+
+
+QuestionObjectIdDep = Annotated[ObjectId, Depends(get_question_object_id)]
 
 
 @dataclass

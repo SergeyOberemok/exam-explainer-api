@@ -64,6 +64,28 @@ This wipes and rewrites `roadmap/` from scratch, so make structural edits in `ro
 
 `extract.py`, `section_map.py`, `explanation_parse.py`, and `html_clean.py` are a separate, one-off pipeline that converts raw practice-exam JSON (`public/*.json`) into staged candidate cards (`.staging/*.pending.json`) — unrelated to the lookup tooling above. Turning a staged record into an actual `Questions/**/*.md` file is a manual/agent-driven step, not a script — see the `promote-staged-cards` skill below.
 
+## Game API (`/game`) for the Unity client
+
+`src/claude_exam/api/routers/game.py` serves the MongoDB `examination` collection to a Unity game (no auth, no CORS — native builds don't need it; WebGL would). Responses are flat, null-free objects with lists wrapped in `items`, because `JsonUtility` can't parse a top-level array or null.
+
+- `GET /game/questions?count=10&section=&assessment_type=&shuffle=true` → `{items: GameQuestion[], total}` (`count` 1–50)
+- `GET /game/questions/{id}` → `GameQuestion` (404 on bad/unknown id)
+- `GET /game/sections?simplified=false` → `{items: string[]}` (`simplified=true`: only sections with simplified questions)
+- `GET /game/simplified-questions?count=&section=&assessment_type=&shuffle=` → `{items: GameQuestion[], total}` from `examination_simplified` (only questions already simplified)
+- `GET /game/simplified-questions/{question_id}` → `GameQuestion` (404 if not simplified yet); `question_id` is the `id` from `/game/questions`
+
+`GameQuestion` = `id, simplified, section, assessment_type, question, explanation, answers[{index,text,is_correct,feedback}], correct_indices[]`. Simplified questions keep the examination `id` and set `simplified: true`. The stored `correct_response` letters (`"a"`, `"b"`…) are converted to indices.
+
+```csharp
+using (var req = UnityWebRequest.Get(baseUrl + "/game/questions?count=10"))
+{
+    req.SetRequestHeader("Accept", "application/json");
+    yield return req.SendWebRequest();
+    if (req.result != UnityWebRequest.Result.Success) { Debug.LogError(req.error); yield break; }
+    var list = JsonUtility.FromJson<GameQuestionList>(req.downloadHandler.text);
+}
+```
+
 ## Card-authoring skills
 
 These three skills retrofit or create cards under `Questions/` — distinct from the four read-oriented skills below, which only ever look cards up:

@@ -10,6 +10,7 @@ from claude_exam.api.batch import STALE_JOB_SECONDS
 from claude_exam.api.config import get_settings
 from claude_exam.api.ica import IcaClient
 from claude_exam.api.routers.examination import router as examination_router
+from claude_exam.api.routers.game import router as game_router
 from claude_exam.api.routers.ica import router as ica_router
 from claude_exam.api.routers.questions import router as questions_router
 
@@ -28,6 +29,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     await async_mongo_client.get_default_database()[
         "examination_simplified"
     ].create_index("question_id", unique=True)
+    # Game endpoints filter by these fields; avoids collection scans.
+    db = async_mongo_client.get_default_database()
+    for name in ("examination", "examination_simplified"):
+        await db[name].create_index([("section", 1), ("assessment_type", 1)])
     # Background jobs die with their process. Fail only jobs whose heartbeat has
     # gone quiet, so a worker starting up doesn't kill jobs live in another one.
     now = datetime.now(timezone.utc)
@@ -54,5 +59,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(lifespan=lifespan)
 app.include_router(examination_router)
+app.include_router(game_router)
 app.include_router(ica_router)
 app.include_router(questions_router)

@@ -34,6 +34,40 @@ class QuestionPage(BaseModel):
     limit: int
 
 
+class GameAnswer(BaseModel):
+    """One answer option. Flat and null-free so Unity's JsonUtility can parse it."""
+
+    index: int
+    text: str
+    is_correct: bool
+    # Per-option explanation; empty string when the source has none.
+    feedback: str = ""
+
+
+class GameQuestion(BaseModel):
+    # Always the examination question id, also for simplified questions.
+    id: str
+    # True when text comes from `examination_simplified`.
+    simplified: bool = False
+    section: str
+    assessment_type: str
+    question: str
+    explanation: str
+    answers: list[GameAnswer]
+    # Several entries for multi-select questions.
+    correct_indices: list[int]
+
+
+class GameQuestionList(BaseModel):
+    # JsonUtility needs an object at the JSON root, so lists are wrapped.
+    items: list[GameQuestion]
+    total: int
+
+
+class GameSectionList(BaseModel):
+    items: list[str]
+
+
 class IcaChatRequest(BaseModel):
     prompt: str
     assistant: str | None = None

@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "claude-exam-vault": {
+      "command": "uv",
+      "args": ["run", "python", "-m", "claude_exam.mcp_server"]
+    },
+    "mongodb-local": {
+      "command": "bash",
+      "args": [
+        "-c",
+        "set -a; . ./.env; set +a; export MDB_MCP_CONNECTION_STRING=\"$DATABASE_URL\" MDB_MCP_READ_ONLY=true; exec npx -y mongodb-mcp-server"
+      ]
+    }
+  }
+}

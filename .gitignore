@@ -1,0 +1,6 @@
+ica-claude.sh
+.staging/
+**/__pycache__/
+.env
+public/*
+docs/*

@@ -1,0 +1,27 @@
+[project]
+name = "claude-exam"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Serhii Oberemok", email = "Serhii.Oberemok@ibm.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi[standard]>=0.143.0",
+    "httpx>=0.28.1",
+    "mcp>=2.1.1",
+    "pydantic-settings>=2.15.0",
+    "pymongo>=4.18.3",
+    "pyyaml>=6.0.3",
+]
+
+[project.scripts]
+claude-exam = "claude_exam:main"
+
+[tool.fastapi]
+entrypoint = "claude_exam.api.main:app"
+
+[build-system]
+requires = ["uv_build>=0.12.3,<0.13.0"]
+build-backend = "uv_build"

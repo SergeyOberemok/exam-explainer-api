@@ -1,0 +1,255 @@
+
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>ICA Explain Flow — Request/Response Report</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, "Segoe UI", system-ui, sans-serif; font-size: 14px; line-height: 1.6; color: #1f2328; background: #fff; padding: 32px 24px; }
+  .page { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 700; margin-bottom: 4px; }
+  .subtitle { color: #57606a; font-size: 13px; margin-bottom: 32px; }
+  h2 { font-size: 15px; font-weight: 700; margin: 28px 0 10px; border-bottom: 1px solid #e5e7eb; padding-bottom: 6px; }
+  h3 { font-size: 13px; font-weight: 700; margin: 18px 0 6px; color: #1f2328; }
+  p { margin-bottom: 10px; }
+  ul, ol { margin: 6px 0 10px 20px; }
+  li { margin-bottom: 4px; }
+  code { font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; background: #f7f8fa; border: 1px solid #e5e7eb; border-radius: 3px; padding: 1px 5px; }
+  pre { background: #f7f8fa; border: 1px solid #e5e7eb; border-radius: 6px; padding: 14px 16px; font-family: "SFMono-Regular", Consolas, monospace; font-size: 12px; line-height: 1.5; overflow-x: auto; margin-bottom: 12px; white-space: pre; }
+  .flow { display: flex; flex-direction: column; gap: 0; margin: 16px 0; }
+  .flow-row { display: flex; align-items: stretch; gap: 0; }
+  .flow-box { border: 1px solid #e5e7eb; border-radius: 6px; padding: 10px 14px; background: #f7f8fa; flex: 1; }
+  .flow-box.app { background: #eff6ff; border-color: #bfdbfe; }
+  .flow-box.ica { background: #f0fdf4; border-color: #bbf7d0; }
+  .flow-box.db  { background: #faf5ff; border-color: #e9d5ff; }
+  .flow-box .label { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em; color: #57606a; margin-bottom: 3px; }
+  .flow-box .title { font-size: 13px; font-weight: 600; }
+  .flow-arrow { display: flex; align-items: center; justify-content: center; padding: 2px 10px; color: #57606a; font-size: 18px; flex-shrink: 0; }
+  .arrow-label { font-size: 11px; color: #57606a; text-align: center; margin: 2px 0 2px 0; }
+  .step-block { border-left: 3px solid #3b82d4; padding: 10px 14px; background: #f7f8fa; border-radius: 0 6px 6px 0; margin-bottom: 10px; }
+  .step-num { font-size: 11px; font-weight: 700; color: #3b82d4; text-transform: uppercase; letter-spacing: .06em; }
+  .badge { display: inline-block; font-size: 10px; font-weight: 700; padding: 1px 7px; border-radius: 10px; margin-right: 4px; text-transform: uppercase; }
+  .badge.post { background: #dbeafe; color: #1d4ed8; }
+  .badge.get  { background: #dcfce7; color: #15803d; }
+  .badge.json { background: #fef9c3; color: #854d0e; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin-bottom: 12px; }
+  th { background: #f7f8fa; border: 1px solid #e5e7eb; padding: 6px 10px; text-align: left; font-weight: 700; font-size: 12px; }
+  td { border: 1px solid #e5e7eb; padding: 6px 10px; vertical-align: top; }
+  td:first-child { white-space: nowrap; }
+  .note { background: #fff8e1; border-left: 3px solid #f59e0b; padding: 8px 12px; border-radius: 0 6px 6px 0; margin: 10px 0 14px; font-size: 13px; }
+  .section-tag { display: inline-block; background: #e5e7eb; border-radius: 4px; padding: 0 7px; font-size: 11px; color: #57606a; margin-left: 6px; font-weight: 500; }
+  footer { margin-top: 40px; padding-top: 16px; border-top: 1px solid #e5e7eb; text-align: center; font-size: 12px; color: #57606a; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <h1>ICA Explain Flow — Request/Response Report</h1>
+  <div class="subtitle">How the FastAPI app talks to ICA and what data should reach the database</div>
+
+  
+  <h2>1. System Overview</h2>
+  <p>Three actors are involved. Every hop is JSON over HTTPS.</p>
+
+  <div class="flow">
+    <div class="flow-row">
+      <div class="flow-box app"><div class="label">Actor 1</div><div class="title">Client (browser / curl)</div></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box app"><div class="label">Actor 2</div><div class="title">FastAPI app<br /><code>POST /ica/explain</code></div></div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box ica"><div class="label">Actor 3</div><div class="title">ICA API<br /><code>POST /assistants/chat/completions</code></div></div>
+    </div>
+    <div class="flow-row" style="margin-top:6px">
+      <div style="flex:1"></div>
+      <div class="flow-arrow" style="visibility:hidden">→</div>
+      <div class="flow-box app" style="text-align:center"><div class="label">then</div><div class="title">FastAPI saves result → MongoDB</div></div>
+      <div class="flow-arrow" style="visibility:hidden">→</div>
+      <div style="flex:1"></div>
+    </div>
+  </div>
+
+  <div class="note">
+    <strong>Key discovery:</strong> "Exam Explainer Agent" lives under <code>/assistants</code> (not <code>/agents</code>). Its resolved UUID is <code>4b7bbee7-e66d-437c-95c7-556eadaa5ac5</code>. The UUID is cached in memory after the first name lookup, so only one extra <code>GET /assistants</code> round-trip ever happens per process lifetime.
+  </div>
+
+  
+  <h2>2. Hop 1 — Client → FastAPI <span class="section-tag">POST /ica/explain</span></h2>
+
+  <h3>Request</h3>
+  <pre>{
+  "question_id": 180555501,         // required — ID from the JSON file
+  "agent": "Exam Explainer Agent",  // optional — defaults to this value
+  "max_tokens": null                // optional — null lets ICA use its default
+}</pre>
+
+  <h3>What FastAPI does with it</h3>
+  <ol>
+    <li>Validates the body against <code>ExplainRequest</code> (Pydantic). <code>question_id</code> must be an integer; 422 if missing.</li>
+    <li>Looks up the item by <code>question_id</code> in an in-memory dict built from <code>public/claude-certified-architect-practice-1.json</code>. Returns 404 if not found.</li>
+    <li>Resolves <code>"Exam Explainer Agent"</code> → UUID via <code>GET /assistants</code> (cached after first call).</li>
+    <li>Builds a plain-text prompt from the item (HTML stripped) and forwards it to ICA.</li>
+    <li>Parses the ICA response and returns <code>ExplainResponse</code>.</li>
+  </ol>
+
+  <h3>Response</h3>
+  <pre>{
+  "question_id": 180555501,
+  "explanation": "# Understanding the question...\n\n...",  // Markdown string from the agent
+  "finish_reason": "stop",
+  "total_tokens": 7479,
+  "agent_id": "4b7bbee7-e66d-437c-95c7-556eadaa5ac5"
+}</pre>
+
+  
+  <h2>3. Hop 2 — FastAPI → ICA <span class="section-tag">POST /assistants/chat/completions</span></h2>
+
+  <h3>Request headers (mandatory)</h3>
+  <table>
+    <tr><th>Header</th><th>Value</th><th>Why</th></tr>
+    <tr><td><code>Authorization</code></td><td><code>Bearer &lt;ICA_API_KEY&gt;</code></td><td>Auth</td></tr>
+    <tr><td><code>Content-Type</code></td><td><code>application/json</code></td><td>Body is JSON</td></tr>
+    <tr><td><code>Accept</code></td><td><code>application/json</code></td><td>Expect JSON back</td></tr>
+    <tr><td><code>User-Agent</code></td><td><code>Mozilla/5.0 … Chrome/125</code></td><td>ICA WAF blocks non-browser UAs with 403</td></tr>
+  </table>
+
+  <h3>Request body</h3>
+  <pre>{
+  "model": "4b7bbee7-e66d-437c-95c7-556eadaa5ac5",  // assistant UUID — NOT the name
+  "messages": [
+    {
+      "role": "user",
+      "content": "Section: Domain 4: Prompt Engineering...\n\nQUESTION:\n...\n\nANSWER CHOICES:\n  A. Have the agent attach...\n  B. Route each proposed...\n  C. Append a follow-up...\n  D. Enable extended thinking...\n\nCORRECT ANSWER: B\n\nPER-CHOICE FEEDBACK:\n  A. Self-reported confidence...\n  B. An independent reviewer...\n  ...\n\nOFFICIAL EXPLANATION:\n...\n\nPlease simplify and explain this question..."
+    }
+  ],
+  "stream": false
+  // temperature/top_p intentionally omitted — Claude on ICA only accepts temperature=1
+  // max_tokens omitted unless caller passed it (would be bumped +5000 for thinking reserve)
+}</pre>
+
+  <h3>Response body (OpenAI-compatible)</h3>
+  <pre>{
+  "id": "chatcmpl-abc123",
+  "object": "chat.completion",
+  "created": 1715000000,
+  "model": "...",
+  "choices": [
+    {
+      "index": 0,
+      "finish_reason": "stop",
+      "message": {
+        "role": "assistant",
+        "content": "# Understanding the question in simple terms\n\n..."
+      }
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 1234,
+    "completion_tokens": 987,
+    "total_tokens": 7479
+  }
+}</pre>
+
+  <div class="note">
+    <strong>ICA quirks in play:</strong>
+    <ul style="margin-top:6px">
+      <li><strong>Browser User-Agent</strong> — without it the WAF returns HTTP 403 before the request reaches ICA.</li>
+      <li><strong>No temperature</strong> — Claude Opus/Sonnet on ICA only accepts the default (1.0). Sending any temperature causes a 400.</li>
+      <li><strong>+5 000 token reserve</strong> — Claude uses extended thinking tokens before emitting the visible reply. Without the reserve, <code>finish_reason</code> is <code>"length"</code> and <code>content</code> is empty.</li>
+      <li><strong>300 s timeout</strong> — large prompts with reasoning can take 60–120 s. Default HTTP timeouts will fire too early.</li>
+    </ul>
+  </div>
+
+  
+  <h2>4. Prompt Structure Sent to ICA</h2>
+  <p>The prompt is assembled from the raw practice-exam item, with HTML stripped. All fields come from the JSON file.</p>
+
+  <table>
+    <tr><th>Prompt section</th><th>Source field</th><th>Cleaning applied</th></tr>
+    <tr><td>Section:</td><td><code>item.section</code></td><td>None</td></tr>
+    <tr><td>QUESTION:</td><td><code>item.prompt.question</code></td><td><code>clean_question()</code> — strips <code>&lt;p&gt;</code>, converts <code>&lt;pre&gt;</code>/<code>&lt;code&gt;</code>, unescapes HTML entities</td></tr>
+    <tr><td>ANSWER CHOICES: A–D</td><td><code>item.prompt.answers[]</code></td><td>None (already plain text)</td></tr>
+    <tr><td>CORRECT ANSWER:</td><td><code>item.correct_response[]</code></td><td>Uppercased letters (e.g. "B")</td></tr>
+    <tr><td>PER-CHOICE FEEDBACK:</td><td><code>item.prompt.feedbacks[]</code></td><td><code>clean_plain()</code> — HTML unescape only</td></tr>
+    <tr><td>OFFICIAL EXPLANATION:</td><td><code>item.prompt.explanation</code></td><td><code>clean_plain()</code></td></tr>
+    <tr><td>Instruction tail</td><td>Hardcoded</td><td>"Please simplify and explain…"</td></tr>
+  </table>
+
+  
+  <h2>5. DB Persistence Design (what should go into MongoDB)</h2>
+  <p>The goal is to store the simplified question/answer model alongside the original item. Suggested document shape:</p>
+
+  <pre>{
+  "_id": "180555501",            // question_id as string key
+  "source": "claude-certified-architect-practice-1",
+  "section": "Domain 4: Prompt Engineering &amp; Structured Output",
+  "question_id": 180555501,
+
+  // ── original content (from the JSON file) ──
+  "original": {
+    "question": "&lt;p&gt;SCENARIO: ...&lt;/p&gt;",
+    "answers": ["Have the agent...", "Route each...", "Append...", "Enable..."],
+    "correct_response": ["b"],
+    "explanation": "&lt;p&gt;The core insight...&lt;/p&gt;"
+  },
+
+  // ── simplified content (from Exam Explainer Agent) ──
+  "simplified": {
+    "explanation": "# Understanding the question in simple terms\n\n...",  // Markdown
+    "finish_reason": "stop",
+    "total_tokens": 7479,
+    "agent_id": "4b7bbee7-e66d-437c-95c7-556eadaa5ac5",
+    "created_at": "2026-10-29T16:48:00Z"
+  }
+}</pre>
+
+  <div class="note">
+    <strong>Why keep both?</strong> The original HTML content is the source of truth for the exam engine. The simplified Markdown is a derived artefact. Storing them in the same document makes it easy to regenerate the simplified version without a second lookup and easy to invalidate it when the source changes.
+  </div>
+
+  
+  <h2>6. Environment Variables</h2>
+  <table>
+    <tr><th>Variable</th><th>Used by</th><th>Value / notes</th></tr>
+    <tr><td><code>ICA_API_KEY</code></td><td>FastAPI <code>IcaClient</code></td><td>Bearer token for all ICA requests</td></tr>
+    <tr><td><code>ICA_URL</code></td><td>FastAPI <code>IcaClient</code></td><td><code>https://api.servicesessentials.ibm.com/v1</code></td></tr>
+    <tr><td><code>ICA_ASSISTANT</code></td><td>FastAPI <code>GET /ica/chat</code> fallback</td><td>Default assistant name or UUID for generic chat</td></tr>
+    <tr><td><code>ICA_MODEL_ID</code></td><td><em>Legacy / not read by FastAPI</em></td><td>Was <code>ICA_MODEL</code>. Ignored by the app (<code>extra="ignore"</code> in Settings). Can be removed or kept for CLI scripts.</td></tr>
+  </table>
+
+  
+  <h2>7. Request/Response Summary</h2>
+  <table>
+    <tr><th>Hop</th><th>Method</th><th>Endpoint</th><th>Request type</th><th>Response type</th></tr>
+    <tr>
+      <td>Client → App</td>
+      <td><span class="badge post">POST</span></td>
+      <td><code>/ica/explain</code></td>
+      <td>JSON <code>ExplainRequest</code></td>
+      <td>JSON <code>ExplainResponse</code></td>
+    </tr>
+    <tr>
+      <td>App → ICA (name lookup)</td>
+      <td><span class="badge get">GET</span></td>
+      <td><code>/assistants</code></td>
+      <td>— (no body)</td>
+      <td>JSON <code>{ "data": [{id, name, …}] }</code></td>
+    </tr>
+    <tr>
+      <td>App → ICA (chat)</td>
+      <td><span class="badge post">POST</span></td>
+      <td><code>/assistants/chat/completions</code></td>
+      <td>JSON <code>ChatCompletionRequest</code></td>
+      <td>JSON <code>ChatCompletionResponse</code></td>
+    </tr>
+    <tr>
+      <td>App → MongoDB</td>
+      <td>—</td>
+      <td><em>(to be wired)</em></td>
+      <td>BSON document (see §5)</td>
+      <td>Inserted ID</td></tr>
+  </table>
+
+  <footer>Made with IBM Bob</footer>
+</div>
+</body>
+</html>

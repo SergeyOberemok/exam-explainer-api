@@ -4,7 +4,14 @@ from typing import Annotated
 
 from bson import ObjectId
 from bson.errors import InvalidId
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, UploadFile
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Query,
+    UploadFile,
+)
 
 from claude_exam.api.batch import run_simplification_job
 from claude_exam.api.dependencies import (
@@ -16,8 +23,12 @@ from claude_exam.api.dependencies import (
 )
 from claude_exam.api.normalization import normalize_result
 from claude_exam.api.schemas import IcaModelId, ImportResult, SimplificationJob
+from claude_exam.api.security import require_api_key
 
-router = APIRouter(prefix="/examination", tags=["examination"])
+# Study/admin routes: they need the API key when one is configured.
+router = APIRouter(
+    prefix="/examination", tags=["examination"], dependencies=[Depends(require_api_key)]
+)
 
 
 @router.post("/import")

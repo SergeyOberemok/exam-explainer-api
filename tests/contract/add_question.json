@@ -1,0 +1,46 @@
+{
+  "item": {
+    "id": "65f0000000000000000000a1",
+    "simplified": false,
+    "section": "Tools and MCPs",
+    "assessment_type": "multiple-choice",
+    "question": "Which header carries the API key?",
+    "answers": [
+      {
+        "index": 0,
+        "text": "Authorization"
+      },
+      {
+        "index": 1,
+        "text": "x-api-key"
+      },
+      {
+        "index": 2,
+        "text": "X-Key"
+      }
+    ]
+  },
+  "simplified": [
+    {
+      "id": "65f0000000000000000000a1",
+      "simplified": true,
+      "section": "Tools and MCPs",
+      "assessment_type": "multiple-choice",
+      "question": "Where does the key go?",
+      "answers": [
+        {
+          "index": 0,
+          "text": "Authorization"
+        },
+        {
+          "index": 1,
+          "text": "x-api-key"
+        },
+        {
+          "index": 2,
+          "text": "X-Key"
+        }
+      ]
+    }
+  ]
+}

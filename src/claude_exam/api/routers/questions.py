@@ -1,9 +1,10 @@
-from fastapi import APIRouter, HTTPException
+import asyncio
+
+from fastapi import APIRouter, Depends, HTTPException
 
 from claude_exam.api.dependencies import (
     AsyncCollectionDep,
     AsyncSimplifiedCollectionDep,
-    ExaminationCollectionDep,
     IcaClientDep,
     PaginationDep,
     QuestionFiltersDep,
@@ -16,9 +17,13 @@ from claude_exam.api.schemas import (
     SimplifiedQuestion,
     SimplifyRequest,
 )
+from claude_exam.api.security import require_api_key
 from claude_exam.api.simplify import simplify_and_store
 
-router = APIRouter(prefix="/questions", tags=["questions"])
+# Returns the answer key and feedback, so it needs the API key when one is configured.
+router = APIRouter(
+    prefix="/questions", tags=["questions"], dependencies=[Depends(require_api_key)]
+)
 
 
 def to_summary(doc: dict) -> QuestionSummary:
@@ -44,8 +49,8 @@ def to_question(doc: dict) -> Question:
 
 
 @router.get("/")
-def list_questions(
-    collection: ExaminationCollectionDep,
+async def list_questions(
+    collection: AsyncCollectionDep,
     pagination: PaginationDep,
     filters: QuestionFiltersDep,
 ) -> QuestionPage:
@@ -56,19 +61,20 @@ def list_questions(
         .skip(pagination.offset)
         .limit(pagination.limit)
     )
+    docs, total = await asyncio.gather(cursor.to_list(), collection.count_documents(query))
     return QuestionPage(
-        items=[to_summary(doc) for doc in cursor],
-        total=collection.count_documents(query),
+        items=[to_summary(doc) for doc in docs],
+        total=total,
         offset=pagination.offset,
         limit=pagination.limit,
     )
 
 
 @router.get("/{question_id}")
-def get_question(
-    object_id: QuestionObjectIdDep, collection: ExaminationCollectionDep
+async def get_question(
+    object_id: QuestionObjectIdDep, collection: AsyncCollectionDep
 ) -> Question:
-    doc = collection.find_one({"_id": object_id})
+    doc = await collection.find_one({"_id": object_id})
     if doc is None:
         raise HTTPException(status_code=404, detail="question not found")
     return to_question(doc)

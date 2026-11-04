@@ -1,0 +1,28 @@
+{
+  "batch_index": 1,
+  "items": [
+    {
+      "id": "65f0000000000000000000a3",
+      "simplified": false,
+      "section": "Tools and MCPs",
+      "assessment_type": "multiple-choice",
+      "question": "Which <tag> is literal?",
+      "answers": [
+        {
+          "index": 0,
+          "text": "<example>"
+        },
+        {
+          "index": 1,
+          "text": "<b>"
+        },
+        {
+          "index": 2,
+          "text": "none"
+        }
+      ]
+    }
+  ],
+  "simplified": [],
+  "remaining": 0
+}

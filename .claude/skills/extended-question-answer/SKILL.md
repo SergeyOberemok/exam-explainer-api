@@ -5,7 +5,7 @@ description: Use when the user asks a question about Claude Code, the Claude Age
 
 # Extended Question Answer Lookup
 
-Questions live in the MongoDB `examination` collection and are searched through the API's `GET /search/questions` endpoint (the old Obsidian `Questions/` cards are no longer used).
+Questions live in the MongoDB `examination` collection and are searched through the API's `GET /v1/search/questions` endpoint (the old Obsidian `Questions/` cards are no longer used).
 
 This skill surfaces the **whole question record** verbatim, in contrast to `short-question-answer` (answer only) and `vault-tutor` (freeform rephrasing/elaboration).
 
@@ -14,7 +14,7 @@ This skill surfaces the **whole question record** verbatim, in contrast to `shor
 1. Take the user's question (their own phrasing, a pasted question, or a topic they mention).
 2. Query the search endpoint (the API must be running, `fastapi dev`; default `http://localhost:8000`), passing the user's wording verbatim:
    ```
-   curl -sG "http://localhost:8000/search/questions" --data-urlencode "q=<user's question or topic, verbatim>" --data-urlencode "limit=5"
+   curl -sG "http://localhost:8000/v1/search/questions" --data-urlencode "q=<user's question or topic, verbatim>" --data-urlencode "limit=5"
    ```
    Each item in `items` (highest `score` first) already carries `id`, `score`, `section`, `assessment_type`, `question`, `answers`, `correct_answers`, and `explanation`, so no second call is needed. Optional filters: `section`, `assessment_type`.
 3. If exactly one item is clearly the best match (a large score gap over the next item, or only one item at all), use it. If several are close in score, prefer the one whose `question` most directly corresponds to what the user asked — only ask the user to disambiguate if genuinely tied between distinct topics.

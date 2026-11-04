@@ -1,6 +1,6 @@
 import json
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
 from claude_exam.api.config import get_settings
 from claude_exam.api.dependencies import IcaClientDep
@@ -12,10 +12,14 @@ from claude_exam.api.schemas import (
     IcaChatRequest,
     IcaChatResponse,
 )
+from claude_exam.api.security import require_api_key
 from claude_exam.api.simplify import simplify_item
-from claude_exam.vault_scan import REPO_ROOT
+from claude_exam.paths import REPO_ROOT
 
-router = APIRouter(prefix="/ica", tags=["ica"])
+# Study/admin routes: they need the API key when one is configured.
+router = APIRouter(
+    prefix="/ica", tags=["ica"], dependencies=[Depends(require_api_key)]
+)
 
 _PRACTICE_EXAM_FILE = REPO_ROOT / "public" / "claude-certified-architect-practice-1.json"
 

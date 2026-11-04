@@ -56,11 +56,12 @@ class QuestionPage(BaseModel):
 
 # Game models are flat and null-free so Unity's JsonUtility can parse them. Nothing a
 # game client can read says which answer is correct: it learns that, with the
-# feedback and explanation, only by answering inside a round (`/game/rounds`).
+# feedback and explanation, only by answering inside a round (`/v1/game/rounds`).
 
 # Examination ids are ObjectId hex strings; the pattern also keeps them safe to use
 # as keys in a round document's field paths.
-GameQuestionId = Annotated[str, Field(pattern=r"^[0-9a-f]{24}$")]
+OBJECT_ID_PATTERN = r"^[0-9a-f]{24}$"
+GameQuestionId = Annotated[str, Field(pattern=OBJECT_ID_PATTERN)]
 
 
 class GameAnswer(BaseModel):
@@ -87,11 +88,14 @@ class GameQuestionList(BaseModel):
     total: int
 
 
+GameBatchSize = Annotated[int, Field(ge=1, le=50)]
+
+
 class GameRoundRequest(BaseModel):
-    count: int = Field(10, ge=1, le=50)
+    count: GameBatchSize = 10
     # Empty means any: JsonUtility writes "" for an unset string, never null.
-    section: str = Field("", max_length=200)
-    assessment_type: str = Field("", max_length=100)
+    section: str = Field(default="", max_length=200)
+    assessment_type: str = Field(default="", max_length=100)
 
 
 class GameRound(BaseModel):
@@ -103,6 +107,26 @@ class GameRound(BaseModel):
     # Playable questions matching the filters.
     total: int
     fifty_fifty_charges: int
+
+
+class GameRoundBatchRequest(BaseModel):
+    """Ask for the round's next batch. `batch_index` is the batch wanted (the start is batch 0,
+    so the first call sends 1); sending the same index again returns that batch again."""
+
+    batch_index: int = Field(ge=1)
+    count: GameBatchSize = 10
+
+
+class GameRoundBatch(BaseModel):
+    """More questions for the same round, none of them already in it. Empty `items` means
+    every playable question matching the round's filters is already in the round."""
+
+    batch_index: int
+    items: list[GameQuestion]
+    # Simplified versions of `items` that have one, matched by `id`.
+    simplified: list[GameQuestion]
+    # Playable questions matching the round's filters that are not in the round yet.
+    remaining: int
 
 
 class GameAnswerRequest(BaseModel):

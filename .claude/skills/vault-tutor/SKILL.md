@@ -5,13 +5,13 @@ description: Use when the user has a confusing question/answer from Questions/ a
 
 # Vault Tutor
 
-Questions live in the MongoDB `examination` collection and are searched through the API's `GET /search/questions` endpoint (the old Obsidian `Questions/` cards are no longer used). This skill is the tutoring layer on top: it fetches a question's real content from the API, then reasons about it in your own words — the deliberate contrast to `short-question-answer` and `extended-question-answer`, which only ever return verbatim text.
+Questions live in the MongoDB `examination` collection and are searched through the API's `GET /v1/search/questions` endpoint (the old Obsidian `Questions/` cards are no longer used). This skill is the tutoring layer on top: it fetches a question's real content from the API, then reasons about it in your own words — the deliberate contrast to `short-question-answer` and `extended-question-answer`, which only ever return verbatim text.
 
 ## What to do
 
 1. **Identify the target question.** If a question was already surfaced earlier in this conversation (by this skill or one of the other two lookup skills), reuse it. Otherwise query the API (it must be running, `fastapi dev`; default `http://localhost:8000`) with the user's own wording:
    ```
-   curl -sG "http://localhost:8000/search/questions" --data-urlencode "q=<user's wording>" --data-urlencode "limit=5"
+   curl -sG "http://localhost:8000/v1/search/questions" --data-urlencode "q=<user's wording>" --data-urlencode "limit=5"
    ```
    Pick the best match using the same heuristic as the other lookup skills: a clear `score` gap (or a single item) means take it; only disambiguate with the user if genuinely tied between distinct topics; if `items` is empty, say so plainly rather than inventing an explanation. If the request fails to connect, tell the user the API isn't running.
 2. **Use the returned detail.** Each item already has `question`, `answers`, `correct_answers`, and `explanation`; no second call is needed.

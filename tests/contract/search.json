@@ -1,0 +1,72 @@
+{
+  "items": [
+    {
+      "id": "65f0000000000000000000a1",
+      "simplified": false,
+      "section": "Tools and MCPs",
+      "assessment_type": "multiple-choice",
+      "question": "Which header carries the API key?",
+      "answers": [
+        {
+          "index": 0,
+          "text": "Authorization"
+        },
+        {
+          "index": 1,
+          "text": "x-api-key"
+        },
+        {
+          "index": 2,
+          "text": "X-Key"
+        }
+      ]
+    },
+    {
+      "id": "65f0000000000000000000a2",
+      "simplified": false,
+      "section": "Tools and MCPs",
+      "assessment_type": "multiple-choice",
+      "question": "What caches prompts?",
+      "answers": [
+        {
+          "index": 0,
+          "text": "cache_control"
+        },
+        {
+          "index": 1,
+          "text": "retries"
+        },
+        {
+          "index": 2,
+          "text": "batches"
+        },
+        {
+          "index": 3,
+          "text": "tools"
+        }
+      ]
+    },
+    {
+      "id": "65f0000000000000000000a3",
+      "simplified": false,
+      "section": "Tools and MCPs",
+      "assessment_type": "multiple-choice",
+      "question": "Which <tag> is literal?",
+      "answers": [
+        {
+          "index": 0,
+          "text": "<example>"
+        },
+        {
+          "index": 1,
+          "text": "<b>"
+        },
+        {
+          "index": 2,
+          "text": "none"
+        }
+      ]
+    }
+  ],
+  "total": 3
+}

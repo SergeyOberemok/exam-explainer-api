@@ -5,19 +5,19 @@ from typing import Annotated
 
 from bson import ObjectId
 from bson.errors import InvalidId
-from fastapi import Depends, HTTPException, Query, Request
+from fastapi import Depends, Query, Request
 from pymongo import AsyncMongoClient
 from pymongo.asynchronous.collection import AsyncCollection
-from pymongo.collection import Collection
 
+from claude_exam.api.game.errors import (
+    QuestionNotFound,
+    RoundNotFound,
+    SimplifiedNotFound,
+)
+from claude_exam.api.game.repository import QuestionRepository, RoundRepository
+from claude_exam.api.game.service import GameService
 from claude_exam.api.ica import IcaClient
-
-
-def get_examination_collection(request: Request) -> Collection:
-    return request.app.state.mongo_client.get_default_database()["examination"]
-
-
-ExaminationCollectionDep = Annotated[Collection, Depends(get_examination_collection)]
+from claude_exam.api.schemas import OBJECT_ID_PATTERN
 
 
 def get_ica_client(request: Request) -> IcaClient:
@@ -28,7 +28,7 @@ IcaClientDep = Annotated[IcaClient, Depends(get_ica_client)]
 
 
 def get_async_collection(request: Request) -> AsyncCollection:
-    """Async PyMongo collection — use this in new async routes instead of ExaminationCollectionDep."""
+    """The `examination` collection (the question bank)."""
     client: AsyncMongoClient = request.app.state.async_mongo_client
     return client.get_default_database()["examination"]
 
@@ -86,7 +86,7 @@ def get_question_object_id(question_id: str) -> ObjectId:
     try:
         return ObjectId(question_id)
     except InvalidId as exc:
-        raise HTTPException(status_code=404, detail="question not found") from exc
+        raise QuestionNotFound() from exc
 
 
 QuestionObjectIdDep = Annotated[ObjectId, Depends(get_question_object_id)]
@@ -97,10 +97,35 @@ def get_round_object_id(round_id: str) -> ObjectId:
     try:
         return ObjectId(round_id)
     except InvalidId as exc:
-        raise HTTPException(status_code=404, detail="round not found") from exc
+        raise RoundNotFound() from exc
 
 
 RoundObjectIdDep = Annotated[ObjectId, Depends(get_round_object_id)]
+
+
+def get_game_service(
+    examination: AsyncCollectionDep,
+    simplified: AsyncSimplifiedCollectionDep,
+    rounds: AsyncRoundsCollectionDep,
+) -> GameService:
+    return GameService(QuestionRepository(examination, simplified), RoundRepository(rounds))
+
+
+GameServiceDep = Annotated[GameService, Depends(get_game_service)]
+
+
+_OBJECT_ID_HEX = re.compile(OBJECT_ID_PATTERN)
+
+
+def get_simplified_question_id(question_id: str) -> str:
+    """Path `question_id` of a simplified question (stored as a string); a malformed id is a
+    404 like an unknown one."""
+    if not _OBJECT_ID_HEX.match(question_id):
+        raise SimplifiedNotFound()
+    return question_id
+
+
+SimplifiedQuestionIdDep = Annotated[str, Depends(get_simplified_question_id)]
 
 
 @dataclass

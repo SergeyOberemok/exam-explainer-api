@@ -87,7 +87,7 @@ def test_to_hit_ignores_bad_letters_and_keeps_multiple():
 def test_search_returns_items():
     client, fake = client_with([doc()])
     r = client.get(
-        "/search/questions", params={"q": "prompt caching", "section": "Tools"}
+        "/v1/search/questions", params={"q": "prompt caching", "section": "Tools"}
     )
     assert r.status_code == 200
     body = r.json()
@@ -99,17 +99,17 @@ def test_search_returns_items():
 
 def test_search_empty():
     client, _ = client_with([])
-    r = client.get("/search/questions", params={"q": "nothing here"})
+    r = client.get("/v1/search/questions", params={"q": "nothing here"})
     assert r.status_code == 200
     assert r.json() == {"items": [], "total": 0}
 
 
 def test_search_validates_params():
     client, _ = client_with([])
-    assert client.get("/search/questions", params={"q": "a"}).status_code == 422
-    assert client.get("/search/questions").status_code == 422
+    assert client.get("/v1/search/questions", params={"q": "a"}).status_code == 422
+    assert client.get("/v1/search/questions").status_code == 422
     assert (
-        client.get("/search/questions", params={"q": "ok", "limit": 51}).status_code
+        client.get("/v1/search/questions", params={"q": "ok", "limit": 51}).status_code
         == 422
     )
 
@@ -117,7 +117,7 @@ def test_search_validates_params():
 def test_game_search_has_no_answer_key_and_only_playable():
     good, multi = doc(), doc(correct_response=["a", "b"])
     client, fake = client_with([good, multi])
-    r = client.get("/search/game-questions", params={"q": "caching", "limit": 3})
+    r = client.get("/v1/search/game-questions", params={"q": "caching", "limit": 3})
     assert r.status_code == 200
     body = r.json()
     assert body["total"] == 1 and body["items"][0]["id"] == str(good["_id"])
@@ -129,5 +129,5 @@ def test_game_search_has_no_answer_key_and_only_playable():
 
 def test_game_search_validates_params():
     client, _ = client_with([])
-    assert client.get("/search/game-questions", params={"q": "a"}).status_code == 422
-    assert client.get("/search/game-questions", params={"q": "ok", "limit": 0}).status_code == 422
+    assert client.get("/v1/search/game-questions", params={"q": "a"}).status_code == 422
+    assert client.get("/v1/search/game-questions", params={"q": "ok", "limit": 0}).status_code == 422

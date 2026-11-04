@@ -1,0 +1,23 @@
+{
+  "question_id": "65f0000000000000000000a1",
+  "answer_index": 1,
+  "is_correct": true,
+  "correct_index": 1,
+  "original": {
+    "explanation": "Why: Which header carries the API key?",
+    "feedbacks": [
+      "Feedback for Authorization.",
+      "Feedback for x-api-key.",
+      "Feedback for X-Key."
+    ]
+  },
+  "has_simplified": true,
+  "simplified": {
+    "explanation": "Simply put: x-api-key.",
+    "feedbacks": [
+      "Feedback for Authorization.",
+      "Feedback for x-api-key.",
+      "Feedback for X-Key."
+    ]
+  }
+}

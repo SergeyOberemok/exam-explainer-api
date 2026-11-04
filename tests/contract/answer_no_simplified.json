@@ -1,0 +1,20 @@
+{
+  "question_id": "65f0000000000000000000a2",
+  "answer_index": 0,
+  "is_correct": true,
+  "correct_index": 0,
+  "original": {
+    "explanation": "Why: What caches prompts?",
+    "feedbacks": [
+      "Feedback for cache_control.",
+      "Feedback for retries.",
+      "Feedback for batches.",
+      "Feedback for tools."
+    ]
+  },
+  "has_simplified": false,
+  "simplified": {
+    "explanation": "",
+    "feedbacks": []
+  }
+}

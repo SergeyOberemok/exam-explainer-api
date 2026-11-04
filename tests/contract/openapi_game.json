@@ -1,0 +1,1126 @@
+{
+  "paths": {
+    "/v1/game/questions": {
+      "get": {
+        "description": "A batch of playable questions (random by default), without answer keys. To play,\nstart a round.",
+        "operationId": "list_game_questions_v1_game_questions_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "count",
+            "required": false,
+            "schema": {
+              "default": 10,
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Count",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "section",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Section"
+            }
+          },
+          {
+            "in": "query",
+            "name": "assessment_type",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 100,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Assessment Type"
+            }
+          },
+          {
+            "in": "query",
+            "name": "shuffle",
+            "required": false,
+            "schema": {
+              "default": true,
+              "title": "Shuffle",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GameQuestionList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Game Questions",
+        "tags": [
+          "game"
+        ]
+      }
+    },
+    "/v1/game/questions/{question_id}": {
+      "get": {
+        "operationId": "get_game_question_v1_game_questions__question_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "question_id",
+            "required": true,
+            "schema": {
+              "title": "Question Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GameQuestion"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Game Question",
+        "tags": [
+          "game"
+        ]
+      }
+    },
+    "/v1/game/rounds": {
+      "post": {
+        "description": "Start a round: random playable questions and their simplified versions, in one\nresponse. The answer key stays in the round document. 404 `no_questions` when nothing\nmatches the filters.",
+        "operationId": "create_game_round_v1_game_rounds_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GameRoundRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GameRound"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Game Round",
+        "tags": [
+          "game"
+        ]
+      }
+    },
+    "/v1/game/rounds/{round_id}/answers": {
+      "post": {
+        "description": "Answer one question of a round, once; sending the same answer again repeats the\nresult. A different answer is 409 `already_answered`: read the recorded one with\n`GET /rounds/{round_id}/answers/{question_id}`.",
+        "operationId": "answer_game_round_question_v1_game_rounds__round_id__answers_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "round_id",
+            "required": true,
+            "schema": {
+              "title": "Round Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GameAnswerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GameAnswerResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Answer Game Round Question",
+        "tags": [
+          "game"
+        ]
+      }
+    },
+    "/v1/game/rounds/{round_id}/answers/{question_id}": {
+      "get": {
+        "description": "The answer the round recorded for a question, e.g. when the answer's response was\nlost and the player then picked another card. 404 `question_not_answered` if none.",
+        "operationId": "get_game_round_answer_v1_game_rounds__round_id__answers__question_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "question_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{24}$",
+              "title": "Question Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "round_id",
+            "required": true,
+            "schema": {
+              "title": "Round Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GameAnswerResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Game Round Answer",
+        "tags": [
+          "game"
+        ]
+      }
+    },
+    "/v1/game/rounds/{round_id}/batches": {
+      "post": {
+        "description": "The round's next questions, none already in it (searched ones included), so a round\ngoes on without repeats until the pool runs out (empty `items`). Request batches in\norder; asking for an existing batch again returns it (a retry after a lost response).",
+        "operationId": "next_game_round_batch_v1_game_rounds__round_id__batches_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "round_id",
+            "required": true,
+            "schema": {
+              "title": "Round Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GameRoundBatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GameRoundBatch"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Next Game Round Batch",
+        "tags": [
+          "game"
+        ]
+      }
+    },
+    "/v1/game/rounds/{round_id}/fifty-fifty": {
+      "post": {
+        "description": "Remove two random wrong answers from an unanswered question of the round. Once per\nquestion (asking again repeats the result), and the round has `fifty_fifty_charges` uses.",
+        "operationId": "use_game_round_fifty_fifty_v1_game_rounds__round_id__fifty_fifty_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "round_id",
+            "required": true,
+            "schema": {
+              "title": "Round Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GameFiftyFiftyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GameFiftyFiftyResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Use Game Round Fifty Fifty",
+        "tags": [
+          "game"
+        ]
+      }
+    },
+    "/v1/game/rounds/{round_id}/questions": {
+      "post": {
+        "description": "Add one question (e.g. a search result) to a round, so it can be answered there.\nAdding a question the round already has changes nothing and returns it again.\nLike the round itself, the response carries no answer key.",
+        "operationId": "add_game_round_question_v1_game_rounds__round_id__questions_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "round_id",
+            "required": true,
+            "schema": {
+              "title": "Round Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GameRoundQuestionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GameRoundQuestion"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Add Game Round Question",
+        "tags": [
+          "game"
+        ]
+      }
+    },
+    "/v1/game/sections": {
+      "get": {
+        "description": "Distinct sections, so the game can offer a category choice. With\n`simplified=true` only sections that have simplified questions.",
+        "operationId": "list_game_sections_v1_game_sections_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "simplified",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "Simplified",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GameSectionList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Game Sections",
+        "tags": [
+          "game"
+        ]
+      }
+    },
+    "/v1/game/simplified-questions": {
+      "get": {
+        "description": "A batch of plain-language questions (only those already simplified and playable).",
+        "operationId": "list_simplified_game_questions_v1_game_simplified_questions_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "count",
+            "required": false,
+            "schema": {
+              "default": 10,
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Count",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "section",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Section"
+            }
+          },
+          {
+            "in": "query",
+            "name": "assessment_type",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 100,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Assessment Type"
+            }
+          },
+          {
+            "in": "query",
+            "name": "shuffle",
+            "required": false,
+            "schema": {
+              "default": true,
+              "title": "Shuffle",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GameQuestionList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Simplified Game Questions",
+        "tags": [
+          "game"
+        ]
+      }
+    },
+    "/v1/game/simplified-questions/{question_id}": {
+      "get": {
+        "description": "Simplified version of one question; `question_id` is the id `/v1/game/questions` returned.",
+        "operationId": "get_simplified_game_question_v1_game_simplified_questions__question_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "question_id",
+            "required": true,
+            "schema": {
+              "title": "Question Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GameQuestion"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Simplified Game Question",
+        "tags": [
+          "game"
+        ]
+      }
+    },
+    "/v1/search/game-questions": {
+      "get": {
+        "description": "Playable questions matching `q`, best first, without their answer key. To play one,\nadd it to a round with `POST /v1/game/rounds/{round_id}/questions`.",
+        "operationId": "search_game_v1_search_game_questions_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "q",
+            "required": true,
+            "schema": {
+              "maxLength": 200,
+              "minLength": 2,
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "section",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Section",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "assessment_type",
+            "required": false,
+            "schema": {
+              "default": "",
+              "title": "Assessment Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 5,
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GameQuestionList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Search Game",
+        "tags": [
+          "search"
+        ]
+      }
+    }
+  },
+  "schemas": {
+    "GameAnswer": {
+      "description": "One answer option, without whether it is correct.",
+      "properties": {
+        "index": {
+          "title": "Index",
+          "type": "integer"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "index",
+        "text"
+      ],
+      "title": "GameAnswer",
+      "type": "object"
+    },
+    "GameAnswerRequest": {
+      "properties": {
+        "answer_index": {
+          "minimum": 0.0,
+          "title": "Answer Index",
+          "type": "integer"
+        },
+        "question_id": {
+          "pattern": "^[0-9a-f]{24}$",
+          "title": "Question Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "question_id",
+        "answer_index"
+      ],
+      "title": "GameAnswerRequest",
+      "type": "object"
+    },
+    "GameAnswerResult": {
+      "properties": {
+        "answer_index": {
+          "title": "Answer Index",
+          "type": "integer"
+        },
+        "correct_index": {
+          "title": "Correct Index",
+          "type": "integer"
+        },
+        "has_simplified": {
+          "title": "Has Simplified",
+          "type": "boolean"
+        },
+        "is_correct": {
+          "title": "Is Correct",
+          "type": "boolean"
+        },
+        "original": {
+          "$ref": "#/components/schemas/GameReview"
+        },
+        "question_id": {
+          "title": "Question Id",
+          "type": "string"
+        },
+        "simplified": {
+          "$ref": "#/components/schemas/GameReview"
+        }
+      },
+      "required": [
+        "question_id",
+        "answer_index",
+        "is_correct",
+        "correct_index",
+        "original",
+        "has_simplified",
+        "simplified"
+      ],
+      "title": "GameAnswerResult",
+      "type": "object"
+    },
+    "GameFiftyFiftyRequest": {
+      "properties": {
+        "question_id": {
+          "pattern": "^[0-9a-f]{24}$",
+          "title": "Question Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "question_id"
+      ],
+      "title": "GameFiftyFiftyRequest",
+      "type": "object"
+    },
+    "GameFiftyFiftyResult": {
+      "properties": {
+        "eliminated_indices": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Eliminated Indices",
+          "type": "array"
+        },
+        "fifty_fifty_remaining": {
+          "title": "Fifty Fifty Remaining",
+          "type": "integer"
+        },
+        "question_id": {
+          "title": "Question Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "question_id",
+        "eliminated_indices",
+        "fifty_fifty_remaining"
+      ],
+      "title": "GameFiftyFiftyResult",
+      "type": "object"
+    },
+    "GameQuestion": {
+      "properties": {
+        "answers": {
+          "items": {
+            "$ref": "#/components/schemas/GameAnswer"
+          },
+          "title": "Answers",
+          "type": "array"
+        },
+        "assessment_type": {
+          "title": "Assessment Type",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "question": {
+          "title": "Question",
+          "type": "string"
+        },
+        "section": {
+          "title": "Section",
+          "type": "string"
+        },
+        "simplified": {
+          "default": false,
+          "title": "Simplified",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "section",
+        "assessment_type",
+        "question",
+        "answers"
+      ],
+      "title": "GameQuestion",
+      "type": "object"
+    },
+    "GameQuestionList": {
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/components/schemas/GameQuestion"
+          },
+          "title": "Items",
+          "type": "array"
+        },
+        "total": {
+          "title": "Total",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "items",
+        "total"
+      ],
+      "title": "GameQuestionList",
+      "type": "object"
+    },
+    "GameReview": {
+      "description": "What one version of a question shows once it is answered.",
+      "properties": {
+        "explanation": {
+          "default": "",
+          "title": "Explanation",
+          "type": "string"
+        },
+        "feedbacks": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Feedbacks",
+          "type": "array"
+        }
+      },
+      "title": "GameReview",
+      "type": "object"
+    },
+    "GameRound": {
+      "properties": {
+        "fifty_fifty_charges": {
+          "title": "Fifty Fifty Charges",
+          "type": "integer"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/components/schemas/GameQuestion"
+          },
+          "title": "Items",
+          "type": "array"
+        },
+        "round_id": {
+          "title": "Round Id",
+          "type": "string"
+        },
+        "simplified": {
+          "items": {
+            "$ref": "#/components/schemas/GameQuestion"
+          },
+          "title": "Simplified",
+          "type": "array"
+        },
+        "total": {
+          "title": "Total",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "round_id",
+        "items",
+        "simplified",
+        "total",
+        "fifty_fifty_charges"
+      ],
+      "title": "GameRound",
+      "type": "object"
+    },
+    "GameRoundBatch": {
+      "description": "More questions for the same round, none of them already in it. Empty `items` means\nevery playable question matching the round's filters is already in the round.",
+      "properties": {
+        "batch_index": {
+          "title": "Batch Index",
+          "type": "integer"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/components/schemas/GameQuestion"
+          },
+          "title": "Items",
+          "type": "array"
+        },
+        "remaining": {
+          "title": "Remaining",
+          "type": "integer"
+        },
+        "simplified": {
+          "items": {
+            "$ref": "#/components/schemas/GameQuestion"
+          },
+          "title": "Simplified",
+          "type": "array"
+        }
+      },
+      "required": [
+        "batch_index",
+        "items",
+        "simplified",
+        "remaining"
+      ],
+      "title": "GameRoundBatch",
+      "type": "object"
+    },
+    "GameRoundBatchRequest": {
+      "description": "Ask for the round's next batch. `batch_index` is the batch wanted (the start is batch 0,\nso the first call sends 1); sending the same index again returns that batch again.",
+      "properties": {
+        "batch_index": {
+          "minimum": 1.0,
+          "title": "Batch Index",
+          "type": "integer"
+        },
+        "count": {
+          "default": 10,
+          "maximum": 50.0,
+          "minimum": 1.0,
+          "title": "Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "batch_index"
+      ],
+      "title": "GameRoundBatchRequest",
+      "type": "object"
+    },
+    "GameRoundQuestion": {
+      "description": "A question added to a round, without its answer key.",
+      "properties": {
+        "item": {
+          "$ref": "#/components/schemas/GameQuestion"
+        },
+        "simplified": {
+          "items": {
+            "$ref": "#/components/schemas/GameQuestion"
+          },
+          "title": "Simplified",
+          "type": "array"
+        }
+      },
+      "required": [
+        "item",
+        "simplified"
+      ],
+      "title": "GameRoundQuestion",
+      "type": "object"
+    },
+    "GameRoundQuestionRequest": {
+      "properties": {
+        "question_id": {
+          "pattern": "^[0-9a-f]{24}$",
+          "title": "Question Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "question_id"
+      ],
+      "title": "GameRoundQuestionRequest",
+      "type": "object"
+    },
+    "GameRoundRequest": {
+      "properties": {
+        "assessment_type": {
+          "default": "",
+          "maxLength": 100,
+          "title": "Assessment Type",
+          "type": "string"
+        },
+        "count": {
+          "default": 10,
+          "maximum": 50.0,
+          "minimum": 1.0,
+          "title": "Count",
+          "type": "integer"
+        },
+        "section": {
+          "default": "",
+          "maxLength": 200,
+          "title": "Section",
+          "type": "string"
+        }
+      },
+      "title": "GameRoundRequest",
+      "type": "object"
+    },
+    "GameSectionList": {
+      "properties": {
+        "items": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Items",
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "title": "GameSectionList",
+      "type": "object"
+    },
+    "HTTPValidationError": {
+      "properties": {
+        "detail": {
+          "items": {
+            "$ref": "#/components/schemas/ValidationError"
+          },
+          "title": "Detail",
+          "type": "array"
+        }
+      },
+      "title": "HTTPValidationError",
+      "type": "object"
+    },
+    "ValidationError": {
+      "properties": {
+        "ctx": {
+          "title": "Context",
+          "type": "object"
+        },
+        "input": {
+          "title": "Input"
+        },
+        "loc": {
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ]
+          },
+          "title": "Location",
+          "type": "array"
+        },
+        "msg": {
+          "title": "Message",
+          "type": "string"
+        },
+        "type": {
+          "title": "Error Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "loc",
+        "msg",
+        "type"
+      ],
+      "title": "ValidationError",
+      "type": "object"
+    }
+  }
+}

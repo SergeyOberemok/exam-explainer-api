@@ -1,6 +1,6 @@
 from pymongo.asynchronous.collection import AsyncCollection
 
-from claude_exam.api.routers.game import (
+from claude_exam.api.game.domain import (
     PLAYABLE_QUERY,
     answers_of,
     correct_indices,

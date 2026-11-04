@@ -5,7 +5,8 @@ from datetime import date
 from pathlib import Path
 from urllib.parse import quote
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+from claude_exam.paths import REPO_ROOT
+
 QUESTIONS_DIR = REPO_ROOT / "Questions"
 VAULT_NAME = REPO_ROOT.name
 

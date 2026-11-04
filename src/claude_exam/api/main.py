@@ -14,6 +14,12 @@ from claude_exam.api.routers.game import ROUND_TTL_SECONDS
 from claude_exam.api.routers.game import router as game_router
 from claude_exam.api.routers.ica import router as ica_router
 from claude_exam.api.routers.questions import router as questions_router
+from claude_exam.api.routers.search import router as search_router
+from claude_exam.api.search import (
+    TEXT_INDEX_KEYS,
+    TEXT_INDEX_NAME,
+    TEXT_INDEX_WEIGHTS,
+)
 
 
 @asynccontextmanager
@@ -34,6 +40,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     db = async_mongo_client.get_default_database()
     for name in ("examination", "examination_simplified"):
         await db[name].create_index([("section", 1), ("assessment_type", 1)])
+    # Weighted text index behind /search/questions (a collection allows only one).
+    await db["examination"].create_index(
+        TEXT_INDEX_KEYS,
+        name=TEXT_INDEX_NAME,
+        weights=TEXT_INDEX_WEIGHTS,
+        default_language="english",
+    )
     # Rounds are only needed while a game is played; Mongo drops them after a day.
     await db["game_rounds"].create_index(
         "created_at", expireAfterSeconds=ROUND_TTL_SECONDS
@@ -67,3 +80,4 @@ app.include_router(examination_router)
 app.include_router(game_router)
 app.include_router(ica_router)
 app.include_router(questions_router)
+app.include_router(search_router)

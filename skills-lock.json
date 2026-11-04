@@ -5,7 +5,7 @@
       "source": "fastapi/fastapi",
       "sourceType": "github",
       "skillPath": "fastapi/.agents/skills/fastapi/SKILL.md",
-      "computedHash": "d56d37ade7abbede852aef02728e3e228c82f7ccce464ef1f889456a64fffb86"
+      "computedHash": "ff680b56037089d5f4cb399af70b0f9efd3d332887be464db11864b14eb3ad93"
     }
   }
 }

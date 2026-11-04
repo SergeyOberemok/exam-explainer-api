@@ -27,6 +27,26 @@ class Question(QuestionSummary):
     related_lectures: list[Any]
 
 
+# Question search. Unlike the /game models, these DO carry the answer key: they back
+# the study skills (look up the answer / explanation for a question), not the game.
+class SearchHit(BaseModel):
+    id: str
+    # MongoDB textScore; higher is a better match.
+    score: float
+    section: str
+    assessment_type: str
+    question: str
+    answers: list[str]
+    # Text of the correct answer(s), resolved from `correct_response` letters.
+    correct_answers: list[str]
+    explanation: str
+
+
+class SearchResponse(BaseModel):
+    items: list[SearchHit]
+    total: int
+
+
 class QuestionPage(BaseModel):
     items: list[QuestionSummary]
     total: int

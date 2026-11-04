@@ -82,6 +82,16 @@ The `/questions` routes still return `correct_response` and feedback unauthentic
 
 Tests (`tests/test_game.py`, run with `uv run --with pytest pytest`) override the collection dependencies with in-memory fakes; `FakeRounds` implements just the Mongo operators the round routes use.
 
+## Question search API (`/search`)
+
+`GET /search/questions?q=&section=&assessment_type=&limit=5` (`src/claude_exam/api/routers/search.py` → service `src/claude_exam/api/search.py` → MongoDB `examination`) replaces the Obsidian card search for the lookup skills. It runs a `$text` query against a weighted text index (`examination_text`, created in the app `lifespan`: `prompt.question` 10, `section` 3, `prompt.explanation` 2, `prompt.answers` 1) and ranks by `{$meta: "textScore"}`. `q` is 2–200 chars, `limit` 1–50, empty `section`/`assessment_type` mean "any".
+
+Response is `{items: SearchHit[], total}`; `SearchHit` = `id, score, section, assessment_type, question, answers[], correct_answers[], explanation`. **It does return the answer key** (it backs the study skills), so keep it separate from `/game`, whose responses never reveal answers before answering. Like `/questions`, it is unauthenticated.
+
+Differences from the old card search: Mongo questions have no title or tags (so no title/tag bonuses), `$text` stems and drops stopwords but does not match partial words, and scores are not comparable to the old overlap scores. `short-question-answer`, `extended-question-answer` and `vault-tutor` now call this endpoint; `vault_scan.py`, `search_cards.py` and the `claude-exam-vault` MCP server remain in place but are unused by them until removed.
+
+Tests: `tests/test_search.py` (fake collection with chainable `find().sort().limit()`).
+
 ## Card-authoring skills
 
 These three skills retrofit or create cards under `Questions/` — distinct from the four read-oriented skills below, which only ever look cards up:

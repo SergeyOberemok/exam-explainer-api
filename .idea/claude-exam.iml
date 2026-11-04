@@ -5,7 +5,7 @@
       <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
     </content>
-    <orderEntry type="jdk" jdkName="~\localhost\certificates\claude-exam\.venv" jdkType="Python SDK" />
+    <orderEntry type="jdk" jdkName="~\localhost\exam-explainer\exam-explainer-api\.venv" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>

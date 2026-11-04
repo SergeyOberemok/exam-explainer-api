@@ -68,23 +68,19 @@ This wipes and rewrites `roadmap/` from scratch, so make structural edits in `ro
 
 `src/claude_exam/api/routers/game.py` serves the MongoDB `examination` collection to a Unity game (no auth, no CORS — native builds don't need it; WebGL would). Responses are flat, null-free objects with lists wrapped in `items`, because `JsonUtility` can't parse a top-level array or null.
 
-- `GET /game/questions?count=10&section=&assessment_type=&shuffle=true` → `{items: GameQuestion[], total}` (`count` 1–50)
-- `GET /game/questions/{id}` → `GameQuestion` (404 on bad/unknown id)
-- `GET /game/sections?simplified=false` → `{items: string[]}` (`simplified=true`: only sections with simplified questions)
-- `GET /game/simplified-questions?count=&section=&assessment_type=&shuffle=` → `{items: GameQuestion[], total}` from `examination_simplified` (only questions already simplified)
-- `GET /game/simplified-questions/{question_id}` → `GameQuestion` (404 if not simplified yet); `question_id` is the `id` from `/game/questions`
+**No `/game` response reveals the answer key before the question is answered.** The game plays rounds; the round document in `game_rounds` keeps the correct index, answer count and both versions' review per question, plus what has been answered and eliminated (TTL index on `created_at`: rounds expire after `ROUND_TTL_SECONDS`, a day).
 
-`GameQuestion` = `id, simplified, section, assessment_type, question, explanation, answers[{index,text,is_correct,feedback}], correct_indices[]`. Simplified questions keep the examination `id` and set `simplified: true`. The stored `correct_response` letters (`"a"`, `"b"`…) are converted to indices.
+- `POST /game/rounds {count=10, section="", assessment_type=""}` → 201 `{round_id, items: GameQuestion[], simplified: GameQuestion[], total, fifty_fifty_charges}`. Samples only playable questions (`is_playable`: 2..4 answers, exactly one valid correct letter) and includes a simplified version only if it keeps the answer count and the correct answer (`simplified_matches`). Empty strings mean "any", because `JsonUtility` writes `""` for unset strings.
+- `POST /game/rounds/{round_id}/answers {question_id, answer_index}` → `{question_id, answer_index, is_correct, correct_index, original: {explanation, feedbacks[]}, has_simplified, simplified}` (`simplified` is an empty review when there is none). One atomic `find_one_and_update`, so a question counts once. The same answer again repeats the result (a retry after a lost response); another answer is 409. Errors: 404 round not found / question not in this round, 422 index out of range / eliminated by 50/50.
+- `POST /game/rounds/{round_id}/fifty-fifty {question_id}` → `{question_id, eliminated_indices, fifty_fifty_remaining}`: two random wrong answers, once per unanswered question (asking again repeats the result), at most `FIFTY_FIFTY_CHARGES` (2) per round; 409 when answered, out of charges or too few answers.
+- `question_id` in request bodies must be a 24-char ObjectId hex string (`GameQuestionId`), which also keeps it safe as a key in the round document's field paths.
+- Browsing, without answer keys: `GET /game/questions?count=10&section=&assessment_type=&shuffle=true` → `{items: GameQuestion[], total}` (`count` 1–50), `GET /game/questions/{id}` (404 on bad/unknown id), `GET /game/simplified-questions?…`, `GET /game/simplified-questions/{question_id}` (404 "simplified question not found"), `GET /game/sections?simplified=false` → `{items: string[]}`.
 
-```csharp
-using (var req = UnityWebRequest.Get(baseUrl + "/game/questions?count=10"))
-{
-    req.SetRequestHeader("Accept", "application/json");
-    yield return req.SendWebRequest();
-    if (req.result != UnityWebRequest.Result.Success) { Debug.LogError(req.error); yield break; }
-    var list = JsonUtility.FromJson<GameQuestionList>(req.downloadHandler.text);
-}
-```
+`GameQuestion` = `id, simplified, section, assessment_type, question, answers[{index,text}]`. Simplified questions keep the examination `id` and set `simplified: true`. The stored `correct_response` letters (`"a"`, `"b"`…) are converted to indices on the server only.
+
+The `/questions` routes still return `correct_response` and feedback unauthenticated, so the answer key is only private if those routes aren't reachable by players (or get auth).
+
+Tests (`tests/test_game.py`, run with `uv run --with pytest pytest`) override the collection dependencies with in-memory fakes; `FakeRounds` implements just the Mongo operators the round routes use.
 
 ## Card-authoring skills
 

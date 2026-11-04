@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -34,14 +34,20 @@ class QuestionPage(BaseModel):
     limit: int
 
 
+# Game models are flat and null-free so Unity's JsonUtility can parse them. Nothing a
+# game client can read says which answer is correct: it learns that, with the
+# feedback and explanation, only by answering inside a round (`/game/rounds`).
+
+# Examination ids are ObjectId hex strings; the pattern also keeps them safe to use
+# as keys in a round document's field paths.
+GameQuestionId = Annotated[str, Field(pattern=r"^[0-9a-f]{24}$")]
+
+
 class GameAnswer(BaseModel):
-    """One answer option. Flat and null-free so Unity's JsonUtility can parse it."""
+    """One answer option, without whether it is correct."""
 
     index: int
     text: str
-    is_correct: bool
-    # Per-option explanation; empty string when the source has none.
-    feedback: str = ""
 
 
 class GameQuestion(BaseModel):
@@ -52,16 +58,65 @@ class GameQuestion(BaseModel):
     section: str
     assessment_type: str
     question: str
-    explanation: str
     answers: list[GameAnswer]
-    # Several entries for multi-select questions.
-    correct_indices: list[int]
 
 
 class GameQuestionList(BaseModel):
     # JsonUtility needs an object at the JSON root, so lists are wrapped.
     items: list[GameQuestion]
     total: int
+
+
+class GameRoundRequest(BaseModel):
+    count: int = Field(10, ge=1, le=50)
+    # Empty means any: JsonUtility writes "" for an unset string, never null.
+    section: str = Field("", max_length=200)
+    assessment_type: str = Field("", max_length=100)
+
+
+class GameRound(BaseModel):
+    round_id: str
+    # The round's questions, in play order.
+    items: list[GameQuestion]
+    # Simplified versions of the round's questions that have one, matched by `id`.
+    simplified: list[GameQuestion]
+    # Playable questions matching the filters.
+    total: int
+    fifty_fifty_charges: int
+
+
+class GameAnswerRequest(BaseModel):
+    question_id: GameQuestionId
+    answer_index: int = Field(ge=0)
+
+
+class GameReview(BaseModel):
+    """What one version of a question shows once it is answered."""
+
+    explanation: str = ""
+    # One per answer, index-aligned with the question's answers.
+    feedbacks: list[str] = []
+
+
+class GameAnswerResult(BaseModel):
+    question_id: str
+    answer_index: int
+    is_correct: bool
+    correct_index: int
+    original: GameReview
+    has_simplified: bool
+    # Empty when `has_simplified` is false.
+    simplified: GameReview
+
+
+class GameFiftyFiftyRequest(BaseModel):
+    question_id: GameQuestionId
+
+
+class GameFiftyFiftyResult(BaseModel):
+    question_id: str
+    eliminated_indices: list[int]
+    fifty_fifty_remaining: int
 
 
 class GameSectionList(BaseModel):

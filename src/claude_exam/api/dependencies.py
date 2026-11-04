@@ -46,6 +46,17 @@ AsyncSimplifiedCollectionDep = Annotated[
 ]
 
 
+def get_async_rounds_collection(request: Request) -> AsyncCollection:
+    """Game rounds: which questions a round holds and what has been answered."""
+    client: AsyncMongoClient = request.app.state.async_mongo_client
+    return client.get_default_database()["game_rounds"]
+
+
+AsyncRoundsCollectionDep = Annotated[
+    AsyncCollection, Depends(get_async_rounds_collection)
+]
+
+
 def get_async_mongo_client(request: Request) -> AsyncMongoClient:
     return request.app.state.async_mongo_client
 
@@ -79,6 +90,17 @@ def get_question_object_id(question_id: str) -> ObjectId:
 
 
 QuestionObjectIdDep = Annotated[ObjectId, Depends(get_question_object_id)]
+
+
+def get_round_object_id(round_id: str) -> ObjectId:
+    """Path `round_id` as an ObjectId; a malformed id is a 404, like an expired round."""
+    try:
+        return ObjectId(round_id)
+    except InvalidId as exc:
+        raise HTTPException(status_code=404, detail="round not found") from exc
+
+
+RoundObjectIdDep = Annotated[ObjectId, Depends(get_round_object_id)]
 
 
 @dataclass

@@ -10,6 +10,7 @@ from claude_exam.api.batch import STALE_JOB_SECONDS
 from claude_exam.api.config import get_settings
 from claude_exam.api.ica import IcaClient
 from claude_exam.api.routers.examination import router as examination_router
+from claude_exam.api.routers.game import ROUND_TTL_SECONDS
 from claude_exam.api.routers.game import router as game_router
 from claude_exam.api.routers.ica import router as ica_router
 from claude_exam.api.routers.questions import router as questions_router
@@ -33,6 +34,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     db = async_mongo_client.get_default_database()
     for name in ("examination", "examination_simplified"):
         await db[name].create_index([("section", 1), ("assessment_type", 1)])
+    # Rounds are only needed while a game is played; Mongo drops them after a day.
+    await db["game_rounds"].create_index(
+        "created_at", expireAfterSeconds=ROUND_TTL_SECONDS
+    )
     # Background jobs die with their process. Fail only jobs whose heartbeat has
     # gone quiet, so a worker starting up doesn't kill jobs live in another one.
     now = datetime.now(timezone.utc)

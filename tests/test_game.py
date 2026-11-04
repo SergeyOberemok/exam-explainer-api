@@ -318,3 +318,59 @@ def test_fifty_fifty_after_answer_and_out_of_charges():
         assert c.post(f"{base}/fifty-fifty", json={"question_id": qid}).status_code == 200
     empty = c.post(f"{base}/fifty-fifty", json={"question_id": ids[-1]})
     assert empty.status_code == 409 and empty.json()["detail"] == "no 50/50 charges left"
+
+
+def test_add_question_to_round_makes_it_answerable():
+    a, extra = doc(), doc()
+    rounds = FakeRounds()
+    _, body = start_round([a], rounds=rounds)
+    # The round has `a`; `extra` comes from search and is added afterwards.
+    c = client_with(exam=[extra], simple=[simplified_of(extra)], rounds=rounds)
+    base = f"/game/rounds/{body['round_id']}"
+    qid = str(extra["_id"])
+
+    r = c.post(f"{base}/questions", json={"question_id": qid})
+    assert r.status_code == 200, r.text
+    added = r.json()
+    assert added["item"]["id"] == qid and not added["item"]["simplified"]
+    assert [s["id"] for s in added["simplified"]] == [qid] and added["simplified"][0]["simplified"]
+    text = str(added)
+    assert "correct" not in text and "feedback" not in text and "explanation" not in text
+
+    answer = c.post(f"{base}/answers", json={"question_id": qid, "answer_index": 1})
+    assert answer.status_code == 200 and answer.json()["is_correct"]
+    assert answer.json()["has_simplified"]
+
+
+def test_add_question_again_keeps_the_stored_entry():
+    a = doc()
+    rounds = FakeRounds()
+    _, body = start_round([a], rounds=rounds)
+    qid = str(a["_id"])
+    # Simplified after the round started: the stored entry has no review for it.
+    c = client_with(exam=[a], simple=[simplified_of(a)], rounds=rounds)
+    url = f"/game/rounds/{body['round_id']}/questions"
+
+    r = c.post(url, json={"question_id": qid})
+    assert r.status_code == 200 and r.json()["simplified"] == []
+    c.post(f"/game/rounds/{body['round_id']}/answers", json={"question_id": qid, "answer_index": 0})
+    assert c.post(url, json={"question_id": qid}).json() == r.json()
+    stored = next(iter(rounds.docs.values()))
+    assert stored["answers"] == {qid: 0} and stored["questions"][qid]["simplified"] is None
+
+
+def test_add_question_errors():
+    rounds = FakeRounds()
+    _, body = start_round([doc()], rounds=rounds)
+    url = f"/game/rounds/{body['round_id']}/questions"
+    qid = str(ObjectId())
+
+    missing = client_with(rounds=rounds).post(url, json={"question_id": qid})
+    assert missing.status_code == 404 and missing.json()["detail"] == "question not found"
+    multi = client_with(exam=[doc(correct_response=["a", "b"])], rounds=rounds)
+    r = multi.post(url, json={"question_id": qid})
+    assert r.status_code == 422 and r.json()["detail"] == "question is not playable"
+    assert multi.post(url, json={"question_id": "$where"}).status_code == 422
+    c = client_with(exam=[doc()], rounds=rounds)
+    unknown = c.post(f"/game/rounds/{ObjectId()}/questions", json={"question_id": qid})
+    assert unknown.status_code == 404 and unknown.json()["detail"] == "round not found"

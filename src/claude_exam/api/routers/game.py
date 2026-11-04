@@ -3,6 +3,7 @@ import random
 from datetime import datetime, timezone
 from typing import Annotated, NoReturn
 
+from bson import ObjectId
 from fastapi import APIRouter, HTTPException, Query
 from pymongo import ReturnDocument
 from pymongo.asynchronous.collection import AsyncCollection
@@ -24,6 +25,8 @@ from claude_exam.api.schemas import (
     GameQuestionList,
     GameReview,
     GameRound,
+    GameRoundQuestion,
+    GameRoundQuestionRequest,
     GameRoundRequest,
     GameSectionList,
 )
@@ -114,6 +117,23 @@ def to_review(doc: dict) -> GameReview:
     )
 
 
+def usable_simplified(original: dict, simplified: dict | None) -> dict | None:
+    """`simplified` if the game can offer it for `original`, else None."""
+    if simplified is not None and simplified_matches(original, simplified):
+        return simplified
+    return None
+
+
+def round_entry(doc: dict, simplified: dict | None) -> dict:
+    """What a round document keeps for one playable question: its answer key and reviews."""
+    return {
+        "correct": correct_indices(doc)[0],
+        "count": len(answers_of(doc)),
+        "original": to_review(doc).model_dump(),
+        "simplified": to_review(simplified).model_dump() if simplified else None,
+    }
+
+
 def filter_query(section: str | None, assessment_type: str | None) -> dict:
     query: dict = {}
     if section:
@@ -192,15 +212,8 @@ async def create_game_round(
     simplified_items: list[GameQuestion] = []
     for doc in originals:
         question_id = str(doc["_id"])
-        simplified = simplified_by_id.get(question_id)
-        if simplified is not None and not simplified_matches(doc, simplified):
-            simplified = None
-        questions[question_id] = {
-            "correct": correct_indices(doc)[0],
-            "count": len(answers_of(doc)),
-            "original": to_review(doc).model_dump(),
-            "simplified": to_review(simplified).model_dump() if simplified else None,
-        }
+        simplified = usable_simplified(doc, simplified_by_id.get(question_id))
+        questions[question_id] = round_entry(doc, simplified)
         if simplified is not None:
             simplified_items.append(to_game_question(simplified, simplified=True))
 
@@ -352,6 +365,49 @@ async def use_game_round_fifty_fifty(
         question_id=question_id,
         eliminated_indices=eliminated,
         fifty_fifty_remaining=updated["fifty_fifty_remaining"],
+    )
+
+
+@router.post("/rounds/{round_id}/questions")
+async def add_game_round_question(
+    body: GameRoundQuestionRequest,
+    round_oid: RoundObjectIdDep,
+    collection: AsyncCollectionDep,
+    simplified_collection: AsyncSimplifiedCollectionDep,
+    rounds: AsyncRoundsCollectionDep,
+) -> GameRoundQuestion:
+    """Add one question (e.g. a search result) to a round, so it can be answered there.
+    Adding a question the round already has changes nothing and returns it again.
+    Like the round itself, the response carries no answer key."""
+    question_id = body.question_id
+    doc = await collection.find_one({"_id": ObjectId(question_id)})
+    if doc is None:
+        raise HTTPException(status_code=404, detail="question not found")
+    if not is_playable(doc):
+        raise HTTPException(status_code=422, detail="question is not playable")
+    simplified = usable_simplified(
+        doc, await simplified_collection.find_one({"question_id": question_id})
+    )
+
+    # Conditional write: a question already in the round keeps its stored key.
+    added = await rounds.find_one_and_update(
+        {"_id": round_oid, f"questions.{question_id}": {"$exists": False}},
+        {"$set": {f"questions.{question_id}": round_entry(doc, simplified)}},
+        projection={"_id": 1},
+    )
+    if added is None:
+        round_doc = await rounds.find_one(
+            {"_id": round_oid}, {f"questions.{question_id}": 1}
+        )
+        if round_doc is None:
+            raise HTTPException(status_code=404, detail="round not found")
+        # Offer the simplified text only if the stored entry can review it.
+        if (round_doc.get("questions") or {}).get(question_id, {}).get("simplified") is None:
+            simplified = None
+
+    return GameRoundQuestion(
+        item=to_game_question(doc),
+        simplified=[to_game_question(simplified, simplified=True)] if simplified else [],
     )
 
 

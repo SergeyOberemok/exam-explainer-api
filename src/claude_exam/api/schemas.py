@@ -139,6 +139,18 @@ class GameFiftyFiftyResult(BaseModel):
     fifty_fifty_remaining: int
 
 
+class GameRoundQuestionRequest(BaseModel):
+    question_id: GameQuestionId
+
+
+class GameRoundQuestion(BaseModel):
+    """A question added to a round, without its answer key."""
+
+    item: GameQuestion
+    # Its simplified version: one item, or none (a list, since JsonUtility can't read null).
+    simplified: list[GameQuestion]
+
+
 class GameSectionList(BaseModel):
     items: list[str]
 

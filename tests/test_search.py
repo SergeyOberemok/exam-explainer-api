@@ -112,3 +112,22 @@ def test_search_validates_params():
         client.get("/search/questions", params={"q": "ok", "limit": 51}).status_code
         == 422
     )
+
+
+def test_game_search_has_no_answer_key_and_only_playable():
+    good, multi = doc(), doc(correct_response=["a", "b"])
+    client, fake = client_with([good, multi])
+    r = client.get("/search/game-questions", params={"q": "caching", "limit": 3})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] == 1 and body["items"][0]["id"] == str(good["_id"])
+    assert body["items"][0]["answers"][1] == {"index": 1, "text": "cache_control"}
+    text = str(body)
+    assert "correct" not in text and "explanation" not in text and "score" not in text
+    assert fake.last_filter["correct_response"] == {"$size": 1}
+
+
+def test_game_search_validates_params():
+    client, _ = client_with([])
+    assert client.get("/search/game-questions", params={"q": "a"}).status_code == 422
+    assert client.get("/search/game-questions", params={"q": "ok", "limit": 0}).status_code == 422

@@ -1,7 +1,13 @@
 from pymongo.asynchronous.collection import AsyncCollection
 
-from claude_exam.api.routers.game import answers_of, correct_indices
-from claude_exam.api.schemas import SearchHit, SearchResponse
+from claude_exam.api.routers.game import (
+    PLAYABLE_QUERY,
+    answers_of,
+    correct_indices,
+    is_playable,
+    to_game_question,
+)
+from claude_exam.api.schemas import GameQuestionList, SearchHit, SearchResponse
 
 # Ranking is done by MongoDB: a weighted text index (`TEXT_INDEX_*`, created in the
 # app lifespan) scored with `$meta: "textScore"`.
@@ -47,6 +53,13 @@ def to_hit(doc: dict) -> SearchHit:
     )
 
 
+async def find_ranked(
+    collection: AsyncCollection, flt: dict, limit: int
+) -> list[dict]:
+    cursor = collection.find(flt, {"score": SCORE}).sort({"score": SCORE}).limit(limit)
+    return await cursor.to_list()
+
+
 async def search_questions(
     collection: AsyncCollection,
     query: str,
@@ -55,10 +68,22 @@ async def search_questions(
     assessment_type: str = "",
     limit: int = 5,
 ) -> SearchResponse:
-    cursor = (
-        collection.find(build_filter(query, section, assessment_type), {"score": SCORE})
-        .sort({"score": SCORE})
-        .limit(limit)
-    )
-    items = [to_hit(d) for d in await cursor.to_list()]
+    docs = await find_ranked(collection, build_filter(query, section, assessment_type), limit)
+    items = [to_hit(d) for d in docs]
     return SearchResponse(items=items, total=len(items))
+
+
+async def search_game_questions(
+    collection: AsyncCollection,
+    query: str,
+    *,
+    section: str = "",
+    assessment_type: str = "",
+    limit: int = 5,
+) -> GameQuestionList:
+    """Like `search_questions`, but only questions the game can play, in the /game
+    format: no answer key, so the player still has to answer them in a round."""
+    flt = {**build_filter(query, section, assessment_type), **PLAYABLE_QUERY}
+    docs = await find_ranked(collection, flt, limit)
+    items = [to_game_question(d) for d in docs if is_playable(d)]
+    return GameQuestionList(items=items, total=len(items))

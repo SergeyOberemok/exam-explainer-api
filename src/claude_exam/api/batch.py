@@ -1,16 +1,22 @@
 import asyncio
 import logging
 from datetime import datetime, timezone
+from typing import Literal
 
 from bson import ObjectId
 from fastapi import HTTPException
 from pymongo import AsyncMongoClient
 
+from claude_exam.api.entities import enrich_and_store
 from claude_exam.api.ica import IcaClient
 from claude_exam.api.schemas import IcaModelId
 from claude_exam.api.simplify import simplify_and_store
 
 logger = logging.getLogger(__name__)
+
+# "simplify": simplify (and extract entities for) each question.
+# "entities": only add entities to questions that are already simplified.
+JobMode = Literal["simplify", "entities"]
 
 # Transient ICA failures worth retrying: rate limit, bad gateway / unparsable
 # model output, timeout. Value = max retries.
@@ -29,20 +35,49 @@ async def _heartbeat(jobs, job_id: ObjectId) -> None:
     await jobs.update_one({"_id": job_id}, {"$set": {"heartbeat_at": _now()}})
 
 
-async def _simplify_with_retry(
-    ica: IcaClient, simplified, doc: dict, model_id: IcaModelId, jobs, job_id: ObjectId
-) -> None:
+async def _with_retry(operation, jobs, job_id: ObjectId) -> None:
+    """Run `operation()`, retrying transient ICA failures with backoff."""
     attempt = 0
     while True:
         await _heartbeat(jobs, job_id)
         try:
-            await simplify_and_store(ica, simplified, doc, model_id)
+            await operation()
             return
         except HTTPException as exc:
             if attempt >= RETRIES_BY_STATUS.get(exc.status_code, 0):
                 raise
             await asyncio.sleep(BACKOFF_SECONDS * 2**attempt)
             attempt += 1
+
+
+async def _simplify_with_retry(
+    ica: IcaClient,
+    simplified,
+    doc: dict,
+    model_id: IcaModelId,
+    jobs,
+    job_id: ObjectId,
+    mode: JobMode = "simplify",
+) -> None:
+    if mode == "simplify":
+        # Simplification and entity extraction retry separately: a rate limit on the
+        # second call is retried, and if it persists it is reported on the job (the
+        # simplified text is already stored by then).
+        await _with_retry(
+            lambda: simplify_and_store(
+                ica, simplified, doc, model_id, with_entities=False
+            ),
+            jobs,
+            job_id,
+        )
+    try:
+        await _with_retry(
+            lambda: enrich_and_store(ica, simplified, doc, model_id), jobs, job_id
+        )
+    except HTTPException as exc:
+        if mode == "simplify":
+            exc.detail = f"simplified, but entity extraction failed: {exc.detail}"
+        raise
 
 
 async def run_simplification_job(
@@ -52,10 +87,13 @@ async def run_simplification_job(
     job_id: ObjectId,
     question_ids: list[ObjectId],
     model_id: IcaModelId,
+    mode: JobMode = "simplify",
 ) -> None:
     """
     Simplify the given examination questions one by one, replacing any stored
-    simplified record. Per-question failures are recorded on the job and the
+    simplified record (`mode="entities"` only backfills the entities of questions
+    that are already simplified; its failures are reported, never swallowed).
+    Per-question failures are recorded on the job and the
     batch continues. Progress is written after every question. Jobs in this
     process run one at a time (`lock`) so concurrent imports don't multiply
     ICA load.
@@ -87,7 +125,7 @@ async def run_simplification_job(
                     if doc is None:
                         raise HTTPException(status_code=404, detail="question not found")
                     await _simplify_with_retry(
-                        ica, simplified, doc, model_id, jobs, job_id
+                        ica, simplified, doc, model_id, jobs, job_id, mode
                     )
                 except HTTPException as exc:
                     error = {

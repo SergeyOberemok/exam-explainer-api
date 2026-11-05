@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ImportResult(BaseModel):
@@ -240,6 +240,46 @@ class IcaMeta(BaseModel):
     total_tokens: int
 
 
+EntityKind = Literal["actor", "object", "action"]
+
+
+class VisualEntity(BaseModel):
+    """A reusable thing a diagram can show: who acts, what is handled, what is done.
+    The same entity is repeated wherever it is mentioned; match across questions by
+    normalized `name`."""
+
+    name: str
+    kind: EntityKind
+    aliases: list[str] = []
+
+
+class AnswerEntities(BaseModel):
+    """Entities of one answer (an object, since lists of lists are awkward for clients)."""
+
+    entities: list[VisualEntity] = []
+
+
+class PromptEntities(BaseModel):
+    """Entities of a simplified question, resolved per place they are mentioned."""
+
+    question: list[VisualEntity] = []
+    # One item per answer, index-aligned with `prompt.answers`.
+    answers: list[AnswerEntities] = []
+
+    @model_validator(mode="before")
+    @classmethod
+    def _from_catalog(cls, data: Any) -> Any:
+        """Read the first stored shape: a catalog plus id references."""
+        if isinstance(data, dict) and isinstance(data.get("entities"), list):
+            catalog = {e["id"]: {k: v for k, v in e.items() if k != "id"} for e in data["entities"]}
+            pick = lambda ids: [catalog[i] for i in ids if i in catalog]  # noqa: E731
+            return {
+                "question": pick(data.get("question", [])),
+                "answers": [{"entities": pick(ids)} for ids in data.get("answers", [])],
+            }
+        return data
+
+
 class SimplifiedQuestion(BaseModel):
     """Record stored in `examination_simplified`, keyed by the examination `_id`."""
 
@@ -251,8 +291,19 @@ class SimplifiedQuestion(BaseModel):
     related_lectures: list[Any]
     prompt: SimplifiedPrompt
     ica: IcaMeta
+    # Absent on records simplified before entity extraction existed (and empty when
+    # extraction failed); `entities_ica` is the metadata of that second call.
+    entities: PromptEntities = PromptEntities()
+    entities_ica: IcaMeta | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class EntitiesBackfill(BaseModel):
+    """Result of starting an entity backfill; `job_id` is None when nothing needs it."""
+
+    job_id: str | None = None
+    total: int
 
 
 class SimplificationError(BaseModel):

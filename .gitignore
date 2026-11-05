@@ -4,3 +4,4 @@ ica-claude.sh
 .env
 public/*
 docs/*
+.venv

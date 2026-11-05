@@ -1,19 +1,23 @@
-import json
-import re
+import logging
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
 from pymongo import ReturnDocument
 from pymongo.asynchronous.collection import AsyncCollection
 
+from claude_exam.api.entities import extract_entities
 from claude_exam.api.ica import IcaClient
+from claude_exam.api.json_reply import extract_json
 from claude_exam.api.schemas import (
     IcaMeta,
     IcaModelId,
+    PromptEntities,
     SimplifiedPrompt,
     SimplifiedQuestion,
 )
 from claude_exam.html_clean import clean_plain, clean_question
+
+logger = logging.getLogger(__name__)
 
 # System message injected directly into /chat-models/chat/completions.
 # Combines the full Exam Explainer Agent persona with a JSON output requirement
@@ -119,38 +123,6 @@ def _build_user_message(item: dict) -> str:
     )
 
 
-def _extract_json(raw: str) -> dict:
-    """
-    Parse the agent's reply as a JSON object.
-    Strips an accidental markdown fence, then falls back to the span from the
-    first "{" to the last "}" if prose surrounds the object.
-    Raises HTTPException 502 if no JSON object can be parsed.
-    """
-    text = raw.strip()
-    fence_match = re.search(r"```(?:json)?\s*(.*?)```", text, re.DOTALL)
-    if fence_match:
-        text = fence_match.group(1).strip()
-    try:
-        parsed = json.loads(text)
-    except json.JSONDecodeError as exc:
-        start, end = text.find("{"), text.rfind("}")
-        try:
-            if start == -1 or end <= start:
-                raise exc
-            parsed = json.loads(text[start : end + 1])
-        except json.JSONDecodeError:
-            raise HTTPException(
-                status_code=502,
-                detail=f"Exam Explainer Agent returned non-JSON output: {exc}. Raw: {raw[:300]}",
-            ) from exc
-    if not isinstance(parsed, dict):
-        raise HTTPException(
-            status_code=502,
-            detail=f"Exam Explainer Agent returned {type(parsed).__name__}, expected a JSON object",
-        )
-    return parsed
-
-
 def _validate_shape(parsed: dict, n_answers: int) -> None:
     """Require the same structure as the source prompt; raise 502 otherwise."""
 
@@ -201,7 +173,7 @@ async def simplify_item(
             status_code=502,
             detail=f"ICA model stopped with finish_reason={finish_reason!r} — cannot parse output",
         )
-    parsed = _extract_json((choice.get("message") or {}).get("content") or "")
+    parsed = extract_json((choice.get("message") or {}).get("content") or "")
     _validate_shape(parsed, n_answers)
 
     return (
@@ -225,13 +197,47 @@ async def simplify_and_store(
     doc: dict,
     model_id: IcaModelId,
     max_tokens: int | None = None,
+    with_entities: bool = True,
 ) -> SimplifiedQuestion:
     """
     Simplify one examination document and upsert the result into
     `examination_simplified`, keyed by `question_id`. An existing record is
     replaced and keeps its `created_at`.
+
+    Unless `with_entities` is false, a second ICA call extracts the visual entities
+    of the simplified text. That call is best effort: if it fails the simplified
+    record is still stored, with empty entities (backfill them later via
+    `entities.enrich_and_store`); entities stored earlier survive only when the new
+    simplified question and answers are unchanged.
     """
     prompt, meta = await simplify_item(ica, doc, model_id, max_tokens)
+
+    entities, entities_meta = PromptEntities(), None
+    if with_entities:
+        try:
+            entities, entities_meta = await extract_entities(
+                ica, doc, prompt, model_id, max_tokens
+            )
+        except Exception as exc:  # best effort: never lose the simplified text
+            logger.warning(
+                "entity extraction failed for %s: %s",
+                doc.get("_id"),
+                getattr(exc, "detail", exc),
+            )
+
+    question_id = str(doc["_id"])
+    keep_entities = False
+    if entities_meta is None:
+        # No fresh entities: keep the stored ones only while they still index into
+        # the same text, otherwise they would point at the wrong words.
+        existing = await simplified.find_one({"question_id": question_id})
+        old = (existing or {}).get("prompt") or {}
+        keep_entities = (
+            existing is not None
+            and existing.get("entities_ica") is not None
+            and old.get("question") == prompt.question
+            and old.get("answers") == prompt.answers
+        )
 
     now = datetime.now(timezone.utc)
     fields = {
@@ -244,8 +250,11 @@ async def simplify_and_store(
         "ica": meta.model_dump(),
         "updated_at": now,
     }
+    if not keep_entities:
+        fields["entities"] = entities.model_dump()
+        fields["entities_ica"] = entities_meta.model_dump() if entities_meta else None
     stored = await simplified.find_one_and_update(
-        {"question_id": str(doc["_id"])},
+        {"question_id": question_id},
         {"$set": fields, "$setOnInsert": {"created_at": now}},
         upsert=True,
         return_document=ReturnDocument.AFTER,

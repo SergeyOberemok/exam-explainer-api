@@ -1,5 +1,7 @@
 import logging
+import re
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 
 from fastapi import HTTPException
 from pymongo import ReturnDocument
@@ -41,16 +43,25 @@ the rest.
 Use the supplied explanation, per-option feedbacks, and correct_response as the \
 source of truth. Do not invent technical facts.
 
-Plain language rules: short sentences, everyday words, define jargon on first use, \
-concrete over abstract. Active voice. Keep technical terms only when they are the \
-concept being tested.
+Plain language rules: short sentences (at most about 20 words each), everyday words, \
+define jargon on first use, concrete over abstract. Active voice. Keep technical terms \
+only when they are the concept being tested. Rewrite every question, answer and \
+feedback in your own words: never copy an original sentence of more than 20 words \
+word for word, and keep every qualifier it contains. A simplified answer must not be \
+longer than the original answer.
 
 Exact terms: keep every product, mode, tool, setting, parameter and command name \
 verbatim (for example `acceptEdits`, `dontAsk`, plan mode, `git diff`, MCP) — never \
 replace one with a paraphrase. If a term needs explaining, put the plain-words \
 explanation right next to the exact name, e.g. "`dontAsk` mode (silently denies \
 anything not pre-approved)". Also keep every concrete detail that distinguishes one \
-option from another (extra steps, conditions, qualifiers).
+option from another (extra steps, conditions, qualifiers). Named patterns and \
+concepts from the official explanation (for example "evaluator-optimizer", "context \
+isolation", "scoped tool access") are exact terms too: keep the name and put the plain \
+explanation next to it, and name the concept in the closing one-line rule.
+
+Feedback wording: start each feedback with "Correct." for the correct option(s) and \
+"Incorrect." for every other option, then give the reasoning.
 
 OUTPUT FORMAT — you MUST respond with ONLY a single valid JSON object and nothing \
 else — no markdown fences, no prose before or after, no comments. \
@@ -123,8 +134,43 @@ def _build_user_message(item: dict) -> str:
     )
 
 
-def _validate_shape(parsed: dict, n_answers: int) -> None:
-    """Require the same structure as the source prompt; raise 502 otherwise."""
+_IDENTIFIER = re.compile(r"`([^`\n]+)`|\b([a-z]+(?:_[a-z0-9]+)+|[a-z]+[A-Z][A-Za-z0-9]*)\b")
+_COPY_RATIO = 0.85
+
+
+def quality_warnings(item: dict, parsed: dict) -> list[str]:
+    """
+    Soft quality checks on a shape-valid reply. They never reject it: they are
+    logged and their count is stored in the call metadata, so prompt changes can be
+    compared. Checks: an identifier (`backticked`, snake_case or camelCase) of an
+    original ANSWER missing from the simplified answers (identifiers that only occur
+    in the question's background, such as a list of available tools, may be shortened
+    and are not checked), and a simplified answer that is (nearly) a copy of the
+    original.
+    """
+    prompt = item.get("prompt") or {}
+    originals = [clean_plain(a) for a in prompt.get("answers", [])]
+    result = "\n".join([parsed["question"], *parsed["answers"]]).lower()
+
+    warnings = []
+    seen = set()
+    for match in _IDENTIFIER.finditer("\n".join(originals)):
+        term = (match.group(1) or match.group(2)).strip()
+        if term.lower() not in seen and term.lower() not in result:
+            warnings.append(f"identifier {term!r} missing from simplified text")
+        seen.add(term.lower())
+    for i, (orig, new) in enumerate(zip(originals, parsed["answers"])):
+        if SequenceMatcher(None, orig.lower(), new.lower()).ratio() >= _COPY_RATIO:
+            warnings.append(f"answer {chr(65 + i)} is not simplified (near copy)")
+    return warnings
+
+
+def _validate_shape(
+    parsed: dict, n_answers: int, correct: list[str] | None = None
+) -> None:
+    """Require the same structure as the source prompt; raise 502 otherwise.
+    With `correct` (the letters of `correct_response`), each feedback must also open
+    with "Correct" exactly for the correct options."""
 
     def bad(msg: str) -> HTTPException:
         return HTTPException(
@@ -143,6 +189,14 @@ def _validate_shape(parsed: dict, n_answers: int) -> None:
             raise bad(f"every item in {key!r} must be a non-empty string")
         if key == "answers" and len({v.strip().lower() for v in value}) != len(value):
             raise bad("answers must be distinct (options merged?)")
+    if correct:
+        right = {c.lower() for c in correct}
+        for i, feedback in enumerate(parsed["feedbacks"]):
+            says_correct = feedback.strip().lower().startswith("correct")
+            if says_correct != (chr(97 + i) in right):
+                raise bad(
+                    f"feedback {chr(65 + i)} verdict does not match the correct answer"
+                )
 
 
 async def simplify_item(
@@ -174,7 +228,9 @@ async def simplify_item(
             detail=f"ICA model stopped with finish_reason={finish_reason!r} — cannot parse output",
         )
     parsed = extract_json((choice.get("message") or {}).get("content") or "")
-    _validate_shape(parsed, n_answers)
+    _validate_shape(parsed, n_answers, item.get("correct_response") or [])
+    for warning in quality_warnings(item, parsed):
+        logger.warning("simplify %s: %s", item.get("_id"), warning)
 
     return (
         SimplifiedPrompt(

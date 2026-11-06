@@ -134,9 +134,9 @@ def reply(payload):
 
 
 SIMPLE = {
-    "question": "Which mode reads but never edits?",
+    "question": "Which mode, plan mode or acceptEdits mode, reads but never edits?",
     "answers": ["acceptEdits mode", "plan mode"],
-    "feedbacks": ["no", "yes"],
+    "feedbacks": ["Incorrect. It edits.", "Correct. It blocks edits."],
     "explanation": "Plan mode blocks edits.",
 }
 
@@ -288,11 +288,11 @@ async def test_entities_job_skips_records_that_got_entities_meanwhile():
 async def test_entities_job_without_only_missing_re_extracts():
     q = question()
     mongo = FakeMongo([q])
-    ica = ScriptedIca(entities=[reply(entities_reply("v1")), reply(entities_reply("v2"))])
+    ica = ScriptedIca(entities=[reply(entities_reply("acceptEdits mode")), reply(entities_reply("plan mode"))])
     await run_job(mongo, ica, [q["_id"]], "simplify")
     job = await run_job(mongo, ica, [q["_id"]], "entities", only_missing=False)
     assert job.succeeded == 1
-    assert (await stored(mongo, q))["entities"]["question"][0]["name"] == "v2"
+    assert (await stored(mongo, q))["entities"]["question"][0]["name"] == "plan mode"
 
 
 async def test_entities_job_reports_a_question_that_is_not_simplified():

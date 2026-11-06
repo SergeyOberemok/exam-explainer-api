@@ -42,7 +42,7 @@ DOC = {
 SIMPLIFIED = SimplifiedPrompt(
     question="Which mode lets Claude Code read but not edit?",
     answers=["acceptEdits mode", "plan mode"],
-    feedbacks=["wrong", "right"],
+    feedbacks=["Incorrect. It edits.", "Correct. It blocks edits."],
     explanation="Plan mode blocks edits.",
 )
 
@@ -199,6 +199,120 @@ def test_parse_trims_overflow():
     assert names(result.question) == ["N1"]  # e30 was trimmed away
     assert names(result.answers[0].entities) == ["N1", "N2", "N3", "N4"]
     assert all(n not in names(result.answers[1].entities) for n in ["N30"])
+
+
+def test_parse_grounding_drops_entity_not_in_that_answer():
+    # "MCP Server" is named by the model for answer B, but B never mentions it.
+    data = {
+        "entities": [
+            {"id": "e1", "name": "MCP Server", "kind": "object", "aliases": ["MCP"]},
+            {"id": "e2", "name": "plan mode", "kind": "object"},
+        ],
+        "question_entities": ["e1"],
+        "answers_entities": [["e1"], ["e1", "e2"]],
+    }
+    texts = ("Tools over MCP", ["MCP tools", "plan mode blocks edits"])
+    result = parse_entities(data, 2, texts)
+    assert names(result.question) == ["MCP Server"]
+    assert names(result.answers[0].entities) == ["MCP Server"]
+    assert names(result.answers[1].entities) == ["plan mode"]
+
+
+def test_parse_grounding_prunes_aliases_not_in_text():
+    data = {
+        "entities": [
+            {"id": "e1", "name": "process_refund", "kind": "object",
+             "aliases": ["refund requests", "process refund"]},
+        ],
+        "question_entities": ["e1"],
+        "answers_entities": [[], []],
+    }
+    texts = ("call process refund first", ["", ""])
+    result = parse_entities(data, 2, texts)
+    assert result.question[0].aliases == ["process refund"]
+
+
+def test_parse_prunes_generic_one_word_aliases_but_keeps_phrases():
+    data = {
+        "entities": [
+            {"id": "e1", "name": "Refund Decision", "kind": "object",
+             "aliases": ["refund", "proposed refund decision"]},
+        ],
+        "question_entities": ["e1"],
+        "answers_entities": [[], []],
+    }
+    texts = ("the proposed refund decision", ["", ""])
+    assert parse_entities(data, 2, texts).question[0].aliases == ["proposed refund decision"]
+
+
+def test_parse_keeps_actor_grounded_only_by_agent_alias():
+    data = {
+        "entities": [{"id": "e1", "name": "Main Agent", "kind": "actor", "aliases": ["agent"]}],
+        "question_entities": [],
+        "answers_entities": [["e1"], []],
+    }
+    texts = ("", ["The agent gives a score.", ""])
+    assert names(parse_entities(data, 2, texts).answers[0].entities) == ["Main Agent"]
+
+
+def test_parse_drops_generic_entities():
+    data = {
+        "entities": [
+            {"id": "e1", "name": "Tools", "kind": "object", "aliases": ["tool set"]},
+            {"id": "e2", "name": "Order", "kind": "object", "aliases": []},
+        ],
+        "question_entities": ["e1", "e2"],
+        "answers_entities": [["e1"], []],
+    }
+    texts = ("the tool set and the Order", ["tool set", ""])
+    result = parse_entities(data, 2, texts)
+    assert names(result.question) == ["Order"]
+    assert result.answers[0].entities == []
+
+
+def test_parse_adds_subagent_missing_from_a_place_that_names_it():
+    data = {
+        "entities": [
+            {"id": "e1", "name": "Subagent", "kind": "actor", "aliases": ["test-gap-analyzer"]},
+            {"id": "e2", "name": "Hook", "kind": "object"},
+        ],
+        "question_entities": ["e1"],
+        "answers_entities": [["e2"], []],
+    }
+    texts = (
+        "A test-gap-analyzer subagent reviews PRs.",
+        ["Add a hook for the subagent", "Nothing here"],
+    )
+    result = parse_entities(data, 2, texts)
+    assert names(result.question) == ["Subagent"]
+    assert names(result.answers[0].entities) == ["Subagent", "Hook"]
+    assert result.answers[0].entities[0].aliases == ["test-gap-analyzer"]  # catalog entity reused
+    assert result.answers[1].entities == []
+
+
+def test_parse_creates_main_agent_when_catalog_lacks_it():
+    data = {
+        "entities": [{"id": "e1", "name": "Hook", "kind": "object"}],
+        "question_entities": [],
+        "answers_entities": [[], ["e1"]],
+    }
+    texts = ("The main agent collects logs.", ["", "a hook"])
+    result = parse_entities(data, 2, texts)
+    assert [(e.name, e.kind) for e in result.question] == [("Main Agent", "actor")]
+
+
+def test_parse_without_texts_skips_grounding():
+    assert names(parse_entities(GOOD_ENTITIES, 2).answers[0].entities) == ["acceptEdits"]
+
+
+def test_system_message_demands_grounded_references():
+    system = _build_system_message(2)
+    assert "only if its name or one of its aliases appears" in system
+    assert "BROAD LEVEL" in system and "Do NOT make an entity per tool" in system
+    assert "refund requests" in system  # negative alias example
+    assert "Never make an entity for a generic group" in system
+    assert "never a single generic word" in system
+    assert "Coverage check" in system
 
 
 # --- prompts --------------------------------------------------------------------

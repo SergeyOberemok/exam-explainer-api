@@ -7,6 +7,7 @@ text to diagram elements by structure.
 """
 
 import logging
+import re
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
@@ -33,6 +34,20 @@ logger = logging.getLogger(__name__)
 MAX_ENTITIES = 16
 MAX_PER_ANSWER = 4
 _KINDS = ("actor", "object", "action")
+# One-word aliases that match too much text to identify a single entity.
+_GENERIC_ALIASES = frozenset(
+    {"refund", "policy", "tool", "tools", "message", "data", "system"}
+)
+
+# Entity names too generic to draw; references to them are dropped.
+_GENERIC_NAMES = frozenset(
+    {"tool", "tools", "tool set", "toolset", "data", "system", "information", "thing", "things"}
+)
+# Stable-name actors added deterministically wherever the text names them.
+_STABLE_ACTORS = (
+    ("Subagent", re.compile(r"\bsub-?agents?\b", re.I)),
+    ("Main Agent", re.compile(r"\bmain agent\b", re.I)),
+)
 
 _SYSTEM_MESSAGE = """\
 You extract reusable visual entities from one multiple-choice exam question so an app \
@@ -41,13 +56,12 @@ Code, the Claude Agent SDK, the Claude API, MCP, prompt engineering, tool use an
 agent design.
 
 SOURCES
-- ORIGINAL text is the primary source: take exact names of technologies, tools, \
-settings, files, people and systems from it. Every tool, command, parameter, setting, \
-mode, file or agent the original NAMES gets its own entity with that exact name, even \
-when the simplified text drops it (for example a list "get_customer, lookup_order, \
-process_refund" gives three entities, not one "Tools" entity). List these first.
-- SIMPLIFIED text is the secondary source: use it to understand context and to find \
-entities the original only implies. Never replace an original name with a paraphrase.
+- ORIGINAL text is the primary source for what the question is about. The learner can \
+read its exact names (tools, parameters, settings, files) there, so the entities do \
+NOT repeat them one by one: they give the simplified version a basic, abstract picture \
+of who and what is involved.
+- SIMPLIFIED text is the plain-words retelling: use it for context and to find the \
+broad things the original only implies.
 - The two texts describe the same question and the same answers in the same order. \
 An entity found in either version of a question or answer belongs to that question or \
 answer, even if the other version leaves it out.
@@ -61,21 +75,62 @@ Engineer, an AI agent, a model, a subagent, a coordinator).
 - "object": is processed, exchanged, accessed or represented (software, API, server, \
 database, SDK, MCP server, tool, file, setting or mode, document, session, repository, \
 business object, device).
-- "action": an operation that can be one workflow step (Process Refund, Lookup Order, \
-Escalate to Human). A tool's name is an object; the operation it performs is an action.
+- "action": an operation that can be one workflow step (Escalate to Human, Review). \
+Use it sparingly, only for a step the question is really about.
+
+BROAD LEVEL
+Think of a simple diagram a beginner could read: a few boxes such as Customer, Order, \
+Refund, Agent, Human Reviewer, Database, Website. Entities live at that level.
+- Do NOT make an entity per tool, function, parameter, flag or setting name \
+(get_customer, lookup_order, process_refund, tool_choice, allowedTools). Fold each one \
+into the broad thing it works on or stands for: the customer tools -> "Customer", \
+lookup_order -> "Order", process_refund and a refund decision -> "Refund", \
+escalate_to_human -> "Human Reviewer". Put the exact name in "aliases" only if it is a \
+useful label in that place. Several tools of one area are ONE entity.
+- Keep a specific name as the entity name only when the name itself is what the \
+question tests: a product or platform (Claude Code, Claude Agent SDK, MCP), or a mode \
+or setting the options are chosen between (plan mode, acceptEdits).
 
 GROUPING
 - Merge synonyms and variants of the same thing into one entity (customer + customer \
 details -> "Customer"; order + order lookup data -> "Order").
-- Name = the original technical term when there is one (`stop_reason`, `acceptEdits`, \
-plan mode, `git diff`, MCP); otherwise the shortest clear Title Case noun for the \
-group. Put other wordings from the text in "aliases".
+- Name = the shortest clear Title Case noun for the group (see BROAD LEVEL); keep the \
+original technical term only for products, modes and settings the question tests \
+(`acceptEdits`, plan mode, MCP). Put other wordings from the text in "aliases".
 - Do not make separate entities for attributes, versions or properties of one thing.
 - Reuse one name for the same thing everywhere in this reply. Use the stable names \
 "Claude Agent SDK", "Claude Code", "Claude API", "MCP Server", "Subagent", \
-"Main Agent" for those things instead of inventing variants.
-- "aliases" are only other wordings of the SAME thing found in the text: never the \
-name itself, never counts or numbers ("18 tools"), never a different thing.
+"Main Agent" for those things instead of inventing variants - but ONLY where the \
+text actually refers to that thing. Tools that are reached over MCP are tools, not \
+an "MCP Server": add "MCP Server" only when a server (or the protocol itself) is \
+really mentioned in that text.
+- "aliases" are only other wordings of the SAME thing that appear in the original or \
+simplified text: never the name itself, never counts or numbers ("18 tools"), never a \
+different thing. A request, message, group or category is never an alias of a tool or \
+of what it works on (wrong: "Refund" with alias "refund requests"; wrong: "MCP" with \
+alias "backend systems").
+- Never make an entity for a generic group or word that cannot be drawn: "Tools", \
+"Tool Set", "Data", "System", "Information". Name the concrete things instead, or \
+leave the place empty.
+- An alias must be specific enough to point at this entity alone: never a single \
+generic word such as "refund", "policy" or "tool" (use the fuller phrase from the \
+text, e.g. "proposed refund decision").
+- Coverage check before you answer: every stable-name thing (Subagent, Main Agent, \
+MCP, ...) that the original or simplified text of the question or of an answer \
+mentions - including as "the subagent", "specialized subagents" or "MCP tools" - must \
+appear in that place's list. Re-read each answer once and add what you missed. When \
+the text says "MCP tools" or "Model Context Protocol", include an "MCP" entity.
+- When the text lists several categories of tools by role (for example shipping, \
+loyalty and subscription tools), fold them into the broad things they work on \
+(Shipment, Loyalty Account, Subscription) rather than one entity per tool; be \
+consistent: cover all categories or none.
+- A specific named instance of a stable-name thing (a subagent called \
+"test-gap-analyzer") is an alias of that stable name ("Subagent"), not a replacement \
+for it: keep the stable name as the entity name and reference it wherever the text \
+says "subagent" or uses the specific name.
+- Reference an entity from the question or from an answer only if its name or one of \
+its aliases appears in that text (original or simplified version). Do not attach an \
+entity to an answer because it is related to the topic.
 
 EXCLUDE
 Purely abstract ideas are never entities: confidence, accuracy, reasoning, \
@@ -145,7 +200,17 @@ def _build_user_message(item: dict, simplified: SimplifiedPrompt) -> str:
     )
 
 
-def parse_entities(parsed: dict, n_answers: int) -> PromptEntities:
+def _mentions(entity: VisualEntity, text: str) -> bool:
+    """True when the entity's name or one of its aliases occurs in `text`."""
+    text = text.lower()
+    return any(t.lower() in text for t in (entity.name, *entity.aliases))
+
+
+def parse_entities(
+    parsed: dict,
+    n_answers: int,
+    texts: tuple[str, list[str]] | None = None,
+) -> PromptEntities:
     """
     Validate the model's reply and build the stored structure. The reply uses a
     catalog plus id references (keeps names consistent and the reply short); the
@@ -154,6 +219,11 @@ def parse_entities(parsed: dict, n_answers: int) -> PromptEntities:
     raise 502. Overflow is trimmed instead of failing the reply: entities beyond
     MAX_ENTITIES, references to ids that do not exist (or were trimmed), and more than
     MAX_PER_ANSWER entities on an answer.
+
+    `texts` = (question text, answer texts), each the original and simplified version
+    joined. When given, a reference is also dropped (and logged) if the entity's name
+    or aliases do not occur in that text, and aliases found nowhere in the question
+    are pruned. Without it only the structure is checked.
     """
 
     def bad(msg: str) -> HTTPException:
@@ -191,23 +261,82 @@ def parse_entities(parsed: dict, n_answers: int) -> PromptEntities:
         entities[entity_id] = VisualEntity(name=name, kind=kind, aliases=clean_aliases)
     entities = dict(list(entities.items())[:MAX_ENTITIES])
 
-    def refs(value: object, where: str) -> list[VisualEntity]:
+    if texts is not None:
+        # Aliases must come from the text; judged against the whole question (the
+        # name is kept even when only an alias occurs, e.g. "Main Agent" / "the agent").
+        everything = "\n".join([texts[0], *texts[1]]).lower()
+        for entity in entities.values():
+            entity.aliases = [
+                a
+                for a in entity.aliases
+                if a.lower() in everything and a.lower() not in _GENERIC_ALIASES
+            ]
+
+    def refs(value: object, where: str, text: str | None) -> list[VisualEntity]:
         if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
             raise bad(f"{where} must be a list of entity ids")
         # Unknown ids and repeats are dropped; order is kept. Each place gets its own
         # copy of the entity (the stored shape has no shared catalog).
-        return [entities[i].model_copy() for i in dict.fromkeys(value) if i in entities]
+        out = []
+        for i in dict.fromkeys(value):
+            if i not in entities:
+                continue
+            if entities[i].name.lower() in _GENERIC_NAMES:
+                logger.info("dropped generic entity %r from %s", entities[i].name, where)
+                continue
+            if text is not None and not _mentions(entities[i], text):
+                logger.info(
+                    "dropped ungrounded entity %r from %s", entities[i].name, where
+                )
+                continue
+            out.append(entities[i].model_copy())
+        return out
 
-    question_refs = refs(parsed.get("question_entities"), "'question_entities'")
+    def with_stable_actors(found: list[VisualEntity], text: str | None) -> list[VisualEntity]:
+        """Put Subagent / Main Agent first wherever the text names them but the model
+        left them out (the catalog entity is reused, else one is created)."""
+        if text is None:
+            return found
+        have = {e.name.lower() for e in found}
+        added = []
+        for name, pattern in _STABLE_ACTORS:
+            if name.lower() in have or not pattern.search(text):
+                continue
+            known = next((e for e in entities.values() if e.name.lower() == name.lower()), None)
+            added.append((known or VisualEntity(name=name, kind="actor", aliases=[])).model_copy())
+            logger.info("added missing stable entity %r", name)
+        return added + found
+
+    question_refs = with_stable_actors(
+        refs(
+            parsed.get("question_entities"),
+            "'question_entities'",
+            texts[0] if texts else None,
+        ),
+        texts[0] if texts else None,
+    )
     raw_answers = parsed.get("answers_entities")
     if not isinstance(raw_answers, list) or len(raw_answers) != n_answers:
         got = len(raw_answers) if isinstance(raw_answers, list) else type(raw_answers).__name__
         raise bad(f"'answers_entities' must be a list of {n_answers} lists, got {got}")
-    return PromptEntities(
-        question=question_refs,
-        answers=[
-            AnswerEntities(entities=refs(r, f"'answers_entities[{i}]'")[:MAX_PER_ANSWER])
-            for i, r in enumerate(raw_answers)
+    answers = []
+    for i, r in enumerate(raw_answers):
+        text = texts[1][i] if texts and i < len(texts[1]) else None
+        found = refs(r, f"'answers_entities[{i}]'", text)
+        answers.append(AnswerEntities(entities=with_stable_actors(found, text)[:MAX_PER_ANSWER]))
+    return PromptEntities(question=question_refs, answers=answers)
+
+
+def _source_texts(item: dict, simplified: SimplifiedPrompt) -> tuple[str, list[str]]:
+    """Original and simplified text of the question and of each answer, joined, for
+    the grounding check in `parse_entities`."""
+    prompt = item.get("prompt") or {}
+    originals = [clean_plain(a) for a in prompt.get("answers", [])]
+    return (
+        f"{clean_question(prompt.get('question', ''))}\n{simplified.question}",
+        [
+            f"{originals[i] if i < len(originals) else ''}\n{a}"
+            for i, a in enumerate(simplified.answers)
         ],
     )
 
@@ -240,7 +369,7 @@ async def extract_entities(
         )
     parsed = extract_json((choice.get("message") or {}).get("content") or "")
     return (
-        parse_entities(parsed, n_answers),
+        parse_entities(parsed, n_answers, _source_texts(item, simplified)),
         IcaMeta(
             model_id=model_id,
             finish_reason=finish_reason,

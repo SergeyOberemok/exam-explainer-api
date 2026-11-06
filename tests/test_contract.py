@@ -66,6 +66,17 @@ SIMPLE = [
         "_id": ObjectId("65f0000000000000000000b1"),
         "question_id": str(Q1),
         "prompt": {**EXAM[0]["prompt"], "question": "Where does the key go?", "explanation": "Simply put: x-api-key."},
+        "entities": {
+            "question": [
+                {"name": "API Key", "kind": "object", "aliases": ["key"]},
+                {"name": "Send Request", "kind": "action", "aliases": []},
+            ],
+            "answers": [
+                {"entities": [{"name": "Authorization", "kind": "object", "aliases": ["auth header"]}]},
+                {"entities": [{"name": "x-api-key", "kind": "object", "aliases": []}]},
+                {"entities": []},
+            ],
+        },
     }
 ]
 

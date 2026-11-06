@@ -1,6 +1,7 @@
 import asyncio
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from claude_exam.api.dependencies import (
     AsyncCollectionDep,
@@ -89,12 +90,20 @@ async def simplify_question(
     ica: IcaClientDep,
     body: SimplifyRequest | None = None,
     force: bool = False,
+    entities: Annotated[
+        bool,
+        Query(
+            description="Also extract visual entities after simplifying (best effort; "
+            "false: simplify only, add them later via POST /examination/{id}/entities)"
+        ),
+    ] = True,
 ) -> SimplifiedQuestion:
     """
     Simplify one stored question through ICA and upsert the result into
     `examination_simplified`, keyed by `question_id` (the examination `_id`).
     An already stored result is returned as-is (no ICA call) unless `force=true`,
-    which replaces it and keeps `created_at`.
+    which replaces it and keeps `created_at`. Unless `entities=false`, a second
+    call then extracts its visual entities onto the record.
     """
     body = body or SimplifyRequest()
     doc = await collection.find_one({"_id": object_id})
@@ -107,5 +116,5 @@ async def simplify_question(
             return SimplifiedQuestion(**existing)
 
     return await simplify_and_store(
-        ica, simplified, doc, body.model_id, body.max_tokens
+        ica, simplified, doc, body.model_id, body.max_tokens, with_entities=entities
     )

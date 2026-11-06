@@ -1,7 +1,6 @@
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Literal
 
 from bson import ObjectId
 from fastapi import HTTPException
@@ -9,14 +8,10 @@ from pymongo import AsyncMongoClient
 
 from claude_exam.api.entities import enrich_and_store
 from claude_exam.api.ica import IcaClient
-from claude_exam.api.schemas import IcaModelId
+from claude_exam.api.schemas import IcaModelId, JobMode, JobStage
 from claude_exam.api.simplify import simplify_and_store
 
 logger = logging.getLogger(__name__)
-
-# "simplify": simplify (and extract entities for) each question.
-# "entities": only add entities to questions that are already simplified.
-JobMode = Literal["simplify", "entities"]
 
 # Transient ICA failures worth retrying: rate limit, bad gateway / unparsable
 # model output, timeout. Value = max retries.
@@ -29,6 +24,35 @@ STALE_JOB_SECONDS = 15 * 60
 
 def _now() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def new_job(
+    source: str,
+    model_id: IcaModelId,
+    total: int,
+    mode: JobMode,
+    only_missing: bool = False,
+) -> dict:
+    """A queued job document for `simplification_jobs` (the layout `SimplificationJob` reads)."""
+    now = _now()
+    return {
+        "source": source,
+        "model_id": model_id,
+        "mode": mode,
+        "only_missing": only_missing,
+        "status": "queued",
+        "total": total,
+        "processed": 0,
+        "succeeded": 0,
+        "failed": 0,
+        "entities_failed": 0,
+        "skipped": 0,
+        "errors": [],
+        "created_at": now,
+        "heartbeat_at": now,
+        "started_at": None,
+        "finished_at": None,
+    }
 
 
 async def _heartbeat(jobs, job_id: ObjectId) -> None:
@@ -50,34 +74,12 @@ async def _with_retry(operation, jobs, job_id: ObjectId) -> None:
             attempt += 1
 
 
-async def _simplify_with_retry(
-    ica: IcaClient,
-    simplified,
-    doc: dict,
-    model_id: IcaModelId,
-    jobs,
-    job_id: ObjectId,
-    mode: JobMode = "simplify",
-) -> None:
-    if mode == "simplify":
-        # Simplification and entity extraction retry separately: a rate limit on the
-        # second call is retried, and if it persists it is reported on the job (the
-        # simplified text is already stored by then).
-        await _with_retry(
-            lambda: simplify_and_store(
-                ica, simplified, doc, model_id, with_entities=False
-            ),
-            jobs,
-            job_id,
-        )
-    try:
-        await _with_retry(
-            lambda: enrich_and_store(ica, simplified, doc, model_id), jobs, job_id
-        )
-    except HTTPException as exc:
-        if mode == "simplify":
-            exc.detail = f"simplified, but entity extraction failed: {exc.detail}"
-        raise
+async def _has_entities(simplified, question_id: str) -> bool:
+    """Whether the record already has entities from a successful extraction."""
+    found = await simplified.find_one(
+        {"question_id": question_id, "entities_ica": {"$ne": None}}, {"_id": 1}
+    )
+    return found is not None
 
 
 async def run_simplification_job(
@@ -88,22 +90,28 @@ async def run_simplification_job(
     question_ids: list[ObjectId],
     model_id: IcaModelId,
     mode: JobMode = "simplify",
+    only_missing: bool = False,
 ) -> None:
     """
-    Simplify the given examination questions one by one, replacing any stored
-    simplified record (`mode="entities"` only backfills the entities of questions
-    that are already simplified; its failures are reported, never swallowed).
-    Per-question failures are recorded on the job and the
-    batch continues. Progress is written after every question. Jobs in this
-    process run one at a time (`lock`) so concurrent imports don't multiply
-    ICA load.
+    Process the given examination questions one by one (see `JobMode`). Simplifying
+    replaces any stored simplified record; extracting entities updates only the entity
+    fields of the existing record. With `mode="entities"` and `only_missing`, a question
+    that has entities by the time the job reaches it is skipped (`skipped`), so a
+    repeated backfill, or one queued behind an import job, costs no ICA calls.
+
+    Simplification and entity extraction retry separately. Per-question failures are
+    recorded on the job with the step they come from (`stage`) and the batch continues;
+    a failed extraction after a stored simplification also counts in `entities_failed`
+    (the text is kept; backfill the entities later). Progress is written after every
+    question. Jobs in this process run one at a time (`lock`) so concurrent imports
+    do not multiply ICA load. The job fails only when no question got anything stored.
     """
     db = mongo.get_default_database()
     examination = db["examination"]
     simplified = db["examination_simplified"]
     jobs = db["simplification_jobs"]
 
-    succeeded = 0
+    stored_any = False
     status = "completed"
     try:
         async with lock:
@@ -119,24 +127,48 @@ async def run_simplification_job(
             )
             for object_id in question_ids:
                 question_id = str(object_id)
+                stage: JobStage = "entities" if mode == "entities" else "simplify"
+                text_stored = skipped = False
                 error: dict | None = None
                 try:
-                    doc = await examination.find_one({"_id": object_id})
-                    if doc is None:
-                        raise HTTPException(status_code=404, detail="question not found")
-                    await _simplify_with_retry(
-                        ica, simplified, doc, model_id, jobs, job_id, mode
-                    )
+                    if (
+                        mode == "entities"
+                        and only_missing
+                        and await _has_entities(simplified, question_id)
+                    ):
+                        skipped = True
+                    else:
+                        doc = await examination.find_one({"_id": object_id})
+                        if doc is None:
+                            raise HTTPException(status_code=404, detail="question not found")
+                        if mode != "entities":
+                            await _with_retry(
+                                lambda: simplify_and_store(
+                                    ica, simplified, doc, model_id, with_entities=False
+                                ),
+                                jobs,
+                                job_id,
+                            )
+                            text_stored = True
+                        if mode != "simplify_only":
+                            stage = "entities"
+                            await _with_retry(
+                                lambda: enrich_and_store(ica, simplified, doc, model_id),
+                                jobs,
+                                job_id,
+                            )
                 except HTTPException as exc:
                     error = {
                         "question_id": question_id,
+                        "stage": stage,
                         "status_code": exc.status_code,
                         "detail": str(exc.detail),
                     }
                 except Exception as exc:  # keep the batch going on any per-question failure
-                    logger.exception("simplification failed for %s", question_id)
+                    logger.exception("%s failed for %s", stage, question_id)
                     error = {
                         "question_id": question_id,
+                        "stage": stage,
                         "status_code": 500,
                         "detail": f"{type(exc).__name__}: {exc}",
                     }
@@ -145,15 +177,21 @@ async def run_simplification_job(
                     "$inc": {"processed": 1},
                     "$set": {"heartbeat_at": _now()},
                 }
-                if error is None:
-                    succeeded += 1
+                if skipped:
+                    update["$inc"]["skipped"] = 1
+                    stored_any = True  # nothing left to do is not a failure
+                elif error is None:
                     update["$inc"]["succeeded"] = 1
+                    stored_any = True
                 else:
                     update["$inc"]["failed"] = 1
                     update["$push"] = {"errors": error}
+                    if text_stored:
+                        update["$inc"]["entities_failed"] = 1
+                        stored_any = True
                 await jobs.update_one({"_id": job_id}, update)
         # Every question failing (bad key, ICA down) is a failed job, not a completed one.
-        if question_ids and succeeded == 0:
+        if question_ids and not stored_any:
             status = "failed"
     except Exception:
         logger.exception("simplification job %s crashed", job_id)

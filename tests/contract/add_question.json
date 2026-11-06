@@ -18,7 +18,11 @@
         "index": 2,
         "text": "X-Key"
       }
-    ]
+    ],
+    "entities": {
+      "question": [],
+      "answers": []
+    }
   },
   "simplified": [
     {
@@ -40,7 +44,48 @@
           "index": 2,
           "text": "X-Key"
         }
-      ]
+      ],
+      "entities": {
+        "question": [
+          {
+            "name": "API Key",
+            "kind": "object",
+            "aliases": [
+              "key"
+            ]
+          },
+          {
+            "name": "Send Request",
+            "kind": "action",
+            "aliases": []
+          }
+        ],
+        "answers": [
+          {
+            "entities": [
+              {
+                "name": "Authorization",
+                "kind": "object",
+                "aliases": [
+                  "auth header"
+                ]
+              }
+            ]
+          },
+          {
+            "entities": [
+              {
+                "name": "x-api-key",
+                "kind": "object",
+                "aliases": []
+              }
+            ]
+          },
+          {
+            "entities": []
+          }
+        ]
+      }
     }
   ]
 }

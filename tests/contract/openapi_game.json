@@ -695,6 +695,21 @@
     }
   },
   "schemas": {
+    "AnswerEntities": {
+      "description": "Entities of one answer (an object, since lists of lists are awkward for clients).",
+      "properties": {
+        "entities": {
+          "default": [],
+          "items": {
+            "$ref": "#/components/schemas/VisualEntity"
+          },
+          "title": "Entities",
+          "type": "array"
+        }
+      },
+      "title": "AnswerEntities",
+      "type": "object"
+    },
     "GameAnswer": {
       "description": "One answer option, without whether it is correct.",
       "properties": {
@@ -827,6 +842,13 @@
         "assessment_type": {
           "title": "Assessment Type",
           "type": "string"
+        },
+        "entities": {
+          "$ref": "#/components/schemas/PromptEntities",
+          "default": {
+            "answers": [],
+            "question": []
+          }
         },
         "id": {
           "title": "Id",
@@ -1082,6 +1104,29 @@
       "title": "HTTPValidationError",
       "type": "object"
     },
+    "PromptEntities": {
+      "description": "Entities of a simplified question, resolved per place they are mentioned.",
+      "properties": {
+        "answers": {
+          "default": [],
+          "items": {
+            "$ref": "#/components/schemas/AnswerEntities"
+          },
+          "title": "Answers",
+          "type": "array"
+        },
+        "question": {
+          "default": [],
+          "items": {
+            "$ref": "#/components/schemas/VisualEntity"
+          },
+          "title": "Question",
+          "type": "array"
+        }
+      },
+      "title": "PromptEntities",
+      "type": "object"
+    },
     "ValidationError": {
       "properties": {
         "ctx": {
@@ -1120,6 +1165,38 @@
         "type"
       ],
       "title": "ValidationError",
+      "type": "object"
+    },
+    "VisualEntity": {
+      "description": "A reusable thing a diagram can show: who acts, what is handled, what is done.\nThe same entity is repeated wherever it is mentioned; match across questions by\nnormalized `name`.",
+      "properties": {
+        "aliases": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Aliases",
+          "type": "array"
+        },
+        "kind": {
+          "enum": [
+            "actor",
+            "object",
+            "action"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "kind"
+      ],
+      "title": "VisualEntity",
       "type": "object"
     }
   }

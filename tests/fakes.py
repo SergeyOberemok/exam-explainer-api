@@ -43,6 +43,8 @@ def matches(doc, query):
             continue
         value = get_path(doc, path)
         if not isinstance(cond, dict):
+            if cond is None and value is MISSING:
+                continue  # null matches a missing field
             if not (value == cond or cond in _values(value)):
                 return False
             continue
@@ -54,7 +56,7 @@ def matches(doc, query):
                 if value is MISSING or not value > arg:
                     return False
             elif op == "$ne":
-                if value == arg or arg in _values(value):
+                if value == arg or arg in _values(value) or (arg is None and value is MISSING):
                     return False
             elif op == "$in":
                 if not any(v in arg for v in _values(value)):

@@ -19,7 +19,11 @@
           "index": 2,
           "text": "X-Key"
         }
-      ]
+      ],
+      "entities": {
+        "question": [],
+        "answers": []
+      }
     },
     {
       "id": "65f0000000000000000000a2",
@@ -44,7 +48,11 @@
           "index": 3,
           "text": "tools"
         }
-      ]
+      ],
+      "entities": {
+        "question": [],
+        "answers": []
+      }
     },
     {
       "id": "65f0000000000000000000a3",
@@ -65,7 +73,11 @@
           "index": 2,
           "text": "none"
         }
-      ]
+      ],
+      "entities": {
+        "question": [],
+        "answers": []
+      }
     }
   ],
   "total": 3

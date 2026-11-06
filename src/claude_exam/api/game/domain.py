@@ -5,9 +5,20 @@ Questions come from `examination` (id in `_id`) or `examination_simplified` (sam
 the id types differ for historical reasons, so the code always joins through `str(_id)`).
 """
 
-from bson import ObjectId
+import logging
 
-from claude_exam.api.schemas import GameAnswer, GameQuestion, GameReview
+from bson import ObjectId
+from pydantic import ValidationError
+
+from claude_exam.api.schemas import (
+    AnswerEntities,
+    GameAnswer,
+    GameQuestion,
+    GameReview,
+    PromptEntities,
+)
+
+logger = logging.getLogger(__name__)
 
 ROUND_TTL_SECONDS = 24 * 60 * 60
 FIFTY_FIFTY_CHARGES = 2
@@ -70,8 +81,24 @@ def usable_simplified(original: dict, simplified: dict | None) -> dict | None:
     return None
 
 
+def entities_of(doc: dict) -> PromptEntities:
+    """The stored visual entities of a simplified doc, with one `answers` item per
+    answer (padded or trimmed). Entities are decoration: a malformed record gives none
+    instead of failing the round."""
+    try:
+        entities = PromptEntities.model_validate(doc.get("entities") or {})
+    except (ValidationError, KeyError, TypeError) as e:
+        logger.warning("ignoring malformed entities of %s: %s", doc.get("question_id"), e)
+        return PromptEntities()
+    count = len(answers_of(doc))
+    answers = entities.answers[:count]
+    answers += [AnswerEntities() for _ in range(count - len(answers))]
+    return PromptEntities(question=entities.question, answers=answers)
+
+
 def to_game_question(doc: dict, *, simplified: bool = False) -> GameQuestion:
-    """Map an `examination` doc, or an `examination_simplified` doc when `simplified`."""
+    """Map an `examination` doc, or an `examination_simplified` doc when `simplified`
+    (only those carry entities)."""
     prompt = doc.get("prompt") or {}
     return GameQuestion(
         id=str(doc["question_id"] if simplified else doc["_id"]),
@@ -82,6 +109,7 @@ def to_game_question(doc: dict, *, simplified: bool = False) -> GameQuestion:
         answers=[
             GameAnswer(index=i, text=text or "") for i, text in enumerate(answers_of(doc))
         ],
+        entities=entities_of(doc) if simplified else PromptEntities(),
     )
 
 

@@ -16,6 +16,7 @@ from claude_exam.api.game.domain import (
     to_review,
 )
 from claude_exam.api.main import app
+from claude_exam.api.schemas import AnswerEntities
 from claude_exam.api.security import round_rate_limit
 
 
@@ -46,8 +47,9 @@ def test_letter_to_index_tolerates_bad_values():
 
 def test_public_question_has_no_answer_key():
     q = to_game_question(doc()).model_dump()
-    assert set(q) == {"id", "simplified", "section", "assessment_type", "question", "answers"}
+    assert set(q) == {"id", "simplified", "section", "assessment_type", "question", "answers", "entities"}
     assert q["answers"][1] == {"index": 1, "text": "x"}
+    assert q["entities"] == {"question": [], "answers": []}
 
 
 def test_review_pads_missing_feedback():
@@ -66,6 +68,40 @@ def test_is_playable():
 def test_simplified_uses_question_id():
     q = to_game_question(doc(question_id="abc"), simplified=True)
     assert q.id == "abc" and q.simplified
+
+
+AGENT = {"name": "Subagent", "kind": "actor", "aliases": ["helper"]}
+TOOL = {"name": "process_refund", "kind": "object"}
+
+
+def simple_q(**kw):
+    return to_game_question(doc(question_id="abc", **kw), simplified=True)
+
+
+def test_simplified_carries_entities_aligned_with_answers():
+    entities = {"question": [AGENT], "answers": [{"entities": [TOOL]}] * 5}
+    q = simple_q(entities=entities).model_dump()
+    assert q["entities"]["question"] == [AGENT]
+    assert len(q["entities"]["answers"]) == 4  # trimmed to the answers
+    assert q["entities"]["answers"][0] == {"entities": [{**TOOL, "aliases": []}]}
+
+    short = simple_q(entities={"answers": [{"entities": [TOOL]}]})
+    assert [len(a.entities) for a in short.entities.answers] == [1, 0, 0, 0]
+
+
+def test_entities_absent_malformed_or_original_give_none():
+    assert simple_q().entities.question == []
+    assert simple_q().entities.answers == [AnswerEntities()] * 4
+    assert simple_q(entities={"question": [{"name": "X", "kind": "planet"}]}).entities.question == []
+    original = to_game_question(doc(entities={"question": [AGENT]}))
+    assert original.entities.question == [] and original.entities.answers == []
+
+
+def test_entities_read_the_catalog_shape():
+    stored = {"entities": [{"id": "e1", **AGENT}], "question": ["e1"], "answers": [["e1"], [], [], []]}
+    q = simple_q(entities=stored)
+    assert q.entities.question[0].name == "Subagent"
+    assert q.entities.answers[0].entities[0].name == "Subagent"
 
 
 def client_with(exam=(), simple=(), rounds=None):

@@ -107,9 +107,11 @@ async def test_batches_exclude_everything_in_the_round(db):
 async def test_concurrent_batch_and_add_cannot_duplicate(db):
     docs = [question() for _ in range(3)]
     svc = await make_service(db, docs)
-    rid = ObjectId((await svc.create_round(1, "", "")).round_id)
+    started = await svc.create_round(1, "", "")
+    rid = ObjectId(started.round_id)
     rounds = RoundRepository(db.game_rounds)
-    other = str(docs[1]["_id"])
+    # A question the round does not have yet (the start samples one at random).
+    other = next(str(d["_id"]) for d in docs if str(d["_id"]) != started.items[0].id)
     # A search add lands between sampling a batch and writing it: the batch write must miss.
     assert await rounds.add_question(rid, other, {"correct": 1, "count": 4, "original": {}, "simplified": None})
     assert not await rounds.add_batch(rid, 1, {other: {}})

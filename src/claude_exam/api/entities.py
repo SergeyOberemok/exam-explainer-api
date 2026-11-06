@@ -84,8 +84,8 @@ performance metrics, cost, latency. Also leave out events, situations and facts 
 (a billing dispute, a failed audit, misrouting), message or conversation concepts \
 (context, history, a follow-up message) and generic groups of things already listed \
 individually ("MCP Tools" when each tool is named). Do not invent anything the text \
-does not support. Do not list every noun; keep a compact set (at most 16 entities, \
-at most 4 per answer).
+does not support. Do not list every noun; keep a compact set (at most \
+{{MAX_ENTITIES}} entities, at most {{MAX_PER_ANSWER}} per answer).
 
 OUTPUT FORMAT - respond with ONLY a single valid JSON object and nothing else - no \
 markdown fences, no prose, no comments. Exactly this schema:
@@ -116,9 +116,14 @@ referenced at least once.
 def _build_system_message(n_answers: int) -> str:
     letters = [chr(65 + i) for i in range(n_answers)]
     entries = ",\n    ".join(f'["<ids for answer {l}>"]' for l in letters)
-    return _SYSTEM_MESSAGE.replace(
-        "{{ANSWERS_SCHEMA}}", f'"answers_entities": [\n    {entries}\n  ]'
-    ).replace("{{N}}", str(n_answers))
+    return (
+        _SYSTEM_MESSAGE.replace(
+            "{{ANSWERS_SCHEMA}}", f'"answers_entities": [\n    {entries}\n  ]'
+        )
+        .replace("{{N}}", str(n_answers))
+        .replace("{{MAX_ENTITIES}}", str(MAX_ENTITIES))
+        .replace("{{MAX_PER_ANSWER}}", str(MAX_PER_ANSWER))
+    )
 
 
 def _build_user_message(item: dict, simplified: SimplifiedPrompt) -> str:

@@ -20,7 +20,11 @@
           "index": 2,
           "text": "none"
         }
-      ]
+      ],
+      "entities": {
+        "question": [],
+        "answers": []
+      }
     }
   ],
   "simplified": [],

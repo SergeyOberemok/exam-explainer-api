@@ -1,7 +1,17 @@
+import logging
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
+
+logger = logging.getLogger(__name__)
 
 
 class ImportResult(BaseModel):
@@ -64,6 +74,59 @@ OBJECT_ID_PATTERN = r"^[0-9a-f]{24}$"
 GameQuestionId = Annotated[str, Field(pattern=OBJECT_ID_PATTERN)]
 
 
+EntityKind = Literal["actor", "object", "action"]
+
+
+class VisualEntity(BaseModel):
+    """A reusable thing a diagram can show: who acts, what is handled, what is done.
+    The same entity is repeated wherever it is mentioned; match across questions by
+    normalized `name`."""
+
+    name: str
+    kind: EntityKind
+    aliases: list[str] = []
+
+
+class AnswerEntities(BaseModel):
+    """Entities of one answer (an object, since lists of lists are awkward for clients)."""
+
+    entities: list[VisualEntity] = []
+
+
+class PromptEntities(BaseModel):
+    """Entities of a simplified question, resolved per place they are mentioned."""
+
+    question: list[VisualEntity] = []
+    # One item per answer, index-aligned with `prompt.answers`.
+    answers: list[AnswerEntities] = []
+
+    @model_validator(mode="before")
+    @classmethod
+    def _from_catalog(cls, data: Any) -> Any:
+        """Read the first stored shape: a catalog plus id references. A malformed one
+        raises ValueError, which pydantic reports as a ValidationError."""
+        if not (isinstance(data, dict) and isinstance(data.get("entities"), list)):
+            return data
+        catalog: dict[str, dict] = {}
+        for entity in data["entities"]:
+            if not isinstance(entity, dict) or not isinstance(entity.get("id"), str):
+                raise ValueError("every catalog entity needs a string 'id'")
+            catalog[entity["id"]] = {k: v for k, v in entity.items() if k != "id"}
+
+        def pick(ids: Any) -> list[dict]:
+            if not isinstance(ids, list):
+                raise ValueError("entity references must be a list of ids")
+            return [catalog[i] for i in ids if isinstance(i, str) and i in catalog]
+
+        answers = data.get("answers", [])
+        if not isinstance(answers, list):
+            raise ValueError("'answers' must be a list of id lists")
+        return {
+            "question": pick(data.get("question", [])),
+            "answers": [{"entities": pick(ids)} for ids in answers],
+        }
+
+
 class GameAnswer(BaseModel):
     """One answer option, without whether it is correct."""
 
@@ -80,6 +143,9 @@ class GameQuestion(BaseModel):
     assessment_type: str
     question: str
     answers: list[GameAnswer]
+    # Visual entities of a simplified question (index-aligned with `answers`); empty
+    # lists for originals, search results and questions extracted before entities.
+    entities: PromptEntities = PromptEntities()
 
 
 class GameQuestionList(BaseModel):
@@ -240,46 +306,6 @@ class IcaMeta(BaseModel):
     total_tokens: int
 
 
-EntityKind = Literal["actor", "object", "action"]
-
-
-class VisualEntity(BaseModel):
-    """A reusable thing a diagram can show: who acts, what is handled, what is done.
-    The same entity is repeated wherever it is mentioned; match across questions by
-    normalized `name`."""
-
-    name: str
-    kind: EntityKind
-    aliases: list[str] = []
-
-
-class AnswerEntities(BaseModel):
-    """Entities of one answer (an object, since lists of lists are awkward for clients)."""
-
-    entities: list[VisualEntity] = []
-
-
-class PromptEntities(BaseModel):
-    """Entities of a simplified question, resolved per place they are mentioned."""
-
-    question: list[VisualEntity] = []
-    # One item per answer, index-aligned with `prompt.answers`.
-    answers: list[AnswerEntities] = []
-
-    @model_validator(mode="before")
-    @classmethod
-    def _from_catalog(cls, data: Any) -> Any:
-        """Read the first stored shape: a catalog plus id references."""
-        if isinstance(data, dict) and isinstance(data.get("entities"), list):
-            catalog = {e["id"]: {k: v for k, v in e.items() if k != "id"} for e in data["entities"]}
-            pick = lambda ids: [catalog[i] for i in ids if i in catalog]  # noqa: E731
-            return {
-                "question": pick(data.get("question", [])),
-                "answers": [{"entities": pick(ids)} for ids in data.get("answers", [])],
-            }
-        return data
-
-
 class SimplifiedQuestion(BaseModel):
     """Record stored in `examination_simplified`, keyed by the examination `_id`."""
 
@@ -298,6 +324,17 @@ class SimplifiedQuestion(BaseModel):
     created_at: datetime
     updated_at: datetime
 
+    @field_validator("entities", mode="wrap")
+    @classmethod
+    def _tolerate_malformed_entities(cls, value: Any, handler) -> PromptEntities:
+        """Entities are decoration: a malformed stored value reads as none instead of
+        failing every route that returns the record (re-extract to repair it)."""
+        try:
+            return handler(value if value is not None else {})
+        except ValidationError as exc:
+            logger.warning("ignoring malformed stored entities: %s", exc)
+            return PromptEntities()
+
 
 class EntitiesBackfill(BaseModel):
     """Result of starting an entity backfill; `job_id` is None when nothing needs it."""
@@ -306,23 +343,43 @@ class EntitiesBackfill(BaseModel):
     total: int
 
 
+# The pipeline is import -> simplify -> extract entities; entities are added to an
+# existing simplified record, so they always come second.
+# "simplify": simplify each question, then extract its entities.
+# "simplify_only": only simplify (entities are left for a later "entities" job).
+# "entities": only extract entities for questions that are already simplified.
+JobMode = Literal["simplify", "simplify_only", "entities"]
+# Which step a per-question job error comes from.
+JobStage = Literal["simplify", "entities"]
+
+
 class SimplificationError(BaseModel):
     question_id: str
+    # Absent on errors recorded before stages existed.
+    stage: JobStage = "simplify"
     status_code: int
     detail: str
 
 
 class SimplificationJob(BaseModel):
-    """Progress of the batch started after `/examination/import`."""
+    """Progress of a simplification or entity job (see `JobMode`)."""
 
     id: str
     source: str
     model_id: IcaModelId
+    # Defaults cover jobs recorded before these fields existed.
+    mode: JobMode = "simplify"
+    only_missing: bool = False
     status: Literal["queued", "running", "completed", "failed"]
     total: int
     processed: int
     succeeded: int
+    # Every question with an error; `entities_failed` of them still got their
+    # simplified text stored (only the entity step failed).
     failed: int
+    entities_failed: int = 0
+    # Entity jobs with `only_missing`: questions that already had entities when reached.
+    skipped: int = 0
     errors: list[SimplificationError]
     created_at: datetime
     started_at: datetime | None = None

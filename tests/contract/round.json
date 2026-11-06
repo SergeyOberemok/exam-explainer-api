@@ -20,7 +20,11 @@
           "index": 2,
           "text": "X-Key"
         }
-      ]
+      ],
+      "entities": {
+        "question": [],
+        "answers": []
+      }
     },
     {
       "id": "65f0000000000000000000a2",
@@ -45,7 +49,11 @@
           "index": 3,
           "text": "tools"
         }
-      ]
+      ],
+      "entities": {
+        "question": [],
+        "answers": []
+      }
     }
   ],
   "simplified": [
@@ -68,7 +76,48 @@
           "index": 2,
           "text": "X-Key"
         }
-      ]
+      ],
+      "entities": {
+        "question": [
+          {
+            "name": "API Key",
+            "kind": "object",
+            "aliases": [
+              "key"
+            ]
+          },
+          {
+            "name": "Send Request",
+            "kind": "action",
+            "aliases": []
+          }
+        ],
+        "answers": [
+          {
+            "entities": [
+              {
+                "name": "Authorization",
+                "kind": "object",
+                "aliases": [
+                  "auth header"
+                ]
+              }
+            ]
+          },
+          {
+            "entities": [
+              {
+                "name": "x-api-key",
+                "kind": "object",
+                "aliases": []
+              }
+            ]
+          },
+          {
+            "entities": []
+          }
+        ]
+      }
     }
   ],
   "total": 3,

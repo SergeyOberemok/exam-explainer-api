@@ -1,5 +1,4 @@
 import json
-from datetime import datetime, timezone
 from typing import Annotated
 
 from bson import ObjectId
@@ -13,7 +12,7 @@ from fastapi import (
     UploadFile,
 )
 
-from claude_exam.api.batch import run_simplification_job
+from claude_exam.api.batch import new_job, run_simplification_job
 from claude_exam.api.dependencies import (
     AsyncCollectionDep,
     AsyncJobsCollectionDep,
@@ -55,11 +54,19 @@ async def import_practice_exam(
     model_id: Annotated[
         IcaModelId, Query(description="ICA model used for simplification")
     ] = "claude-haiku-5-5",
+    entities: Annotated[
+        bool,
+        Query(
+            description="Also extract visual entities after simplifying each question "
+            "(false: simplify only; add them later with POST /examination/entities/backfill)"
+        ),
+    ] = True,
 ) -> ImportResult:
     """
     Import a practice-exam JSON file. Unless `simplify=false`, a background job
     then simplifies each newly imported question through ICA, replacing any
-    stored simplified record; track it via `GET /examination/jobs/{job_id}`.
+    stored simplified record, and (unless `entities=false`) extracts its visual
+    entities onto that record; track it via `GET /examination/jobs/{job_id}`.
     """
     try:
         data = json.loads(await file.read())
@@ -84,22 +91,8 @@ async def import_practice_exam(
 
     job_id: str | None = None
     if simplify and inserted_ids:
-        job = await jobs.insert_one(
-            {
-                "source": source,
-                "model_id": model_id,
-                "status": "queued",
-                "total": len(inserted_ids),
-                "processed": 0,
-                "succeeded": 0,
-                "failed": 0,
-                "errors": [],
-                "created_at": datetime.now(timezone.utc),
-                "heartbeat_at": datetime.now(timezone.utc),
-                "started_at": None,
-                "finished_at": None,
-            }
-        )
+        mode = "simplify" if entities else "simplify_only"
+        job = await jobs.insert_one(new_job(source, model_id, len(inserted_ids), mode))
         job_id = str(job.inserted_id)
         background_tasks.add_task(
             run_simplification_job,
@@ -109,6 +102,7 @@ async def import_practice_exam(
             job.inserted_id,
             inserted_ids,
             model_id,
+            mode,
         )
 
     return ImportResult(source=source, inserted=len(inserted_ids), job_id=job_id)
@@ -120,18 +114,30 @@ async def extract_question_entities(
     collection: AsyncCollectionDep,
     simplified: AsyncSimplifiedCollectionDep,
     ica: IcaClientDep,
+    lock: SimplificationLockDep,
     model_id: Annotated[
         IcaModelId, Query(description="ICA model used for extraction")
     ] = "claude-haiku-5-5",
+    max_tokens: Annotated[
+        int | None, Query(ge=1, description="Token limit for the extraction reply")
+    ] = None,
 ) -> SimplifiedQuestion:
     """
     (Re)extract the visual entities of one already simplified question through ICA
     and store them on its simplified record; the simplified text is not touched.
+    Shares the job lock so it never adds ICA load on top of a running job: while a
+    job runs it answers 409 (retry once the job has finished) instead of waiting.
     """
     doc = await collection.find_one({"_id": question_id})
     if doc is None:
         raise HTTPException(status_code=404, detail="question not found")
-    return await enrich_and_store(ica, simplified, doc, model_id)
+    if lock.locked():
+        raise HTTPException(
+            status_code=409,
+            detail="a simplification job is running; retry when it has finished",
+        )
+    async with lock:
+        return await enrich_and_store(ica, simplified, doc, model_id, max_tokens)
 
 
 @router.post("/entities/backfill", status_code=202)
@@ -152,7 +158,9 @@ async def backfill_entities(
 ) -> EntitiesBackfill:
     """
     Start a background job that extracts entities for already simplified questions
-    (by default only those without any); track it via `GET /examination/jobs/{job_id}`.
+    (by default only those without any; the job checks again when it reaches each
+    question, so repeated or overlapping backfills skip what is already done);
+    track it via `GET /examination/jobs/{job_id}`.
     """
     # `entities_ica` is set only by a successful extraction, so a question that really
     # has no entities is not picked again (None also matches a missing field).
@@ -165,22 +173,8 @@ async def backfill_entities(
     if not question_ids:
         return EntitiesBackfill(job_id=None, total=0)
 
-    now = datetime.now(timezone.utc)
     job = await jobs.insert_one(
-        {
-            "source": "entities-backfill",
-            "model_id": model_id,
-            "status": "queued",
-            "total": len(question_ids),
-            "processed": 0,
-            "succeeded": 0,
-            "failed": 0,
-            "errors": [],
-            "created_at": now,
-            "heartbeat_at": now,
-            "started_at": None,
-            "finished_at": None,
-        }
+        new_job("entities-backfill", model_id, len(question_ids), "entities", only_missing)
     )
     background_tasks.add_task(
         run_simplification_job,
@@ -191,6 +185,7 @@ async def backfill_entities(
         question_ids,
         model_id,
         "entities",
+        only_missing,
     )
     return EntitiesBackfill(job_id=str(job.inserted_id), total=len(question_ids))
 

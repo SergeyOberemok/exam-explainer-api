@@ -1,5 +1,6 @@
-"""The import -> simplify -> extract entities pipeline: job modes, the routes that start
-them, and the standalone entity step updating an existing simplified record.
+"""The import -> simplify -> extract entities -> pick icons pipeline: job modes, the
+routes that start them, and the standalone entity and icon steps updating an existing
+simplified record.
 
 The last test runs the same pipeline against a real MongoDB (opt-in, like
 `tests/test_game_mongo.py`): TEST_MONGO_URL=mongodb://127.0.0.1:27017.
@@ -25,12 +26,14 @@ from claude_exam.api.dependencies import (
     get_async_collection,
     get_async_jobs_collection,
     get_async_mongo_client,
+    get_async_objectives_collection,
     get_async_simplified_collection,
     get_ica_client,
     get_simplification_lock,
 )
 from claude_exam.api.entities import MAX_ENTITIES, MAX_PER_ANSWER, _build_system_message
 from claude_exam.api.main import app
+from claude_exam.api.objective_catalog import CATALOG_VERSION
 from claude_exam.api.schemas import PromptEntities, SimplificationJob, SimplifiedQuestion
 
 pytestmark = pytest.mark.anyio
@@ -119,6 +122,7 @@ class FakeMongo:
         self.db = {
             "examination": Coll(*examination),
             "examination_simplified": Coll(),
+            "question_objectives": Coll(),
             "simplification_jobs": Coll(),
         }
 
@@ -149,23 +153,56 @@ def entities_reply(name="plan mode"):
     }
 
 
-class ScriptedIca:
-    """Answers the simplify and entity calls from separate queues (an Exception item is
-    raised); defaults to good replies once a queue is empty. Records the call kinds."""
+def icons_reply():
+    return {"entities": {"plan mode": "plan"}, "question": "mode", "answers": ["write", "plan"]}
 
-    def __init__(self, simplify=(), entities=()):
-        self.queues = {"simplify": list(simplify), "entities": list(entities)}
+
+def objectives_reply():
+    return {
+        "primary": "claude-code-planning",
+        "secondary": [],
+        "level": "apply",
+        "difficulty": 1,
+        "distractors": [{"misconception": "Auto-accepting edits keeps files unchanged.", "confused_with": None}, None],
+    }
+
+
+class ScriptedIca:
+    """Answers the simplify, entity, icon and objectives calls from separate queues (an
+    Exception item is raised); defaults to good replies once a queue is empty. Records
+    the call kinds."""
+
+    DEFAULTS = {
+        "simplify": lambda: SIMPLE,
+        "entities": entities_reply,
+        "icons": icons_reply,
+        "objectives": objectives_reply,
+    }
+
+    def __init__(self, simplify=(), entities=(), icons=(), objectives=()):
+        self.queues = {
+            "simplify": list(simplify),
+            "entities": list(entities),
+            "icons": list(icons),
+            "objectives": list(objectives),
+        }
         self.calls = []
         self.max_tokens = []
 
     async def chat_model(self, model_id, prompt, system=None, max_tokens=None):
-        kind = "entities" if "visual entities" in (system or "") else "simplify"
+        system = system or ""
+        kind = (
+            "icons" if "icon catalog" in system
+            else "objectives" if "learning objective" in system
+            else "entities" if "visual entities" in system
+            else "simplify"
+        )
         self.calls.append(kind)
         self.max_tokens.append(max_tokens)
         item = self.queues[kind].pop(0) if self.queues[kind] else None
         if isinstance(item, Exception):
             raise item
-        return item or reply(SIMPLE if kind == "simplify" else entities_reply())
+        return item or reply(self.DEFAULTS[kind]())
 
 
 def question(**kw):
@@ -208,11 +245,58 @@ async def test_simplify_mode_simplifies_then_adds_entities():
     q = question()
     mongo, ica = FakeMongo([q]), ScriptedIca()
     job = await run_job(mongo, ica, [q["_id"]], "simplify")
-    assert ica.calls == ["simplify", "entities"]
+    assert ica.calls == ["simplify", "entities", "icons"]
     assert (job.mode, job.status, job.succeeded, job.failed) == ("simplify", "completed", 1, 0)
     record = await stored(mongo, q)
     assert record["entities"]["answers"][1]["entities"][0]["name"] == "plan mode"
     assert record["entities_ica"] is not None
+    assert record["entities"]["answers"][1] == {
+        "entities": [{"name": "plan mode", "kind": "object", "aliases": [], "icon": "plan"}],
+        "icon": "plan",
+    }
+    assert record["entities"]["question_icon"] == "mode" and record["icons_ica"] is not None
+
+
+async def test_icons_failure_after_entities_is_partial_not_a_failed_job():
+    q = question()
+    mongo = FakeMongo([q])
+    ica = ScriptedIca(icons=[HTTPException(status_code=400, detail="boom")])
+    job = await run_job(mongo, ica, [q["_id"]], "simplify")
+    assert (job.status, job.succeeded, job.failed) == ("completed", 0, 1)
+    assert (job.entities_failed, job.icons_failed) == (0, 1)
+    assert job.errors[0].stage == "icons"
+    record = await stored(mongo, q)
+    assert record["entities_ica"] is not None and record["icons_ica"] is None
+
+
+async def test_icons_job_picks_only_where_missing_and_keeps_the_rest():
+    q = question()
+    mongo, ica = FakeMongo([q]), ScriptedIca(icons=[HTTPException(status_code=400, detail="x")])
+    await run_job(mongo, ica, [q["_id"]], "simplify")  # entities stored, icons failed
+    before = await stored(mongo, q)
+    ica.calls.clear()
+
+    job = await run_job(mongo, ica, [q["_id"]], "icons", only_missing=True)
+    after = await stored(mongo, q)
+    assert ica.calls == ["icons"]
+    assert (job.mode, job.status, job.succeeded) == ("icons", "completed", 1)
+    assert after["entities"]["question"][0]["icon"] == "plan"
+    for unchanged in ("_id", "prompt", "ica", "entities_ica", "created_at"):
+        assert after[unchanged] == before[unchanged]
+
+    again = await run_job(mongo, ica, [q["_id"]], "icons", only_missing=True)
+    assert ica.calls == ["icons"] and again.skipped == 1
+
+
+async def test_new_entities_drop_the_old_icons_and_get_new_ones():
+    q = question()
+    mongo, ica = FakeMongo([q]), ScriptedIca()
+    await run_job(mongo, ica, [q["_id"]], "simplify")
+    ica.queues["icons"].append(HTTPException(status_code=400, detail="x"))
+    job = await run_job(mongo, ica, [q["_id"]], "entities")
+    record = await stored(mongo, q)
+    assert job.icons_failed == 1
+    assert record["icons_ica"] is None and record["entities"]["question"][0]["icon"] is None
 
 
 async def test_simplify_only_mode_leaves_entities_for_later():
@@ -252,7 +336,7 @@ async def test_entity_step_retries_transient_errors():
     mongo = FakeMongo([q])
     ica = ScriptedIca(entities=[HTTPException(status_code=429, detail="slow down")])
     job = await run_job(mongo, ica, [q["_id"]], "simplify")
-    assert ica.calls == ["simplify", "entities", "entities"]
+    assert ica.calls == ["simplify", "entities", "entities", "icons"]
     assert job.succeeded == 1
 
 
@@ -265,7 +349,7 @@ async def test_entities_job_updates_existing_record_only():
     job = await run_job(mongo, ica, [q["_id"]], "entities", only_missing=True)
     after = await stored(mongo, q)
     assert (job.mode, job.status, job.succeeded, job.skipped) == ("entities", "completed", 1, 0)
-    assert ica.calls == ["simplify", "entities"]
+    assert ica.calls == ["simplify", "entities", "icons"]
     assert after["entities"]["question"][0]["name"] == "plan mode"
     for unchanged in ("_id", "prompt", "ica", "created_at", "correct_response"):
         assert after[unchanged] == before[unchanged]
@@ -303,6 +387,86 @@ async def test_entities_job_reports_a_question_that_is_not_simplified():
     assert (job.status, job.errors[0].stage, job.errors[0].status_code) == ("failed", "entities", 404)
 
 
+# --- objectives --------------------------------------------------------------------
+
+TAGGABLE = "Domain 3: Claude Code Configuration & Workflows"
+
+
+async def tags(mongo, doc):
+    return await mongo.get_default_database()["question_objectives"].find_one(
+        {"question_id": str(doc["_id"])}
+    )
+
+
+async def test_objectives_job_tags_without_a_simplified_record():
+    q = question(section=TAGGABLE)
+    mongo, ica = FakeMongo([q]), ScriptedIca()
+    job = await run_job(mongo, ica, [q["_id"]], "objectives")
+    assert ica.calls == ["objectives"]
+    assert (job.mode, job.status, job.succeeded) == ("objectives", "completed", 1)
+    record = await tags(mongo, q)
+    assert record["objectives"] == ["claude-code-planning"] and record["section"] == TAGGABLE
+    assert (record["level"], record["difficulty"]) == ("apply", 1)
+    assert record["distractors"][1] is None and record["distractors"][0]["misconception"]
+    assert record["catalog_version"] == CATALOG_VERSION and record["created_at"] == record["updated_at"]
+    assert await stored(mongo, q) is None
+
+
+async def test_objectives_job_skips_current_records_and_redoes_outdated_ones():
+    q = question(section=TAGGABLE)
+    mongo, ica = FakeMongo([q]), ScriptedIca()
+    await run_job(mongo, ica, [q["_id"]], "objectives")
+    first = await tags(mongo, q)
+
+    job = await run_job(mongo, ica, [q["_id"]], "objectives", only_missing=True)
+    assert (job.skipped, job.succeeded) == (1, 0) and ica.calls == ["objectives"]
+
+    # The catalog changed since: the record counts as missing and is tagged again.
+    db = mongo.get_default_database()
+    await db["question_objectives"].update_one(
+        {"question_id": str(q["_id"])}, {"$set": {"catalog_version": "old"}}
+    )
+    job = await run_job(mongo, ica, [q["_id"]], "objectives", only_missing=True)
+    assert (job.skipped, job.succeeded) == (0, 1) and ica.calls == ["objectives"] * 2
+    again = await tags(mongo, q)
+    assert again["catalog_version"] == CATALOG_VERSION and again["created_at"] == first["created_at"]
+    assert len(db["question_objectives"].docs) == 1
+
+
+async def test_objectives_job_retries_a_rejected_reply_but_not_a_missing_catalog():
+    good, other = question(section=TAGGABLE), question(section="Not in the catalog")
+    bad = reply({**objectives_reply(), "primary": "not-in-the-catalog"})
+    mongo, ica = FakeMongo([good, other]), ScriptedIca(objectives=[bad])
+    job = await run_job(mongo, ica, [good["_id"], other["_id"]], "objectives")
+    assert ica.calls == ["objectives", "objectives"]  # rejected, then accepted; none for `other`
+    assert (job.status, job.succeeded, job.failed) == ("completed", 1, 1)
+    assert (job.errors[0].stage, job.errors[0].status_code) == ("objectives", 422)
+    assert await tags(mongo, other) is None
+
+
+def test_objectives_backfill_and_single_question_route():
+    a, b = question(section=TAGGABLE), question(section="Other")
+    mongo, ica = FakeMongo([a, b]), ScriptedIca()
+    client = client_for(mongo, ica)
+
+    one = client.post("/examination/objectives/backfill", params={"section": TAGGABLE, "limit": 5})
+    assert one.status_code == 202 and one.json()["total"] == 1
+    job = client.get(f"/examination/jobs/{one.json()['job_id']}").json()
+    assert (job["mode"], job["only_missing"], job["succeeded"]) == ("objectives", True, 1)
+
+    # Only the untagged question is left; its section has no objectives yet.
+    rest = client.post("/examination/objectives/backfill")
+    assert rest.json()["total"] == 1
+    job = client.get(f"/examination/jobs/{rest.json()['job_id']}").json()
+    assert (job["status"], job["errors"][0]["status_code"]) == ("failed", 422)
+    assert client.post("/examination/objectives/backfill", params={"only_missing": "false", "limit": 1}).json()["total"] == 1
+
+    single = client.post(f"/examination/{a['_id']}/objectives")
+    assert single.status_code == 200 and single.json()["objectives"] == ["claude-code-planning"]
+    assert client.post(f"/examination/{b['_id']}/objectives").status_code == 422
+    assert client.post(f"/examination/{ObjectId()}/objectives").status_code == 404
+
+
 # --- routes ------------------------------------------------------------------------
 
 
@@ -311,6 +475,7 @@ def client_for(mongo, ica, lock=None):
     lock = lock or asyncio.Semaphore(1)
     app.dependency_overrides[get_async_collection] = lambda: db["examination"]
     app.dependency_overrides[get_async_simplified_collection] = lambda: db["examination_simplified"]
+    app.dependency_overrides[get_async_objectives_collection] = lambda: db["question_objectives"]
     app.dependency_overrides[get_async_jobs_collection] = lambda: db["simplification_jobs"]
     app.dependency_overrides[get_async_mongo_client] = lambda: mongo
     app.dependency_overrides[get_ica_client] = lambda: ica
@@ -328,7 +493,7 @@ def upload(client, **params):
 
 @pytest.mark.parametrize(
     ("params", "mode", "calls"),
-    [({}, "simplify", ["simplify", "entities"]), ({"entities": "false"}, "simplify_only", ["simplify"])],
+    [({}, "simplify", ["simplify", "entities", "icons"]), ({"entities": "false"}, "simplify_only", ["simplify"])],
 )
 def test_import_runs_entities_unless_disabled(params, mode, calls):
     mongo, ica = FakeMongo(), ScriptedIca()
@@ -353,6 +518,25 @@ def test_import_without_entities_then_backfill_adds_them():
 
     # Nothing left: a second backfill starts no job.
     assert client.post("/examination/entities/backfill").json() == {"job_id": None, "total": 0}
+
+
+def test_icons_backfill_and_single_question_route():
+    mongo, ica = FakeMongo(), ScriptedIca(icons=[HTTPException(status_code=400, detail="x")])
+    client = client_for(mongo, ica)
+    upload(client)  # the icon step of the import job fails
+    records = mongo.get_default_database()["examination_simplified"].docs
+    assert records[0]["icons_ica"] is None
+
+    resp = client.post("/examination/icons/backfill")
+    assert resp.status_code == 202 and resp.json()["total"] == 1
+    job = client.get(f"/examination/jobs/{resp.json()['job_id']}").json()
+    assert (job["mode"], job["succeeded"]) == ("icons", 1)
+    assert records[0]["entities"]["answers"][0]["icon"] == "write"
+    assert client.post("/examination/icons/backfill").json() == {"job_id": None, "total": 0}
+
+    one = client.post(f"/examination/{records[0]['question_id']}/icons")
+    assert one.status_code == 200 and one.json()["entities"]["question_icon"] == "mode"
+    assert client.post(f"/examination/{ObjectId()}/icons").status_code == 404
     # Forcing re-extraction picks it up again.
     assert client.post("/examination/entities/backfill", params={"only_missing": "false"}).json()["total"] == 1
 

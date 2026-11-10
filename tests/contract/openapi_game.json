@@ -1,5 +1,27 @@
 {
   "paths": {
+    "/v1/game/objectives": {
+      "get": {
+        "description": "The learning objectives questions are tagged with, and how many playable\nquestions each has. A key can be sent as `objective` when starting a round.",
+        "operationId": "list_game_objectives_v1_game_objectives_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GameObjectiveList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Game Objectives",
+        "tags": [
+          "game"
+        ]
+      }
+    },
     "/v1/game/questions": {
       "get": {
         "description": "A batch of playable questions (random by default), without answer keys. To play,\nstart a round.",
@@ -134,7 +156,7 @@
     },
     "/v1/game/rounds": {
       "post": {
-        "description": "Start a round: random playable questions and their simplified versions, in one\nresponse. The answer key stays in the round document. 404 `no_questions` when nothing\nmatches the filters.",
+        "description": "Start a round: random playable questions and their simplified versions, in one\nresponse. The answer key stays in the round document. 404 `no_questions` when nothing\nmatches the filters (`objective` keeps only questions tagged with that objective).",
         "operationId": "create_game_round_v1_game_rounds_post",
         "requestBody": {
           "content": {
@@ -705,6 +727,17 @@
           },
           "title": "Entities",
           "type": "array"
+        },
+        "icon": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Icon"
         }
       },
       "title": "AnswerEntities",
@@ -766,6 +799,11 @@
         "is_correct": {
           "title": "Is Correct",
           "type": "boolean"
+        },
+        "misconception": {
+          "default": "",
+          "title": "Misconception",
+          "type": "string"
         },
         "original": {
           "$ref": "#/components/schemas/GameReview"
@@ -830,6 +868,55 @@
       "title": "GameFiftyFiftyResult",
       "type": "object"
     },
+    "GameObjective": {
+      "properties": {
+        "count": {
+          "title": "Count",
+          "type": "integer"
+        },
+        "key": {
+          "title": "Key",
+          "type": "string"
+        },
+        "section": {
+          "title": "Section",
+          "type": "string"
+        },
+        "statement": {
+          "title": "Statement",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "section",
+        "title",
+        "statement",
+        "count"
+      ],
+      "title": "GameObjective",
+      "type": "object"
+    },
+    "GameObjectiveList": {
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/components/schemas/GameObjective"
+          },
+          "title": "Items",
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "title": "GameObjectiveList",
+      "type": "object"
+    },
     "GameQuestion": {
       "properties": {
         "answers": {
@@ -843,6 +930,11 @@
           "title": "Assessment Type",
           "type": "string"
         },
+        "difficulty": {
+          "default": 0,
+          "title": "Difficulty",
+          "type": "integer"
+        },
         "entities": {
           "$ref": "#/components/schemas/PromptEntities",
           "default": {
@@ -853,6 +945,14 @@
         "id": {
           "title": "Id",
           "type": "string"
+        },
+        "objectives": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Objectives",
+          "type": "array"
         },
         "question": {
           "title": "Question",
@@ -1065,6 +1165,12 @@
           "title": "Count",
           "type": "integer"
         },
+        "objective": {
+          "default": "",
+          "maxLength": 100,
+          "title": "Objective",
+          "type": "string"
+        },
         "section": {
           "default": "",
           "maxLength": 200,
@@ -1122,6 +1228,17 @@
           },
           "title": "Question",
           "type": "array"
+        },
+        "question_icon": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Question Icon"
         }
       },
       "title": "PromptEntities",
@@ -1177,6 +1294,17 @@
           },
           "title": "Aliases",
           "type": "array"
+        },
+        "icon": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Icon"
         },
         "kind": {
           "enum": [

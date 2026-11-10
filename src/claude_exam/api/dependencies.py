@@ -46,6 +46,17 @@ AsyncSimplifiedCollectionDep = Annotated[
 ]
 
 
+def get_async_objectives_collection(request: Request) -> AsyncCollection:
+    """Learning-objective tags, one record per examination question."""
+    client: AsyncMongoClient = request.app.state.async_mongo_client
+    return client.get_default_database()["question_objectives"]
+
+
+AsyncObjectivesCollectionDep = Annotated[
+    AsyncCollection, Depends(get_async_objectives_collection)
+]
+
+
 def get_async_rounds_collection(request: Request) -> AsyncCollection:
     """Game rounds: which questions a round holds and what has been answered."""
     client: AsyncMongoClient = request.app.state.async_mongo_client
@@ -107,8 +118,11 @@ def get_game_service(
     examination: AsyncCollectionDep,
     simplified: AsyncSimplifiedCollectionDep,
     rounds: AsyncRoundsCollectionDep,
+    objectives: AsyncObjectivesCollectionDep,
 ) -> GameService:
-    return GameService(QuestionRepository(examination, simplified), RoundRepository(rounds))
+    return GameService(
+        QuestionRepository(examination, simplified, objectives), RoundRepository(rounds)
+    )
 
 
 GameServiceDep = Annotated[GameService, Depends(get_game_service)]

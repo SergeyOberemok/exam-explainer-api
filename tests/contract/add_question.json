@@ -20,9 +20,15 @@
       }
     ],
     "entities": {
+      "question_icon": null,
       "question": [],
       "answers": []
-    }
+    },
+    "objectives": [
+      "tools-mcp-config",
+      "tools-errors"
+    ],
+    "difficulty": 2
   },
   "simplified": [
     {
@@ -46,18 +52,21 @@
         }
       ],
       "entities": {
+        "question_icon": "credential",
         "question": [
           {
             "name": "API Key",
             "kind": "object",
             "aliases": [
               "key"
-            ]
+            ],
+            "icon": "credential"
           },
           {
             "name": "Send Request",
             "kind": "action",
-            "aliases": []
+            "aliases": [],
+            "icon": "send"
           }
         ],
         "answers": [
@@ -68,24 +77,34 @@
                 "kind": "object",
                 "aliases": [
                   "auth header"
-                ]
+                ],
+                "icon": null
               }
-            ]
+            ],
+            "icon": "permission"
           },
           {
             "entities": [
               {
                 "name": "x-api-key",
                 "kind": "object",
-                "aliases": []
+                "aliases": [],
+                "icon": null
               }
-            ]
+            ],
+            "icon": null
           },
           {
-            "entities": []
+            "entities": [],
+            "icon": "tags"
           }
         ]
-      }
+      },
+      "objectives": [
+        "tools-mcp-config",
+        "tools-errors"
+      ],
+      "difficulty": 2
     }
   ]
 }

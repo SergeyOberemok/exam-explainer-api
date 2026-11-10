@@ -14,6 +14,7 @@ from claude_exam.api.schemas import (
     GameAnswerResult,
     GameFiftyFiftyRequest,
     GameFiftyFiftyResult,
+    GameObjectiveList,
     GameQuestion,
     GameQuestionList,
     GameRound,
@@ -46,8 +47,10 @@ AssessmentType = Annotated[str | None, Query(max_length=100)]
 async def create_game_round(body: GameRoundRequest, service: GameServiceDep) -> GameRound:
     """Start a round: random playable questions and their simplified versions, in one
     response. The answer key stays in the round document. 404 `no_questions` when nothing
-    matches the filters."""
-    return await service.create_round(body.count, body.section, body.assessment_type)
+    matches the filters (`objective` keeps only questions tagged with that objective)."""
+    return await service.create_round(
+        body.count, body.section, body.assessment_type, body.objective
+    )
 
 
 @router.post("/rounds/{round_id}/batches")
@@ -147,3 +150,10 @@ async def list_game_sections(
     """Distinct sections, so the game can offer a category choice. With
     `simplified=true` only sections that have simplified questions."""
     return GameSectionList(items=await service.sections(simplified=simplified))
+
+
+@router.get("/objectives")
+async def list_game_objectives(service: GameServiceDep) -> GameObjectiveList:
+    """The learning objectives questions are tagged with, and how many playable
+    questions each has. A key can be sent as `objective` when starting a round."""
+    return await service.objectives()

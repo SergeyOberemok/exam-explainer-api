@@ -22,9 +22,12 @@
         }
       ],
       "entities": {
+        "question_icon": null,
         "question": [],
         "answers": []
-      }
+      },
+      "objectives": [],
+      "difficulty": 0
     }
   ],
   "simplified": [],

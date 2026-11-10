@@ -23,9 +23,12 @@ from claude_exam.api.game.domain import (
     usable_simplified,
 )
 from claude_exam.api.game.repository import QuestionRepository, RoundRepository
+from claude_exam.api.objective_catalog import OBJECTIVES
 from claude_exam.api.schemas import (
     GameAnswerResult,
     GameFiftyFiftyResult,
+    GameObjective,
+    GameObjectiveList,
     GameQuestion,
     GameQuestionList,
     GameReview,
@@ -37,6 +40,8 @@ from claude_exam.api.schemas import (
 
 def answer_result(question_id: str, answer_index: int, entry: dict) -> GameAnswerResult:
     simplified = entry.get("simplified")
+    # Entries stored before objectives existed have no misconceptions.
+    misconceptions = entry.get("misconceptions") or []
     return GameAnswerResult(
         question_id=question_id,
         answer_index=answer_index,
@@ -45,6 +50,7 @@ def answer_result(question_id: str, answer_index: int, entry: dict) -> GameAnswe
         original=GameReview(**entry["original"]),
         has_simplified=simplified is not None,
         simplified=GameReview(**simplified) if simplified else GameReview(),
+        misconception=misconceptions[answer_index] if answer_index < len(misconceptions) else "",
     )
 
 
@@ -57,37 +63,53 @@ class GameService:
 
     async def _entries_for(
         self, docs: list[dict]
-    ) -> tuple[dict[str, dict], list[GameQuestion]]:
-        """Round entries for playable `docs` and the simplified versions to offer."""
-        simplified_by_id = await self.questions.get_simplified_many([str(d["_id"]) for d in docs])
+    ) -> tuple[dict[str, dict], list[GameQuestion], list[GameQuestion]]:
+        """Round entries for playable `docs`, the questions to send and the simplified
+        versions to offer."""
+        ids = [str(d["_id"]) for d in docs]
+        simplified_by_id = await self.questions.get_simplified_many(ids)
+        tags_by_id = await self.questions.get_tags_many(ids)
         entries: dict[str, dict] = {}
+        items: list[GameQuestion] = []
         simplified_items: list[GameQuestion] = []
         for doc in docs:
             question_id = str(doc["_id"])
+            tags = tags_by_id.get(question_id)
             simplified = usable_simplified(doc, simplified_by_id.get(question_id))
-            entries[question_id] = round_entry(doc, simplified)
+            entries[question_id] = round_entry(doc, simplified, tags)
+            items.append(to_game_question(doc, tags=tags))
             if simplified is not None:
-                simplified_items.append(to_game_question(simplified, simplified=True))
-        return entries, simplified_items
+                simplified_items.append(to_game_question(simplified, simplified=True, tags=tags))
+        return entries, items, simplified_items
+
+    async def _objective_ids(self, filters: dict) -> list[str] | None:
+        """The questions a round's `objective` filter allows; None when it has none."""
+        objective = filters.get("objective")
+        return await self.questions.ids_with_objective(objective) if objective else None
 
     async def create_round(
-        self, count: int, section: str, assessment_type: str
+        self, count: int, section: str, assessment_type: str, objective: str = ""
     ) -> GameRound:
         """Random playable questions and their simplified versions; the key stays stored."""
-        query = playable_query(section, assessment_type)
+        filters = {
+            "section": section or "",
+            "assessment_type": assessment_type or "",
+            "objective": objective or "",
+        }
+        query = playable_query(
+            section, assessment_type, only_ids=await self._objective_ids(filters)
+        )
         docs, total = await self.questions.fetch_with_total(query, count * OVERSAMPLE_FACTOR)
         originals = pick_playable(docs, count)
         if not originals:
             # Nothing to play: don't store an empty round.
             raise errors.NoQuestions()
 
-        entries, simplified_items = await self._entries_for(originals)
-        round_id = await self.rounds.create(
-            {"section": section or "", "assessment_type": assessment_type or ""}, entries
-        )
+        entries, items, simplified_items = await self._entries_for(originals)
+        round_id = await self.rounds.create(filters, entries)
         return GameRound(
             round_id=round_id,
-            items=[to_game_question(d) for d in originals],
+            items=items,
             simplified=simplified_items,
             total=total,
             fifty_fifty_charges=FIFTY_FIFTY_CHARGES,
@@ -113,26 +135,32 @@ class GameService:
         if room <= 0:
             raise errors.RoundFull()
         count = min(count, room)
-        query = playable_query(filters.get("section"), filters.get("assessment_type"), in_round)
+        only = await self._objective_ids(filters)
+        query = playable_query(
+            filters.get("section"), filters.get("assessment_type"), in_round, only
+        )
         originals = pick_playable(
             await self.questions.sample(query, count * OVERSAMPLE_FACTOR), count
         )
         if not originals:
             return GameRoundBatch(batch_index=batch_index, items=[], simplified=[], remaining=0)
 
-        entries, simplified_items = await self._entries_for(originals)
+        entries, items, simplified_items = await self._entries_for(originals)
         if not await self.rounds.add_batch(round_id, batch_index, entries):
             # Another request changed the round first (a concurrent batch or search add).
             # A retry either gets the stored batch or samples again without the new questions.
             raise errors.RoundChanged()
         remaining = await self.questions.count(
             playable_query(
-                filters.get("section"), filters.get("assessment_type"), in_round + list(entries)
+                filters.get("section"),
+                filters.get("assessment_type"),
+                in_round + list(entries),
+                only,
             )
         )
         return GameRoundBatch(
             batch_index=batch_index,
-            items=[to_game_question(d) for d in originals],
+            items=items,
             simplified=simplified_items,
             remaining=remaining,
         )
@@ -148,18 +176,25 @@ class GameService:
         docs = await self.questions.get_many(question_ids)
         stored = await self.rounds.get_entries(round_id, question_ids) or {}
         simplified_by_id = await self.questions.get_simplified_many(question_ids)
+        tags_by_id = await self.questions.get_tags_many(question_ids)
         items, simplified_items = [], []
         for question_id in question_ids:
             doc = docs.get(question_id)
             if doc is None:  # Deleted from `examination` since; the round can't show it.
                 continue
-            items.append(to_game_question(doc))
+            tags = tags_by_id.get(question_id)
+            items.append(to_game_question(doc, tags=tags))
             # Offer the simplified text only if the stored entry can review it.
             simplified = simplified_by_id.get(question_id)
             if simplified is not None and (stored.get(question_id) or {}).get("simplified"):
-                simplified_items.append(to_game_question(simplified, simplified=True))
+                simplified_items.append(to_game_question(simplified, simplified=True, tags=tags))
         remaining = await self.questions.count(
-            playable_query(filters.get("section"), filters.get("assessment_type"), in_round)
+            playable_query(
+                filters.get("section"),
+                filters.get("assessment_type"),
+                in_round,
+                await self._objective_ids(filters),
+            )
         )
         return GameRoundBatch(
             batch_index=batch_index, items=items, simplified=simplified_items, remaining=remaining
@@ -260,8 +295,11 @@ class GameService:
         if not is_playable(doc):
             raise errors.QuestionNotPlayable()
         simplified = usable_simplified(doc, await self.questions.get_simplified(question_id))
+        tags = (await self.questions.get_tags_many([question_id])).get(question_id)
 
-        if not await self.rounds.add_question(round_id, question_id, round_entry(doc, simplified)):
+        if not await self.rounds.add_question(
+            round_id, question_id, round_entry(doc, simplified, tags)
+        ):
             stored = await self.rounds.get_entries(round_id, [question_id])
             if stored is None:
                 raise errors.RoundNotFound()
@@ -273,8 +311,10 @@ class GameService:
                 simplified = None
 
         return GameRoundQuestion(
-            item=to_game_question(doc),
-            simplified=[to_game_question(simplified, simplified=True)] if simplified else [],
+            item=to_game_question(doc, tags=tags),
+            simplified=(
+                [to_game_question(simplified, simplified=True, tags=tags)] if simplified else []
+            ),
         )
 
     # ---------- browsing, without answer keys ----------
@@ -318,3 +358,19 @@ class GameService:
     async def sections(self, *, simplified: bool = False) -> list[str]:
         return sorted(s for s in await self.questions.sections(simplified=simplified) if s)
 
+    async def objectives(self) -> GameObjectiveList:
+        """The objective catalog, in catalog order, with how many playable questions
+        each objective has."""
+        counts = await self.questions.objective_counts()
+        return GameObjectiveList(
+            items=[
+                GameObjective(
+                    key=o.key,
+                    section=o.section,
+                    title=o.title,
+                    statement=o.statement,
+                    count=counts.get(o.key, 0),
+                )
+                for o in OBJECTIVES
+            ]
+        )

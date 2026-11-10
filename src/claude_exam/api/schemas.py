@@ -85,17 +85,23 @@ class VisualEntity(BaseModel):
     name: str
     kind: EntityKind
     aliases: list[str] = []
+    # Key from `icon_catalog.ICONS`, set by the icon step (None before it has run).
+    icon: str | None = None
 
 
 class AnswerEntities(BaseModel):
     """Entities of one answer (an object, since lists of lists are awkward for clients)."""
 
     entities: list[VisualEntity] = []
+    # Icon key for what this answer proposes; it need not be one of its entities' icons.
+    icon: str | None = None
 
 
 class PromptEntities(BaseModel):
     """Entities of a simplified question, resolved per place they are mentioned."""
 
+    # Icon key for the question as a whole.
+    question_icon: str | None = None
     question: list[VisualEntity] = []
     # One item per answer, index-aligned with `prompt.answers`.
     answers: list[AnswerEntities] = []
@@ -146,6 +152,11 @@ class GameQuestion(BaseModel):
     # Visual entities of a simplified question (index-aligned with `answers`); empty
     # lists for originals, search results and questions extracted before entities.
     entities: PromptEntities = PromptEntities()
+    # Learning-objective keys from `objective_catalog.OBJECTIVES`, the main one first;
+    # empty until the question is tagged.
+    objectives: list[str] = []
+    # 1 (easy) to 3 (hard); 0 until the question is tagged.
+    difficulty: int = 0
 
 
 class GameQuestionList(BaseModel):
@@ -162,6 +173,8 @@ class GameRoundRequest(BaseModel):
     # Empty means any: JsonUtility writes "" for an unset string, never null.
     section: str = Field(default="", max_length=200)
     assessment_type: str = Field(default="", max_length=100)
+    # An objective key: only questions tagged with it (as main or secondary objective).
+    objective: str = Field(default="", max_length=100)
 
 
 class GameRound(BaseModel):
@@ -217,6 +230,9 @@ class GameAnswerResult(BaseModel):
     has_simplified: bool
     # Empty when `has_simplified` is false.
     simplified: GameReview
+    # What picking `answer_index` suggests the player got wrong; "" for the correct
+    # answer and for a question that is not tagged.
+    misconception: str = ""
 
 
 class GameFiftyFiftyRequest(BaseModel):
@@ -243,6 +259,20 @@ class GameRoundQuestion(BaseModel):
 
 class GameSectionList(BaseModel):
     items: list[str]
+
+
+class GameObjective(BaseModel):
+    key: str
+    # Section name without its "Domain N: " prefix.
+    section: str
+    title: str
+    statement: str
+    # Playable questions tagged with it (as main or secondary objective).
+    count: int
+
+
+class GameObjectiveList(BaseModel):
+    items: list[GameObjective]
 
 
 class IcaChatRequest(BaseModel):
@@ -321,6 +351,9 @@ class SimplifiedQuestion(BaseModel):
     # extraction failed); `entities_ica` is the metadata of that second call.
     entities: PromptEntities = PromptEntities()
     entities_ica: IcaMeta | None = None
+    # Metadata of the icon call; None until icons were picked for the stored entities
+    # (the icons themselves are the `icon` fields inside `entities`).
+    icons_ica: IcaMeta | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -336,21 +369,57 @@ class SimplifiedQuestion(BaseModel):
             return PromptEntities()
 
 
+ObjectiveLevel = Literal["remember", "understand", "apply", "analyze"]
+
+
+class Distractor(BaseModel):
+    """What one wrong answer reveals about a learner who picks it."""
+
+    # The objective this answer would be right for, when there is one.
+    confused_with: str | None = None
+    misconception: str
+
+
+class QuestionObjectives(BaseModel):
+    """Record stored in `question_objectives`, keyed by the examination `_id` (as a
+    string, like `examination_simplified`). Written by `objectives.tag_and_store`."""
+
+    question_id: str
+    section: str
+    # Keys from `objective_catalog.OBJECTIVES`; the first is the main objective.
+    objectives: list[str]
+    level: ObjectiveLevel
+    difficulty: int
+    # One per answer, index-aligned with `prompt.answers`; None for a correct answer.
+    distractors: list[Distractor | None]
+    # What the record was tagged with; a backfill redoes records of another version.
+    catalog_version: str
+    prompt_version: str
+    ica: IcaMeta
+    created_at: datetime
+    updated_at: datetime
+
+
 class EntitiesBackfill(BaseModel):
-    """Result of starting an entity backfill; `job_id` is None when nothing needs it."""
+    """Result of starting an entity, icon or objectives backfill; `job_id` is None when
+    nothing needs it."""
 
     job_id: str | None = None
     total: int
 
 
-# The pipeline is import -> simplify -> extract entities; entities are added to an
-# existing simplified record, so they always come second.
-# "simplify": simplify each question, then extract its entities.
-# "simplify_only": only simplify (entities are left for a later "entities" job).
-# "entities": only extract entities for questions that are already simplified.
-JobMode = Literal["simplify", "simplify_only", "entities"]
+# The pipeline is import -> simplify -> extract entities -> pick icons; each step adds
+# to the simplified record the one before it stored.
+# "simplify": simplify each question, extract its entities, pick its icons.
+# "simplify_only": only simplify (entities and icons are left for a later job).
+# "entities": extract entities for already simplified questions, then pick icons.
+# "icons": only pick icons for already simplified questions.
+# "objectives": tag questions with learning objectives. It reads the original question
+# and writes `question_objectives`, so it needs no simplified record and is not part
+# of the import job: the objectives of a section must be in the catalog first.
+JobMode = Literal["simplify", "simplify_only", "entities", "icons", "objectives"]
 # Which step a per-question job error comes from.
-JobStage = Literal["simplify", "entities"]
+JobStage = Literal["simplify", "entities", "icons", "objectives"]
 
 
 class SimplificationError(BaseModel):
@@ -378,7 +447,9 @@ class SimplificationJob(BaseModel):
     # simplified text stored (only the entity step failed).
     failed: int
     entities_failed: int = 0
-    # Entity jobs with `only_missing`: questions that already had entities when reached.
+    # Questions whose earlier steps were stored but whose icon step failed.
+    icons_failed: int = 0
+    # Entity and icon jobs with `only_missing`: questions that already had them when reached.
     skipped: int = 0
     errors: list[SimplificationError]
     created_at: datetime

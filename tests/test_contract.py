@@ -4,6 +4,8 @@
   data. The Unity EditMode tests parse a copy of the same files
   (`../exam-cards-game/Assets/Tests/EditMode/Contract/`), so a change here that the game
   can't read fails there too.
+- `tests/contract/icon_catalog.json`: every icon key the API can send; the game's tests
+  check that it ships a picture for each.
 - `tests/contract/openapi_game.json`: the OpenAPI schemas and paths of the game routes.
 
 After an intended change, regenerate both copies and commit them in both repos:
@@ -22,9 +24,11 @@ from fastapi.testclient import TestClient
 
 from claude_exam.api.dependencies import (
     get_async_collection,
+    get_async_objectives_collection,
     get_async_rounds_collection,
     get_async_simplified_collection,
 )
+from claude_exam.api.icon_catalog import ICONS
 from claude_exam.api.main import app
 
 CONTRACT_DIR = Path(__file__).parent / "contract"
@@ -66,17 +70,42 @@ SIMPLE = [
         "_id": ObjectId("65f0000000000000000000b1"),
         "question_id": str(Q1),
         "prompt": {**EXAM[0]["prompt"], "question": "Where does the key go?", "explanation": "Simply put: x-api-key."},
+        # The second answer and the last entity have no icon yet, and "retired-key" is
+        # no longer in the catalog: all three are served as null.
         "entities": {
+            "question_icon": "credential",
             "question": [
-                {"name": "API Key", "kind": "object", "aliases": ["key"]},
-                {"name": "Send Request", "kind": "action", "aliases": []},
+                {"name": "API Key", "kind": "object", "aliases": ["key"], "icon": "credential"},
+                {"name": "Send Request", "kind": "action", "aliases": [], "icon": "send"},
             ],
             "answers": [
-                {"entities": [{"name": "Authorization", "kind": "object", "aliases": ["auth header"]}]},
+                {
+                    "icon": "permission",
+                    "entities": [
+                        {"name": "Authorization", "kind": "object", "aliases": ["auth header"], "icon": "retired-key"}
+                    ],
+                },
                 {"entities": [{"name": "x-api-key", "kind": "object", "aliases": []}]},
-                {"entities": []},
+                {"icon": "tags", "entities": []},
             ],
         },
+    }
+]
+
+
+# Q1 is tagged with learning objectives; the others are not ([] and 0, and no
+# misconception). "retired-objective" is no longer in the catalog and is not served.
+TAGS = [
+    {
+        "_id": ObjectId("65f0000000000000000000c1"),
+        "question_id": str(Q1),
+        "objectives": ["tools-mcp-config", "retired-objective", "tools-errors"],
+        "difficulty": 2,
+        "distractors": [
+            {"confused_with": None, "misconception": "Any HTTP auth header carries the key."},
+            None,
+            {"confused_with": "tools-descriptions", "misconception": "Header names are free to choose."},
+        ],
     }
 ]
 
@@ -84,6 +113,7 @@ SIMPLE = [
 @pytest.fixture
 def client():
     rounds = FakeRounds()
+    app.dependency_overrides[get_async_objectives_collection] = lambda: FakeCollection(TAGS)
     app.dependency_overrides[get_async_collection] = lambda: FakeCollection(EXAM)
     app.dependency_overrides[get_async_simplified_collection] = lambda: FakeCollection(SIMPLE)
     app.dependency_overrides[get_async_rounds_collection] = lambda: rounds
@@ -115,6 +145,12 @@ def test_game_flow_responses(client):
     check("fifty_fifty.json", client.post(f"{base}/fifty-fifty", json={"question_id": str(Q1)}).json())
     answer = client.post(f"{base}/answers", json={"question_id": str(Q1), "answer_index": 1})
     check("answer.json", answer.json())
+    # A wrong answer to a tagged question says what it suggests (in its own round,
+    # since a question is answered once).
+    other = client.post("/v1/game/rounds", json={"count": 1}).json()["round_id"]
+    check("answer_wrong.json", client.post(
+        f"/v1/game/rounds/{other}/answers", json={"question_id": str(Q1), "answer_index": 2}
+    ).json())
     conflict = client.post(f"{base}/answers", json={"question_id": str(Q1), "answer_index": 2})
     assert conflict.status_code == 409
     check("error_already_answered.json", conflict.json())
@@ -125,6 +161,10 @@ def test_game_flow_responses(client):
     check("batch_empty.json", client.post(f"{base}/batches", json={"batch_index": 2}).json())
     check("add_question.json", client.post(f"{base}/questions", json={"question_id": str(Q1)}).json())
     check("search.json", client.get("/v1/search/game-questions", params={"q": "key"}).json())
+
+
+def test_icon_catalog():
+    check("icon_catalog.json", {"keys": [icon.key for icon in ICONS]})
 
 
 def test_validation_error_response(client):

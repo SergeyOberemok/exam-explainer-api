@@ -10,6 +10,8 @@ import logging
 from bson import ObjectId
 from pydantic import ValidationError
 
+from claude_exam.api.icon_catalog import known as known_icon
+from claude_exam.api.objective_catalog import known as known_objective
 from claude_exam.api.schemas import (
     AnswerEntities,
     GameAnswer,
@@ -82,8 +84,8 @@ def usable_simplified(original: dict, simplified: dict | None) -> dict | None:
 
 
 def entities_of(doc: dict) -> PromptEntities:
-    """The stored visual entities of a simplified doc, with one `answers` item per
-    answer (padded or trimmed). Entities are decoration: a malformed record gives none
+    """The stored visual entities and icons of a simplified doc, with one `answers` item
+    per answer (padded or trimmed). Entities are decoration: a malformed record gives none
     instead of failing the round."""
     try:
         entities = PromptEntities.model_validate(doc.get("entities") or {})
@@ -93,12 +95,49 @@ def entities_of(doc: dict) -> PromptEntities:
     count = len(answers_of(doc))
     answers = entities.answers[:count]
     answers += [AnswerEntities() for _ in range(count - len(answers))]
-    return PromptEntities(question=entities.question, answers=answers)
+    # A stored key can outlive its catalog entry; the game then draws its default.
+    for entity in [*entities.question, *(e for a in answers for e in a.entities)]:
+        entity.icon = known_icon(entity.icon)
+    for answer in answers:
+        answer.icon = known_icon(answer.icon)
+    return PromptEntities(
+        question_icon=known_icon(entities.question_icon),
+        question=entities.question,
+        answers=answers,
+    )
 
 
-def to_game_question(doc: dict, *, simplified: bool = False) -> GameQuestion:
+def objectives_of(tags: dict | None) -> list[str]:
+    """The catalog keys of a `question_objectives` record, main one first; [] when the
+    question is not tagged. A key that left the catalog is dropped."""
+    raw = (tags or {}).get("objectives")
+    return [k for k in raw if known_objective(k)] if isinstance(raw, list) else []
+
+
+def difficulty_of(tags: dict | None) -> int:
+    """1..3 from a `question_objectives` record; 0 when the question is not tagged."""
+    value = (tags or {}).get("difficulty")
+    return value if not isinstance(value, bool) and value in (1, 2, 3) else 0
+
+
+def misconceptions_of(tags: dict | None, count: int, correct: int) -> list[str]:
+    """One text per answer: what picking it suggests the player got wrong ("" for the
+    correct answer and wherever the record has none). This is part of the answer key."""
+    raw = (tags or {}).get("distractors")
+    raw = raw if isinstance(raw, list) else []
+    texts = []
+    for i in range(count):
+        item = raw[i] if i < len(raw) else None
+        text = item.get("misconception") if isinstance(item, dict) else None
+        texts.append(text if isinstance(text, str) and i != correct else "")
+    return texts
+
+
+def to_game_question(
+    doc: dict, *, simplified: bool = False, tags: dict | None = None
+) -> GameQuestion:
     """Map an `examination` doc, or an `examination_simplified` doc when `simplified`
-    (only those carry entities)."""
+    (only those carry entities). `tags` is the question's `question_objectives` record."""
     prompt = doc.get("prompt") or {}
     return GameQuestion(
         id=str(doc["question_id"] if simplified else doc["_id"]),
@@ -110,6 +149,8 @@ def to_game_question(doc: dict, *, simplified: bool = False) -> GameQuestion:
             GameAnswer(index=i, text=text or "") for i, text in enumerate(answers_of(doc))
         ],
         entities=entities_of(doc) if simplified else PromptEntities(),
+        objectives=objectives_of(tags),
+        difficulty=difficulty_of(tags),
     )
 
 
@@ -126,13 +167,16 @@ def to_review(doc: dict) -> GameReview:
     )
 
 
-def round_entry(doc: dict, simplified: dict | None) -> dict:
+def round_entry(doc: dict, simplified: dict | None, tags: dict | None = None) -> dict:
     """What a round document keeps for one playable question: its answer key and reviews."""
+    correct = correct_indices(doc)[0]
+    count = len(answers_of(doc))
     return {
-        "correct": correct_indices(doc)[0],
-        "count": len(answers_of(doc)),
+        "correct": correct,
+        "count": count,
         "original": to_review(doc).model_dump(),
         "simplified": to_review(simplified).model_dump() if simplified else None,
+        "misconceptions": misconceptions_of(tags, count, correct),
     }
 
 
@@ -147,12 +191,21 @@ def filter_query(section: str | None, assessment_type: str | None) -> dict:
 
 
 def playable_query(
-    section: str | None, assessment_type: str | None, exclude_ids: list[str] = ()
+    section: str | None,
+    assessment_type: str | None,
+    exclude_ids: list[str] = (),
+    only_ids: list[str] | None = None,
 ) -> dict:
-    """Filters plus the playable pre-filter, leaving out `exclude_ids` (examination ids)."""
+    """Filters plus the playable pre-filter, leaving out `exclude_ids` (examination ids)
+    and, when `only_ids` is given (it may be empty), keeping only those."""
     query = {**filter_query(section, assessment_type), **PLAYABLE_QUERY}
+    ids: dict = {}
+    if only_ids is not None:
+        ids["$in"] = [ObjectId(i) for i in only_ids if ObjectId.is_valid(i)]
     if exclude_ids:
-        query["_id"] = {"$nin": [ObjectId(i) for i in exclude_ids]}
+        ids["$nin"] = [ObjectId(i) for i in exclude_ids]
+    if ids:
+        query["_id"] = ids
     return query
 
 

@@ -56,6 +56,12 @@ GOOD_ENTITIES = {
     "answers_entities": [["e2"], ["e3"]],
 }
 
+GOOD_ICONS = {
+    "entities": {"Claude Code": "terminal", "acceptEdits": "write", "plan mode": "plan"},
+    "question": "mode",
+    "answers": ["write", "plan"],
+}
+
 GOOD_SIMPLIFIED = {
     "question": SIMPLIFIED.question,
     "answers": SIMPLIFIED.answers,
@@ -381,12 +387,20 @@ async def test_extract_entities_rejects_non_json():
 
 
 async def test_simplify_and_store_saves_entities():
-    ica = FakeIca(reply(GOOD_SIMPLIFIED), reply(GOOD_ENTITIES))
+    ica = FakeIca(reply(GOOD_SIMPLIFIED), reply(GOOD_ENTITIES), reply(GOOD_ICONS))
     simplified = FakeCollection()
     stored = await simplify_and_store(ica, simplified, DOC, "claude-haiku-5-5")
-    assert len(ica.calls) == 2
+    assert len(ica.calls) == 3  # simplify, entities, icons
     assert names(stored.entities.question) == ["Claude Code"]
     assert stored.entities_ica.total_tokens == 42
+    assert stored.entities.question[0].icon == "terminal" and stored.icons_ica is not None
+
+
+async def test_icon_failure_keeps_the_entities():
+    ica = FakeIca(reply(GOOD_SIMPLIFIED), reply(GOOD_ENTITIES), reply("garbage"))
+    stored = await simplify_and_store(ica, FakeCollection(), DOC, "claude-haiku-5-5")
+    assert names(stored.entities.question) == ["Claude Code"]
+    assert stored.entities.question[0].icon is None and stored.icons_ica is None
 
 
 async def test_entity_failure_is_non_fatal():
@@ -464,7 +478,7 @@ async def test_backfill_errors_propagate():
         await enrich_and_store(FakeIca(), simplified, DOC, "claude-haiku-5-5")
     assert exc.value.status_code == 404  # not simplified yet
 
-    ica = FakeIca(reply(GOOD_SIMPLIFIED), reply(GOOD_ENTITIES), reply("garbage"))
+    ica = FakeIca(reply(GOOD_SIMPLIFIED), reply(GOOD_ENTITIES), reply(GOOD_ICONS), reply("garbage"))
     await simplify_and_store(ica, simplified, DOC, "claude-haiku-5-5")
     with pytest.raises(HTTPException) as exc:
         await enrich_and_store(ica, simplified, DOC, "claude-haiku-5-5")

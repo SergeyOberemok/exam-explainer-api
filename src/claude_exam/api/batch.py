@@ -8,6 +8,8 @@ from pymongo import AsyncMongoClient
 
 from claude_exam.api.entities import enrich_and_store
 from claude_exam.api.ica import IcaClient
+from claude_exam.api.icons import assign_and_store
+from claude_exam.api.objectives import current_query, tag_and_store
 from claude_exam.api.schemas import IcaModelId, JobMode, JobStage
 from claude_exam.api.simplify import simplify_and_store
 
@@ -20,6 +22,16 @@ BACKOFF_SECONDS = 5.0
 # A running job refreshes `heartbeat_at` before every ICA attempt. Must exceed
 # the ICA call timeout plus the longest backoff sleep.
 STALE_JOB_SECONDS = 15 * 60
+# The steps each job mode runs for a question, in order.
+STAGES: dict[JobMode, tuple[JobStage, ...]] = {
+    "simplify": ("simplify", "entities", "icons"),
+    "simplify_only": ("simplify",),
+    "entities": ("entities", "icons"),
+    "icons": ("icons",),
+    "objectives": ("objectives",),
+}
+# Set on the simplified record only by a successful run of that step.
+_DONE_FIELD = {"entities": "entities_ica", "icons": "icons_ica"}
 
 
 def _now() -> datetime:
@@ -46,6 +58,7 @@ def new_job(
         "succeeded": 0,
         "failed": 0,
         "entities_failed": 0,
+        "icons_failed": 0,
         "skipped": 0,
         "errors": [],
         "created_at": now,
@@ -74,12 +87,28 @@ async def _with_retry(operation, jobs, job_id: ObjectId) -> None:
             attempt += 1
 
 
-async def _has_entities(simplified, question_id: str) -> bool:
-    """Whether the record already has entities from a successful extraction."""
+async def _already_done(simplified, objectives, question_id: str, mode: JobMode) -> bool:
+    """Whether the question already has what an "entities", "icons" or "objectives" job
+    would add (objectives: tagged with the current catalog and prompt)."""
+    if mode == "objectives":
+        return await objectives.find_one(current_query(question_id), {"_id": 1}) is not None
     found = await simplified.find_one(
-        {"question_id": question_id, "entities_ica": {"$ne": None}}, {"_id": 1}
+        {"question_id": question_id, _DONE_FIELD[mode]: {"$ne": None}}, {"_id": 1}
     )
     return found is not None
+
+
+def _step(
+    stage: JobStage, ica: IcaClient, simplified, objectives, doc: dict, model_id: IcaModelId
+):
+    """The operation of one pipeline step for one question."""
+    if stage == "objectives":
+        return lambda: tag_and_store(ica, objectives, doc, model_id)
+    if stage == "simplify":
+        return lambda: simplify_and_store(ica, simplified, doc, model_id, with_entities=False)
+    if stage == "entities":
+        return lambda: enrich_and_store(ica, simplified, doc, model_id)
+    return lambda: assign_and_store(ica, simplified, str(doc["_id"]), model_id)
 
 
 async def run_simplification_job(
@@ -93,22 +122,24 @@ async def run_simplification_job(
     only_missing: bool = False,
 ) -> None:
     """
-    Process the given examination questions one by one (see `JobMode`). Simplifying
-    replaces any stored simplified record; extracting entities updates only the entity
-    fields of the existing record. With `mode="entities"` and `only_missing`, a question
-    that has entities by the time the job reaches it is skipped (`skipped`), so a
-    repeated backfill, or one queued behind an import job, costs no ICA calls.
+    Process the given examination questions one by one (see `JobMode` and `STAGES`).
+    Simplifying replaces any stored simplified record; extracting entities and picking
+    icons each update only their own fields of the existing record. With
+    `mode="entities"`, `"icons"` or `"objectives"` and `only_missing`, a question that
+    has them by the time the job reaches it is skipped (`skipped`), so a repeated
+    backfill, or one queued behind an import job, costs no ICA calls.
 
-    Simplification and entity extraction retry separately. Per-question failures are
-    recorded on the job with the step they come from (`stage`) and the batch continues;
-    a failed extraction after a stored simplification also counts in `entities_failed`
-    (the text is kept; backfill the entities later). Progress is written after every
+    The steps retry separately. Per-question failures are recorded on the job with the
+    step they come from (`stage`) and the batch continues; a step failing after an
+    earlier one was stored also counts in `entities_failed` / `icons_failed` (what was
+    stored is kept; backfill the rest later). Progress is written after every
     question. Jobs in this process run one at a time (`lock`) so concurrent imports
     do not multiply ICA load. The job fails only when no question got anything stored.
     """
     db = mongo.get_default_database()
     examination = db["examination"]
     simplified = db["examination_simplified"]
+    objectives = db["question_objectives"]
     jobs = db["simplification_jobs"]
 
     stored_any = False
@@ -127,36 +158,28 @@ async def run_simplification_job(
             )
             for object_id in question_ids:
                 question_id = str(object_id)
-                stage: JobStage = "entities" if mode == "entities" else "simplify"
-                text_stored = skipped = False
+                stage: JobStage = STAGES[mode][0]
+                steps_stored = 0
+                skipped = False
                 error: dict | None = None
                 try:
                     if (
-                        mode == "entities"
+                        (mode in _DONE_FIELD or mode == "objectives")
                         and only_missing
-                        and await _has_entities(simplified, question_id)
+                        and await _already_done(simplified, objectives, question_id, mode)
                     ):
                         skipped = True
                     else:
                         doc = await examination.find_one({"_id": object_id})
                         if doc is None:
                             raise HTTPException(status_code=404, detail="question not found")
-                        if mode != "entities":
+                        for stage in STAGES[mode]:
                             await _with_retry(
-                                lambda: simplify_and_store(
-                                    ica, simplified, doc, model_id, with_entities=False
-                                ),
+                                _step(stage, ica, simplified, objectives, doc, model_id),
                                 jobs,
                                 job_id,
                             )
-                            text_stored = True
-                        if mode != "simplify_only":
-                            stage = "entities"
-                            await _with_retry(
-                                lambda: enrich_and_store(ica, simplified, doc, model_id),
-                                jobs,
-                                job_id,
-                            )
+                            steps_stored += 1
                 except HTTPException as exc:
                     error = {
                         "question_id": question_id,
@@ -186,8 +209,8 @@ async def run_simplification_job(
                 else:
                     update["$inc"]["failed"] = 1
                     update["$push"] = {"errors": error}
-                    if text_stored:
-                        update["$inc"]["entities_failed"] = 1
+                    if steps_stored:
+                        update["$inc"][f"{stage}_failed"] = 1
                         stored_any = True
                 await jobs.update_one({"_id": job_id}, update)
         # Every question failing (bad key, ICA down) is a failed job, not a completed one.

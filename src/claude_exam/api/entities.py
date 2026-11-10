@@ -387,7 +387,8 @@ async def enrich_and_store(
 ) -> SimplifiedQuestion:
     """
     Backfill: extract entities for an already simplified question and store only
-    `entities` / `entities_ica` (text, `ica` and `created_at` stay as they are).
+    `entities` / `entities_ica` (text, `ica` and `created_at` stay as they are); the
+    icons of the replaced entities go with them (`icons_ica` is cleared).
     Errors propagate, unlike inside `simplify_and_store`.
     """
     question_id = str(doc["_id"])
@@ -405,6 +406,8 @@ async def enrich_and_store(
             "$set": {
                 "entities": entities.model_dump(),
                 "entities_ica": meta.model_dump(),
+                # New entities have no icons yet; `icons.assign_and_store` adds them.
+                "icons_ica": None,
                 "updated_at": datetime.now(timezone.utc),
             }
         },

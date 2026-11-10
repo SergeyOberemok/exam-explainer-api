@@ -21,9 +21,12 @@
         }
       ],
       "entities": {
+        "question_icon": null,
         "question": [],
         "answers": []
-      }
+      },
+      "objectives": [],
+      "difficulty": 0
     },
     {
       "id": "65f0000000000000000000a2",
@@ -50,9 +53,12 @@
         }
       ],
       "entities": {
+        "question_icon": null,
         "question": [],
         "answers": []
-      }
+      },
+      "objectives": [],
+      "difficulty": 0
     },
     {
       "id": "65f0000000000000000000a3",
@@ -75,9 +81,12 @@
         }
       ],
       "entities": {
+        "question_icon": null,
         "question": [],
         "answers": []
-      }
+      },
+      "objectives": [],
+      "difficulty": 0
     }
   ],
   "total": 3

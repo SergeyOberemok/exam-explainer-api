@@ -8,6 +8,7 @@ from pymongo import ReturnDocument
 from pymongo.asynchronous.collection import AsyncCollection
 
 from claude_exam.api.entities import extract_entities
+from claude_exam.api.icons import pick_icons
 from claude_exam.api.ica import IcaClient
 from claude_exam.api.json_reply import extract_json
 from claude_exam.api.schemas import (
@@ -264,11 +265,12 @@ async def simplify_and_store(
     of the simplified text. That call is best effort: if it fails the simplified
     record is still stored, with empty entities (backfill them later via
     `entities.enrich_and_store`); entities stored earlier survive only when the new
-    simplified question and answers are unchanged.
+    simplified question and answers are unchanged. After a successful extraction a
+    third call picks the icons, best effort too (`icons.assign_and_store` backfills).
     """
     prompt, meta = await simplify_item(ica, doc, model_id, max_tokens)
 
-    entities, entities_meta = PromptEntities(), None
+    entities, entities_meta, icons_meta = PromptEntities(), None, None
     if with_entities:
         try:
             entities, entities_meta = await extract_entities(
@@ -279,6 +281,15 @@ async def simplify_and_store(
                 "entity extraction failed for %s: %s",
                 doc.get("_id"),
                 getattr(exc, "detail", exc),
+            )
+    if entities_meta is not None:
+        try:
+            entities, icons_meta = await pick_icons(
+                ica, doc.get("section", ""), prompt, entities, model_id, max_tokens
+            )
+        except Exception as exc:  # best effort: the entities are stored without icons
+            logger.warning(
+                "icon picking failed for %s: %s", doc.get("_id"), getattr(exc, "detail", exc)
             )
 
     question_id = str(doc["_id"])
@@ -309,6 +320,7 @@ async def simplify_and_store(
     if not keep_entities:
         fields["entities"] = entities.model_dump()
         fields["entities_ica"] = entities_meta.model_dump() if entities_meta else None
+        fields["icons_ica"] = icons_meta.model_dump() if icons_meta else None
     stored = await simplified.find_one_and_update(
         {"question_id": question_id},
         {"$set": fields, "$setOnInsert": {"created_at": now}},

@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 
 from claude_exam.api.dependencies import (
     get_async_collection,
+    get_async_objectives_collection,
     get_async_rounds_collection,
     get_async_simplified_collection,
 )
@@ -47,9 +48,13 @@ def test_letter_to_index_tolerates_bad_values():
 
 def test_public_question_has_no_answer_key():
     q = to_game_question(doc()).model_dump()
-    assert set(q) == {"id", "simplified", "section", "assessment_type", "question", "answers", "entities"}
+    assert set(q) == {
+        "id", "simplified", "section", "assessment_type", "question", "answers", "entities",
+        "objectives", "difficulty",
+    }
+    assert (q["objectives"], q["difficulty"]) == ([], 0)
     assert q["answers"][1] == {"index": 1, "text": "x"}
-    assert q["entities"] == {"question": [], "answers": []}
+    assert q["entities"] == {"question_icon": None, "question": [], "answers": []}
 
 
 def test_review_pads_missing_feedback():
@@ -70,7 +75,7 @@ def test_simplified_uses_question_id():
     assert q.id == "abc" and q.simplified
 
 
-AGENT = {"name": "Subagent", "kind": "actor", "aliases": ["helper"]}
+AGENT = {"name": "Subagent", "kind": "actor", "aliases": ["helper"], "icon": "subagent"}
 TOOL = {"name": "process_refund", "kind": "object"}
 
 
@@ -83,7 +88,22 @@ def test_simplified_carries_entities_aligned_with_answers():
     q = simple_q(entities=entities).model_dump()
     assert q["entities"]["question"] == [AGENT]
     assert len(q["entities"]["answers"]) == 4  # trimmed to the answers
-    assert q["entities"]["answers"][0] == {"entities": [{**TOOL, "aliases": []}]}
+    assert q["entities"]["answers"][0] == {
+        "entities": [{**TOOL, "aliases": [], "icon": None}],
+        "icon": None,
+    }
+
+
+def test_simplified_serves_only_icon_keys_the_catalog_has():
+    entities = {
+        "question_icon": "gone",
+        "question": [{**AGENT, "icon": "gone"}],
+        "answers": [{"icon": "refund", "entities": [{**TOOL, "icon": "tool"}]}, {"icon": "gone"}],
+    }
+    q = simple_q(entities=entities).entities
+    assert (q.question_icon, q.question[0].icon) == (None, None)
+    assert [a.icon for a in q.answers] == ["refund", None, None, None]
+    assert q.answers[0].entities[0].icon == "tool"
 
     short = simple_q(entities={"answers": [{"entities": [TOOL]}]})
     assert [len(a.entities) for a in short.entities.answers] == [1, 0, 0, 0]
@@ -104,9 +124,10 @@ def test_entities_read_the_catalog_shape():
     assert q.entities.answers[0].entities[0].name == "Subagent"
 
 
-def client_with(exam=(), simple=(), rounds=None):
+def client_with(exam=(), simple=(), rounds=None, tags=()):
     app.dependency_overrides[get_async_collection] = lambda: FakeCollection(list(exam))
     app.dependency_overrides[get_async_simplified_collection] = lambda: FakeCollection(list(simple))
+    app.dependency_overrides[get_async_objectives_collection] = lambda: FakeCollection(list(tags))
     rounds = rounds or FakeRounds()
     app.dependency_overrides[get_async_rounds_collection] = lambda: rounds
     return TestClient(app)  # no lifespan: not used as a context manager
@@ -143,11 +164,103 @@ def test_sections_simplified_flag():
     assert c.get("/v1/game/sections?simplified=true").json() == {"items": ["B"]}
 
 
-def start_round(exam, simple=(), rounds=None):
-    c = client_with(exam=exam, simple=simple, rounds=rounds)
-    r = c.post("/v1/game/rounds", json={"count": 10})
+def start_round(exam, simple=(), rounds=None, tags=(), **body):
+    c = client_with(exam=exam, simple=simple, rounds=rounds, tags=tags)
+    r = c.post("/v1/game/rounds", json={"count": 10, **body})
     assert r.status_code == 201, r.text
     return c, r.json()
+
+
+def tags_of(original, objectives=("tools-errors",), difficulty=2, **kw):
+    """A `question_objectives` record for a four-answer question whose answer is B."""
+    return {
+        "_id": ObjectId(),
+        "question_id": str(original["_id"]),
+        "objectives": list(objectives),
+        "difficulty": difficulty,
+        "distractors": [
+            {"confused_with": None, "misconception": "believes w"},
+            None,
+            {"confused_with": "tools-scoping", "misconception": "believes y"},
+            {"confused_with": None, "misconception": "believes z"},
+        ],
+        **kw,
+    }
+
+
+def test_round_carries_objectives_but_not_what_wrong_answers_mean():
+    a, b = doc(), doc()
+    # "retired" is no longer in the catalog, so it is not served.
+    tags = [tags_of(a, objectives=("tools-errors", "retired", "context-errors"))]
+    c, body = start_round([a, b], simple=[simplified_of(a)], tags=tags)
+
+    tagged, untagged = body["items"]
+    assert (tagged["objectives"], tagged["difficulty"]) == (["tools-errors", "context-errors"], 2)
+    assert (untagged["objectives"], untagged["difficulty"]) == ([], 0)
+    assert body["simplified"][0]["objectives"] == tagged["objectives"]
+    assert "believes" not in str(body) and "tools-scoping" not in str(body)
+
+    url = f"/v1/game/rounds/{body['round_id']}/answers"
+    wrong = c.post(url, json={"question_id": str(a["_id"]), "answer_index": 2}).json()
+    assert wrong["misconception"] == "believes y" and "tools-scoping" not in str(wrong)
+    plain = c.post(url, json={"question_id": str(b["_id"]), "answer_index": 0}).json()
+    assert plain["misconception"] == ""
+
+
+def test_correct_answer_has_no_misconception_even_if_the_record_is_wrong():
+    a = doc()
+    broken = tags_of(a, distractors=[{"misconception": "m"}] * 4)
+    c, body = start_round([a], tags=[broken])
+    url = f"/v1/game/rounds/{body['round_id']}/answers"
+    assert c.post(url, json={"question_id": str(a["_id"]), "answer_index": 1}).json()["misconception"] == ""
+
+
+def test_malformed_tags_read_as_untagged():
+    a = doc()
+    _, body = start_round([a], tags=[tags_of(a, objectives="tools-errors", difficulty=9, distractors=None)])
+    assert (body["items"][0]["objectives"], body["items"][0]["difficulty"]) == ([], 0)
+
+
+def test_round_and_its_batches_keep_the_objective_filter():
+    docs = [doc() for _ in range(4)]
+    tags = [tags_of(d) for d in docs[:3]] + [tags_of(docs[3], objectives=("tools-scoping", "tools-errors"))]
+    tags[1]["objectives"] = ["tools-descriptions"]
+    wanted = [str(docs[i]["_id"]) for i in (0, 2, 3)]  # main or secondary objective
+
+    c, body = start_round(docs, tags=tags, count=2, objective="tools-errors")
+    assert [q["id"] for q in body["items"]] == wanted[:2] and body["total"] == 3
+    batch = c.post(f"/v1/game/rounds/{body['round_id']}/batches", json={"batch_index": 1}).json()
+    assert [q["id"] for q in batch["items"]] == wanted[2:] and batch["remaining"] == 0
+    again = c.post(f"/v1/game/rounds/{body['round_id']}/batches", json={"batch_index": 1}).json()
+    assert again == batch
+
+
+def test_round_for_an_objective_without_questions_is_404():
+    r = client_with(exam=[doc()]).post("/v1/game/rounds", json={"objective": "tools-errors"})
+    assert r.status_code == 404 and r.json()["code"] == "no_questions"
+
+
+def test_added_question_carries_its_objectives():
+    a, b = doc(), doc()
+    c, body = start_round([a], tags=[tags_of(b)])
+    c.app.dependency_overrides[get_async_collection] = lambda: FakeCollection([a, b])
+    added = c.post(f"/v1/game/rounds/{body['round_id']}/questions", json={"question_id": str(b["_id"])}).json()
+    assert added["item"]["objectives"] == ["tools-errors"]
+    wrong = c.post(
+        f"/v1/game/rounds/{body['round_id']}/answers", json={"question_id": str(b["_id"]), "answer_index": 0}
+    ).json()
+    assert wrong["misconception"] == "believes w"
+
+
+def test_objectives_list_counts_playable_tagged_questions():
+    a, b, multi = doc(), doc(), doc(correct_response=["a", "b"])
+    tags = [tags_of(a), tags_of(b, objectives=("tools-errors", "tools-scoping")), tags_of(multi)]
+    items = client_with(exam=[a, b, multi], tags=tags).get("/v1/game/objectives").json()["items"]
+    by_key = {o["key"]: o for o in items}
+    assert by_key["tools-errors"]["count"] == 2 and by_key["tools-scoping"]["count"] == 1
+    assert by_key["tools-descriptions"]["count"] == 0
+    assert by_key["tools-errors"]["section"] == "Tool Design & MCP Integration"
+    assert set(items[0]) == {"key", "section", "title", "statement", "count"}
 
 
 def test_round_returns_questions_and_simplified_without_answer_key():

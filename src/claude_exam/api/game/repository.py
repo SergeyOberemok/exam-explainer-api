@@ -4,7 +4,7 @@ A `game_rounds` document:
 
     {
       "created_at": datetime,                 # TTL index: dropped after ROUND_TTL_SECONDS
-      "filters": {"section": str, "assessment_type": str},
+      "filters": {"section": str, "assessment_type": str, "objective": str},
       "questions": {question_id: round_entry},# answer key and reviews, never sent before answering
       "question_ids": [question_id, ...],     # every question in the round, in the order added
       "batches": [[question_id, ...], ...],   # batch 0 is the start; each later one is one /batches call
@@ -24,15 +24,26 @@ from bson import ObjectId
 from pymongo import ReturnDocument
 from pymongo.asynchronous.collection import AsyncCollection
 
-from claude_exam.api.game.domain import FIFTY_FIFTY_CHARGES, MAX_ROUND_QUESTIONS
+from claude_exam.api.game.domain import (
+    FIFTY_FIFTY_CHARGES,
+    MAX_ROUND_QUESTIONS,
+    PLAYABLE_QUERY,
+)
 
 
 class QuestionRepository:
-    """Reads `examination` and `examination_simplified`."""
+    """Reads `examination`, `examination_simplified` and `question_objectives` (the
+    learning-objective tags; without that collection every question reads as untagged)."""
 
-    def __init__(self, examination: AsyncCollection, simplified: AsyncCollection) -> None:
+    def __init__(
+        self,
+        examination: AsyncCollection,
+        simplified: AsyncCollection,
+        objectives: AsyncCollection | None = None,
+    ) -> None:
         self.examination = examination
         self.simplified = simplified
+        self.objectives = objectives
 
     @staticmethod
     async def _fetch(
@@ -78,6 +89,36 @@ class QuestionRepository:
             return {}
         cursor = self.simplified.find({"question_id": {"$in": list(question_ids)}})
         return {str(d["question_id"]): d for d in await cursor.to_list()}
+
+    async def get_tags_many(self, question_ids: list[str]) -> dict[str, dict]:
+        """The `question_objectives` records of the given questions, by question id."""
+        if self.objectives is None or not question_ids:
+            return {}
+        cursor = self.objectives.find({"question_id": {"$in": list(question_ids)}})
+        return {str(d["question_id"]): d for d in await cursor.to_list()}
+
+    async def ids_with_objective(self, key: str) -> list[str]:
+        """Ids of the questions tagged with `key`, as main or secondary objective."""
+        if self.objectives is None:
+            return []
+        cursor = self.objectives.find({"objectives": key}, {"question_id": 1})
+        return [str(d["question_id"]) for d in await cursor.to_list()]
+
+    async def objective_counts(self) -> dict[str, int]:
+        """How many playable questions each objective key is on. Reads every tag record,
+        which is fine for a question bank of thousands."""
+        if self.objectives is None:
+            return {}
+        tagged = await self.objectives.find({}, {"question_id": 1, "objectives": 1}).to_list()
+        ids = [ObjectId(t["question_id"]) for t in tagged if ObjectId.is_valid(t.get("question_id", ""))]
+        cursor = self.examination.find({**PLAYABLE_QUERY, "_id": {"$in": ids}}, {"_id": 1})
+        playable = {str(d["_id"]) for d in await cursor.to_list()}
+        counts: dict[str, int] = {}
+        for record in tagged:
+            if record.get("question_id") in playable:
+                for key in set(record.get("objectives") or []):
+                    counts[key] = counts.get(key, 0) + 1
+        return counts
 
     async def sections(self, *, simplified: bool = False) -> list[str]:
         collection = self.simplified if simplified else self.examination

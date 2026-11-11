@@ -54,8 +54,9 @@ OBJECTIVES: tuple[ObjectiveDef, ...] = (
     ),
     ObjectiveDef(
         "agents-hooks", AGENTS, "Hooks and hard rules",
-        "Enforce rules that must always hold with hooks or code (PreToolUse, PostToolUse, "
-        "prerequisite checks) instead of prompt instructions",
+        "Enforce rules that must always hold, and correct tool inputs or results, with "
+        "hooks or code (PreToolUse, PostToolUse, prerequisite checks) instead of prompt "
+        "instructions",
     ),
     ObjectiveDef(
         "agents-sessions", AGENTS, "Sessions and state",

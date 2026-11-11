@@ -1,8 +1,9 @@
 """Learning-objective tagging of exam questions (an ICA call of its own).
 
 For one question the model picks, from the closed list in `objective_catalog.py`, the
-objective it tests (and up to two more it touches), a thinking level, a difficulty, and
-for every wrong answer what a learner who picks it gets wrong. The tags describe the
+objective it tests (and up to two more it touches), a thinking level, which wrong
+answers are tempting (the difficulty follows from that), and for every wrong answer
+what a learner who picks it gets wrong. The tags describe the
 ORIGINAL question and its answer key, so they are stored in their own collection
 (`question_objectives`, one record per question) and not on the simplified record.
 
@@ -18,9 +19,9 @@ from fastapi import HTTPException
 from pymongo import ReturnDocument
 from pymongo.asynchronous.collection import AsyncCollection
 
-from claude_exam.api.game.domain import answers_of, correct_indices
+from claude_exam.api.game.domain import answers_of, correct_indices, letter_to_index
 from claude_exam.api.ica import IcaClient
-from claude_exam.api.json_reply import extract_json
+from claude_exam.api.ica_json import ask_json
 from claude_exam.api.objective_catalog import (
     CATALOG_VERSION,
     OBJECTIVES,
@@ -34,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 # Bump when the prompt or the meaning of a stored field changes: records tagged with
 # another version count as missing for an objectives backfill.
-PROMPT_VERSION = "2"
+PROMPT_VERSION = "4"
 LEVELS = ("remember", "understand", "apply", "analyze")
 MAX_SECONDARY = 2
 MAX_MISCONCEPTION_CHARS = 160
@@ -65,12 +66,13 @@ any section. Usually none.
    - "understand": explain what a feature does or how two things differ.
    - "apply": use a known rule or feature in the given situation.
    - "analyze": find the cause of a problem or weigh workable options against each other.
-4. "difficulty": 1, 2 or 3.
-   - 1: one fact decides it and the wrong answers are clearly off.
-   - 2: a rule must be applied to the situation and one wrong answer is tempting.
-   - 3: several answers would partly work; the learner must weigh trade-offs or combine facts.
-5. "distractors": one item per answer, in answer order. For the CORRECT answer the item \
-is null. For each WRONG answer an object with:
+4. "tempting": the letters of the WRONG answers that are tempting: an answer that \
+would partly work, or that a prepared learner could defend for a moment. An answer \
+that is plainly off (wrong tool for the job, solves another problem, makes it worse) \
+is not tempting. Judge each wrong answer on its own; the list is often empty or has \
+one letter, and has two or three only when the options are real trade-offs.
+5. "distractors": one entry per WRONG answer, under that answer's letter. The CORRECT \
+answer gets no entry. Each entry is an object with:
    - "misconception": one sentence of at most 15 words stating the wrong belief \
 itself, as a plain claim, e.g. "A system prompt rule guarantees the order of tool \
 calls." Do not start with "Believes" or "The learner", do not say that the answer is \
@@ -86,15 +88,31 @@ markdown fences, no prose, no comments. Exactly this schema:
   "primary": "<key>",
   "secondary": ["<key>"],
   "level": "remember" | "understand" | "apply" | "analyze",
-  "difficulty": 1 | 2 | 3,
-  "distractors": [{{DISTRACTORS_SCHEMA}}]
+  "tempting": ["<letter>"],
+  "distractors": {{{DISTRACTORS_SCHEMA}}}
 }
 
 Rules:
-- "distractors" has exactly {{N}} items, index-aligned with the answers (A is index 0).
+- "distractors" has exactly these keys: {{LETTERS}}. Each entry is about the answer with \
+that letter, so check the letter against the answer list before you write it.
 - Every key is copied from the lists above.
 - Output valid JSON only.\
 """
+
+
+def difficulty_of(level: str, tempting: int) -> int:
+    """1 (easy) to 3 (hard), from what the model observed instead of its own estimate
+    (which came out as 2 for nearly every question): how many wrong answers tempt, and
+    the thinking asked for. The steps are relative to this exam, whose questions nearly
+    all apply a rule to a situation and have at least one tempting wrong answer:
+    - 3: every wrong answer tempts, or two do and the question asks to analyze;
+    - 1: at most one tempting answer and no analysis asked;
+    - 2: everything else."""
+    if tempting >= 3 or (tempting == 2 and level == "analyze"):
+        return 3
+    if tempting <= 1 and level != "analyze":
+        return 1
+    return 2
 
 
 def _listing(objectives) -> str:
@@ -104,16 +122,17 @@ def _listing(objectives) -> str:
 def _build_system_message(section: str, n_answers: int, correct: list[int]) -> str:
     own = for_section(section)
     others = [o for o in OBJECTIVES if o not in own]
+    wrong = [chr(65 + i) for i in range(n_answers) if i not in correct]
     items = ", ".join(
-        "null" if i in correct else f'{{"misconception": "<for {chr(65 + i)}>", "confused_with": "<key>" | null}}'
-        for i in range(n_answers)
+        f'"{letter}": {{"misconception": "<for {letter}>", "confused_with": "<key>" | null}}'
+        for letter in wrong
     )
     return (
         _SYSTEM_MESSAGE.replace("{{SECTION_OBJECTIVES}}", _listing(own))
         .replace("{{OTHER_OBJECTIVES}}", _listing(others))
         .replace("{{MAX_SECONDARY}}", str(MAX_SECONDARY))
         .replace("{{DISTRACTORS_SCHEMA}}", items)
-        .replace("{{N}}", str(n_answers))
+        .replace("{{LETTERS}}", ", ".join(wrong))
     )
 
 
@@ -138,7 +157,8 @@ def _build_user_message(doc: dict, correct: list[int]) -> str:
 def parse_objectives(parsed: dict, section: str, n_answers: int, correct: list[int]) -> dict:
     """
     Validate the model's reply and return the fields to store: `objectives` (main one
-    first), `level`, `difficulty`, `distractors`. Anything that decides how the question
+    first), `level`, `tempting`, `difficulty` (derived, see `difficulty_of`),
+    `distractors`. Anything that decides how the question
     is grouped or what a wrong answer means must be right, or the reply is rejected
     (502, so a job retries it). Only the optional extras are trimmed: an unknown
     secondary key or `confused_with` is dropped. The main objective may be of another
@@ -169,11 +189,27 @@ def parse_objectives(parsed: dict, section: str, n_answers: int, correct: list[i
     level = parsed.get("level")
     if level not in LEVELS:
         raise bad(f"'level' must be one of {', '.join(LEVELS)}, got {level!r}")
-    difficulty = parsed.get("difficulty")
-    if isinstance(difficulty, bool) or difficulty not in (1, 2, 3):
-        raise bad(f"'difficulty' must be 1, 2 or 3, got {difficulty!r}")
+    raw_tempting = parsed.get("tempting")
+    if not isinstance(raw_tempting, list):
+        raise bad("'tempting' must be a list of answer letters")
+    # Only wrong answers can tempt; anything else in the list is dropped.
+    tempting = sorted(
+        {
+            i
+            for i in map(letter_to_index, raw_tempting)
+            if 0 <= i < n_answers and i not in correct
+        }
+    )
 
     raw = parsed.get("distractors")
+    if isinstance(raw, dict):
+        # Keyed by answer letter (what the prompt asks for: a position in a list proved
+        # easy to get wrong). An entry for a letter that is no answer is an error.
+        letters = [chr(65 + i) for i in range(n_answers)]
+        unknown = sorted(set(raw) - set(letters))
+        if unknown:
+            raise bad(f"'distractors' has entries for {', '.join(map(str, unknown))}, which are no answers")
+        raw = [raw.get(letter) for letter in letters]
     if not isinstance(raw, list) or len(raw) != n_answers:
         got = len(raw) if isinstance(raw, list) else type(raw).__name__
         raise bad(f"'distractors' must be a list of {n_answers} items, got {got}")
@@ -199,7 +235,8 @@ def parse_objectives(parsed: dict, section: str, n_answers: int, correct: list[i
     return {
         "objectives": [primary, *secondary[:MAX_SECONDARY]],
         "level": level,
-        "difficulty": difficulty,
+        "tempting": tempting,
+        "difficulty": difficulty_of(level, len(tempting)),
         "distractors": distractors,
     }
 
@@ -221,28 +258,15 @@ async def tag_question(
             "add them to objective_catalog.py",
         )
 
-    data = await ica.chat_model(
+    parsed, meta = await ask_json(
+        ica,
         model_id,
         _build_user_message(doc, correct),
         system=_build_system_message(section, n_answers, correct),
+        what="objectives",
         max_tokens=max_tokens,
     )
-    choice = (data.get("choices") or [{}])[0]
-    finish_reason = choice.get("finish_reason")
-    if finish_reason and finish_reason != "stop":
-        raise HTTPException(
-            status_code=502,
-            detail=f"ICA model stopped with finish_reason={finish_reason!r} — cannot parse objectives",
-        )
-    parsed = extract_json((choice.get("message") or {}).get("content") or "")
-    return (
-        parse_objectives(parsed, section, n_answers, correct),
-        IcaMeta(
-            model_id=model_id,
-            finish_reason=finish_reason,
-            total_tokens=(data.get("usage") or {}).get("total_tokens", 0),
-        ),
-    )
+    return parse_objectives(parsed, section, n_answers, correct), meta
 
 
 def current_query(question_id: str) -> dict:

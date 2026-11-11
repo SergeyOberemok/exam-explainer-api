@@ -13,19 +13,43 @@ from pymongo.asynchronous.database import AsyncDatabase
 from pymongo.errors import OperationFailure
 
 from claude_exam.api.game.domain import ROUND_TTL_SECONDS
+from claude_exam.api.scenario_catalog import text_hash
 from claude_exam.api.search import TEXT_INDEX_KEYS, TEXT_INDEX_NAME, TEXT_INDEX_WEIGHTS
 
 logger = logging.getLogger(__name__)
 
 
+async def ensure_text_hashes(db: AsyncDatabase) -> int:
+    """Give every stored question its `text_hash` (questions imported before the import
+    stored one have none), so an import can tell what the bank already holds. Returns
+    how many were filled in."""
+    filled = 0
+    async for doc in db["examination"].find({"text_hash": None}, {"prompt": 1}):
+        await db["examination"].update_one(
+            {"_id": doc["_id"]}, {"$set": {"text_hash": text_hash(doc)}}
+        )
+        filled += 1
+    if filled:
+        logger.info("text_hash added to %d stored questions", filled)
+    return filled
+
+
 async def ensure_indexes(db: AsyncDatabase) -> None:
+    await ensure_text_hashes(db)
     specs = [
+        # One stored question per text: the import's duplicate check, made race-safe.
+        # Not created while the bank holds the same question twice (logged below).
+        ("examination", "text_hash", {"unique": True, "sparse": True}),
         # One simplified record per question; makes the simplify upsert race-safe.
         ("examination_simplified", "question_id", {"unique": True}),
         # One objectives record per question; makes the tagging upsert race-safe.
         ("question_objectives", "question_id", {"unique": True}),
         # A round filtered by objective looks questions up by key.
         ("question_objectives", "objectives", {}),
+        # One story record per question; makes the story upsert race-safe.
+        ("question_story", "question_id", {"unique": True}),
+        # A story round reads a chapter's stage in order.
+        ("question_story", [("scenario", 1), ("stage", 1), ("order", 1)], {}),
         # Game endpoints filter by these fields; avoids collection scans.
         ("examination", [("section", 1), ("assessment_type", 1)], {}),
         ("examination_simplified", [("section", 1), ("assessment_type", 1)], {}),

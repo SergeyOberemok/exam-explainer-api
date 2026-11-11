@@ -1,5 +1,20 @@
+"""The game text of a question (an ICA call): the same question in plain words, told
+as a moment in the game's story.
+
+The original question stays what the player answers and what is scored. This step
+writes the second version the game shows on Reveal: plain language, set in the company
+of `scenario_catalog.py`, with one of the chapter's people bringing the problem. It is
+stored in `examination_simplified` (`prompt`), one record per question.
+
+Because a model writes it, a reply has to pass hard checks before it is stored
+(`fidelity_errors`): the exact names the exam tests, the numbers of the question and
+the length of each answer. A reply that fails is sent back with what was wrong, up to
+`MAX_ATTEMPTS` replies in all; after that it is rejected (502, which a job retries). A later
+step (`check.py`) tests that the rewrite still has the same right answer.
+"""
+
+import json
 import logging
-import re
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 
@@ -8,9 +23,21 @@ from pymongo import ReturnDocument
 from pymongo.asynchronous.collection import AsyncCollection
 
 from claude_exam.api.entities import extract_entities
-from claude_exam.api.icons import pick_icons
+from claude_exam.api.exam_terms import lost_identifiers, lost_names, lost_numbers
 from claude_exam.api.ica import IcaClient
-from claude_exam.api.json_reply import extract_json
+from claude_exam.api.ica_json import ask_json
+from claude_exam.api.icons import pick_icons
+from claude_exam.api.scenario_catalog import (
+    BY_KEY,
+    COMPANY,
+    COMPANY_INTRO,
+    STAGES,
+    frame_version,
+    known_scenario,
+    scenario_of,
+    split_scenario,
+    text_hash,
+)
 from claude_exam.api.schemas import (
     IcaMeta,
     IcaModelId,
@@ -22,100 +49,202 @@ from claude_exam.html_clean import clean_plain, clean_question
 
 logger = logging.getLogger(__name__)
 
-# System message injected directly into /chat-models/chat/completions.
-# Combines the full Exam Explainer Agent persona with a JSON output requirement
-# appended at the end — so a single model call produces structured output.
+# Bump when the prompt or the meaning of a stored field changes: records of another
+# version count as missing for a pipeline backfill.
+PROMPT_VERSION = "2"
+# How much longer than its original a rewritten answer may be before it is rejected.
+MAX_ANSWER_GROWTH = 1.25
+ANSWER_SLACK_CHARS = 15
+# Attempts per call of `simplify_item`: the first reply, then repairs.
+MAX_ATTEMPTS = 3
+
 _SYSTEM_MESSAGE = """\
 You are a patient exam coach for the Claude Certified Architect / Developer \
-certification. You have deep familiarity with Claude Code, the Claude Agent SDK, \
-the Claude API, MCP, prompt engineering, tool use, context management, evals and \
-agent design. Your job is for the learner to understand and remember, not just to \
-see the key.
+certification and the writer of a quiz game built on its questions. You have deep \
+familiarity with Claude Code, the Claude Agent SDK, the Claude API, MCP, prompt \
+engineering, tool use, context management, evals and agent design. In the game every \
+exam question happens inside one company, and the player is that company's Claude \
+architect.
 
-When given a multiple-choice exam question, do the following in your head:
-1. Retell the question as a concrete story the learner can hold in their head.
-2. Identify the core problem and goal.
-3. For every answer option, determine: the mechanism it relies on, the expected \
-outcome, what changes, and its main limitation.
-4. Identify the correct answer and the single deciding fact that separates it from \
-the rest.
-5. Derive a one-line takeaway rule for similar questions.
+For one multiple-choice question you write its GAME VERSION: the same question with \
+the same answers, in plain words, told as a moment in the game's story. Your job is \
+for the learner to understand and remember, not just to see the key.
 
-Use the supplied explanation, per-option feedbacks, and correct_response as the \
-source of truth. Do not invent technical facts.
+THE STORY
+{{COMPANY_INTRO}}
+{{CHAPTER}}
 
-Plain language rules: short sentences (at most about 20 words each), everyday words, \
-define jargon on first use, concrete over abstract. Active voice. Keep technical terms \
-only when they are the concept being tested. Rewrite every question, answer and \
-feedback in your own words: never copy an original sentence of more than 20 words \
-word for word, and keep every qualifier it contains. A simplified answer must not be \
-longer than the original answer.
+HOW TO WORK - in your head, before you write:
+1. Find the core problem and what is being asked.
+2. For every answer option: the mechanism it relies on and its main limitation.
+3. Find the single deciding fact that separates the correct answer from the rest.
+Use the supplied explanation, per-option feedback and correct answer as the source of \
+truth. Do not invent technical facts.
 
-Exact terms: keep every product, mode, tool, setting, parameter and command name \
-verbatim (for example `acceptEdits`, `dontAsk`, plan mode, `git diff`, MCP) — never \
-replace one with a paraphrase. If a term needs explaining, put the plain-words \
-explanation right next to the exact name, e.g. "`dontAsk` mode (silently denies \
-anything not pre-approved)". Also keep every concrete detail that distinguishes one \
-option from another (extra steps, conditions, qualifiers). Named patterns and \
-concepts from the official explanation (for example "evaluator-optimizer", "context \
-isolation", "scoped tool access") are exact terms too: keep the name and put the plain \
-explanation next to it, and name the concept in the closing one-line rule.
+THE QUESTION
+- 2 to 4 short sentences, then the ask as a question. Address the player as "you".
+- Sentence one sets the moment in the company. {{PEOPLE_RULE}}
+- The story adds only who is asking and where. Every fact of the original stays: \
+each number and percentage as digits, each limit, tool, setting, condition and \
+symptom. Add no technical fact, cause or hint the original does not state.
+- Do not make the correct answer easier to find than in the original: no new clue, \
+no wording borrowed from the correct answer.
+{{BACKGROUND_RULE}}
 
-Feedback wording: start each feedback with "Correct." for the correct option(s) and \
-"Incorrect." for every other option, then give the reasoning.
+THE ANSWERS
+- An answer is the same proposal in plain words: one or two short sentences, no \
+people, no story. It must not be longer than the original answer.
+- Keep each detail that tells one option from another (extra steps, conditions, \
+qualifiers).
 
-OUTPUT FORMAT — you MUST respond with ONLY a single valid JSON object and nothing \
-else — no markdown fences, no prose before or after, no comments. \
+PLAIN LANGUAGE
+Short sentences (at most about 20 words), everyday words, active voice, concrete over \
+abstract. Rewrite in your own words: never copy an original sentence of more than 20 \
+words word for word.
+
+EXACT TERMS
+Keep every product, mode, tool, setting, parameter, hook, file and command name \
+exactly as written (for example `acceptEdits`, `dontAsk`, plan mode, `PreToolUse`, \
+`.mcp.json`, `claude -p`, MCP, subagent) - never replace one with a paraphrase, and \
+keep it in the same answer it came from. If a term needs explaining, put the plain \
+words next to the exact name: "`dontAsk` mode (silently denies anything not \
+pre-approved)". Named patterns and concepts of the official explanation (for example \
+"evaluator-optimizer", "context isolation", "scoped tool access") are exact terms \
+too: keep the name, explain it next to it, and name the concept in the closing rule.
+
+FEEDBACK AND EXPLANATION
+- Start each feedback with "Correct." for the correct option(s) and "Incorrect." for \
+every other option, then give the reasoning in one or two short sentences. No story.
+- The explanation is 2-3 sentences: the single deciding fact that makes the correct \
+answer correct, why the closest wrong option fails, and last a one-line rule for \
+similar questions. No story and no names here either: it is what the learner takes \
+to the exam.
+
+EXAMPLE - one question of another chapter, to show the level of story and of plain \
+language. Never reuse its content.
+Original question: The system prompt for this agent currently instructs it to \
+"escalate to a human whenever the issue seems too complex to resolve or the customer \
+appears frustrated." Production transcripts show the agent escalates simple billing \
+corrections when customers use strong language, yet attempts genuinely ambiguous \
+policy-exception disputes on its own, and first-contact resolution is stuck at 64%. \
+Which prompt change would most effectively make the escalation behavior consistent \
+and improve resolution rates?
+Game version: Mara, head of support, shows you the transcripts. The agent's system \
+prompt says to escalate "whenever the issue seems too complex to resolve or the \
+customer appears frustrated." So it escalates simple billing corrections when \
+customers use strong language, yet handles unclear policy-exception disputes alone. \
+First-contact resolution is stuck at 64%. Which prompt change makes escalation \
+consistent and raises the resolution rate?
+Original answer: Have the agent output a self-reported confidence score with each \
+resolution decision and escalate any case where the confidence score falls below a \
+fixed threshold.
+Game version: Have the agent report a confidence score with each decision and \
+escalate when the score is below a fixed threshold.
+
+OUTPUT FORMAT - you MUST respond with ONLY a single valid JSON object and nothing \
+else - no markdown fences, no prose before or after, no comments. \
 Respond with exactly this schema:
 
 {
-  "question": "<simplified question text — plain text, no HTML. Keep the scenario \
-context (what is being built, with which tools) and the actual ask; retell it in \
-2-5 short sentences>",
+  "question": "<the game version of the question - plain text, no HTML>",
   {{ANSWERS_SCHEMA}},
   {{FEEDBACKS_SCHEMA}},
-  "explanation": "<2-3 sentences: first state the single deciding fact that makes \
-the correct answer correct, then why the closest wrong option fails, then end with \
-a one-line rule for similar questions>"
+  "explanation": "<2-3 sentences ending with a one-line rule>"
 }
 
 Rules:
 - Preserve the number of answers and feedbacks exactly (same count as input).
 - Keep the order: answers[i] and feedbacks[i] must rewrite the input option with \
 the same letter (A is index 0, B is index 1, and so on). Never reorder or merge options.
-- Do not change correct_response — you are only rewriting text.
+- Do not change which answer is correct - you are only rewriting text.
 - Output valid JSON. Do not wrap it in a code block or add any surrounding text.\
 """
 
+_WITH_CHAPTER = (
+    "- The player has read the chapter's introduction above and the line shown before "
+    "the question (given with the question). Do not retell either, and do not open "
+    "with the words of that line. The question's SCENARIO paragraph is that same "
+    "background: take from it only what this question cannot be understood without."
+)
+_WITHOUT_CHAPTER = (
+    "- The player has read nothing about this system. If the question comes with a "
+    "SCENARIO paragraph, keep what the question needs from it: what is being built, "
+    "with which tools, and the goal."
+)
 
-def _build_system_message(n_answers: int) -> str:
+
+def chapter_key(item: dict, story: dict | None = None) -> str | None:
+    """The chapter a question's game text is set in: the one its scenario paragraph
+    names, else the one its story record names (`story`: what `game.domain.story_of`
+    returned), else None."""
+    scenario = scenario_of(item)
+    if scenario is not None:
+        return scenario.key
+    return known_scenario((story or {}).get("scenario"))
+
+
+def opening(item: dict, chapter: str | None) -> str:
+    """Who brings the question to the player, as a line for the model. Decided here and
+    not by the model, which would open every question with a person: about one question
+    in three gets one of the chapter's people (always the same one for the same text),
+    the others start with the situation."""
+    cast = BY_KEY[chapter].cast if chapter in BY_KEY else ()
+    number = int(text_hash(item), 16)
+    if not cast or number % 3:
+        return "OPENING: no person. Start with the situation itself."
+    name, role = cast[(number // 3) % len(cast)]
+    return f"OPENING: {name} ({role}) brings this to you."
+
+
+def _build_system_message(n_answers: int, chapter: str | None = None) -> str:
     # Fill the {{ANSWERS_SCHEMA}} / {{FEEDBACKS_SCHEMA}} placeholders with the
     # correct number of entries so the model knows the exact expected array length.
     letters = [chr(65 + i) for i in range(n_answers)]
     answers_entries = ",\n    ".join(
-        f'"<simplified answer {l} — plain words, one or two sentences>"' for l in letters
+        f'"<game version of answer {l} - plain words, one or two sentences>"' for l in letters
     )
     feedbacks_entries = ",\n    ".join(
-        f'"<simplified feedback for {l} — why it is right or wrong, one or two '
+        f'"<feedback for {l} - why it is right or wrong, one or two '
         f'short sentences that keep the reasoning, not just the verdict>"'
         for l in letters
     )
-    return _SYSTEM_MESSAGE.replace(
-        "{{ANSWERS_SCHEMA}}", f'"answers": [\n    {answers_entries}\n  ]'
-    ).replace(
-        "{{FEEDBACKS_SCHEMA}}", f'"feedbacks": [\n    {feedbacks_entries}\n  ]'
+    scenario = BY_KEY.get(chapter) if chapter else None
+    if scenario is not None:
+        people = ", ".join(f"{name} ({role})" for name, role in scenario.cast)
+        block = f'\nTHIS QUESTION\'S CHAPTER - "{scenario.title}"\n{scenario.intro}'
+        if people:
+            block += f"\nPeople of the chapter: {people}"
+        background = _WITH_CHAPTER
+    else:
+        block = ""
+        background = _WITHOUT_CHAPTER
+    people_rule = (
+        "The OPENING line given with the question says who brings the problem. If it "
+        "names a person, that person brings it: use the first name and the role, once. "
+        "If it says no person, name nobody: start with the situation itself, as the "
+        f"team at {COMPANY} or you would see it."
+    )
+    return (
+        _SYSTEM_MESSAGE.replace("{{COMPANY_INTRO}}", COMPANY_INTRO)
+        .replace("{{CHAPTER}}", block)
+        .replace("{{PEOPLE_RULE}}", people_rule)
+        .replace("{{BACKGROUND_RULE}}", background)
+        .replace("{{ANSWERS_SCHEMA}}", f'"answers": [\n    {answers_entries}\n  ]')
+        .replace("{{FEEDBACKS_SCHEMA}}", f'"feedbacks": [\n    {feedbacks_entries}\n  ]')
     )
 
 
-def _build_user_message(item: dict) -> str:
-    """Render one practice-exam item as the user turn sent to the agent."""
+def _build_user_message(item: dict, story: dict | None = None) -> str:
+    """Render one practice-exam item as the user turn: the question split into its
+    scenario paragraph and the question itself, where the question stands in the story,
+    and the answer key."""
     prompt = item.get("prompt") or {}
-    question = clean_question(prompt.get("question", ""))
+    paragraph, stem = split_scenario(clean_question(prompt.get("question", "")))
     answers = prompt.get("answers", [])
     feedbacks = prompt.get("feedbacks", [])
     correct = item.get("correct_response", [])
     explanation = clean_plain(prompt.get("explanation", ""))
-    section = item.get("section", "")
+    story = story or {}
 
     choices_block = "\n".join(
         f"  {chr(65 + i)}. {clean_plain(a)}" for i, a in enumerate(answers)
@@ -124,42 +253,85 @@ def _build_user_message(item: dict) -> str:
     feedbacks_block = "\n".join(
         f"  {chr(65 + i)}. {clean_plain(f)}" for i, f in enumerate(feedbacks)
     )
+    stage = next((s for s in STAGES if s.key == story.get("stage")), None)
+    parts = [f"Section: {item.get('section', '')}"]
+    if stage is not None:
+        parts.append(f"STAGE OF THE CHAPTER: {stage.title} - {stage.description}")
+    if story.get("beat"):
+        parts.append(f"LINE SHOWN BEFORE THE QUESTION:\n{story['beat']}")
+    parts.append(opening(item, chapter_key(item, story)))
+    if paragraph:
+        parts.append(f"SCENARIO:\n{paragraph}")
+    parts += [
+        f"QUESTION:\n{stem}",
+        f"ANSWER CHOICES:\n{choices_block}",
+        f"CORRECT ANSWER: {correct_labels}",
+        f"PER-CHOICE FEEDBACK:\n{feedbacks_block}",
+        f"OFFICIAL EXPLANATION:\n{explanation}",
+    ]
+    return "\n\n".join(parts)
 
-    return (
-        f"Section: {section}\n\n"
-        f"QUESTION:\n{question}\n\n"
-        f"ANSWER CHOICES:\n{choices_block}\n\n"
-        f"CORRECT ANSWER: {correct_labels}\n\n"
-        f"PER-CHOICE FEEDBACK:\n{feedbacks_block}\n\n"
-        f"OFFICIAL EXPLANATION:\n{explanation}"
-    )
 
-
-_IDENTIFIER = re.compile(r"`([^`\n]+)`|\b([a-z]+(?:_[a-z0-9]+)+|[a-z]+[A-Z][A-Za-z0-9]*)\b")
 _COPY_RATIO = 0.85
+
+
+def fidelity_errors(item: dict, parsed: dict) -> list[str]:
+    """
+    What makes a shape-valid reply unusable, as sentences the model can act on (empty
+    when it passes). A rewrite may change the words, never what the exam tests:
+    - every identifier of an original answer (`exam_terms.lost_identifiers`) is in the
+      rewrite of that same answer, and every identifier and number of the question
+      itself in the rewritten question (the scenario paragraph is background and may
+      be left out);
+    - every named concept of the question and its answers (`exam_terms.lost_names`)
+      is still named somewhere in the rewritten question and answers;
+    - no answer has grown past `MAX_ANSWER_GROWTH`.
+    """
+    prompt = item.get("prompt") or {}
+    originals = [clean_plain(a) for a in prompt.get("answers", [])]
+    stem = split_scenario(clean_question(prompt.get("question", "")))[1]
+
+    errors = []
+    for i, (original, rewrite) in enumerate(zip(originals, parsed["answers"])):
+        letter = chr(65 + i)
+        lost = lost_identifiers(original, rewrite)
+        if lost:
+            errors.append(
+                f"answer {letter} must keep these exact terms: {', '.join(lost)}"
+            )
+        if len(rewrite) > len(original) * MAX_ANSWER_GROWTH + ANSWER_SLACK_CHARS:
+            errors.append(
+                f"answer {letter} is longer than the original "
+                f"({len(rewrite)} characters, the original has {len(original)})"
+            )
+    lost = lost_identifiers(stem, parsed["question"])
+    if lost:
+        errors.append(f"the question must keep these exact terms: {', '.join(lost)}")
+    lost = lost_names(
+        "\n".join([stem, *originals]), "\n".join([parsed["question"], *parsed["answers"]])
+    )
+    if lost:
+        errors.append(
+            f"the question and its answers must still name: {', '.join(lost)} "
+            "(use the exact word where the original uses it)"
+        )
+    numbers = lost_numbers(stem, parsed["question"])
+    if numbers:
+        errors.append(
+            f"the question must keep these numbers as digits: {', '.join(numbers)}"
+        )
+    return errors
 
 
 def quality_warnings(item: dict, parsed: dict) -> list[str]:
     """
-    Soft quality checks on a shape-valid reply. They never reject it: they are
-    logged and their count is stored in the call metadata, so prompt changes can be
-    compared. Checks: an identifier (`backticked`, snake_case or camelCase) of an
-    original ANSWER missing from the simplified answers (identifiers that only occur
-    in the question's background, such as a list of available tools, may be shortened
-    and are not checked), and a simplified answer that is (nearly) a copy of the
-    original.
+    Everything a report should show about a shape-valid reply: the hard problems of
+    `fidelity_errors` (a stored record has none, unless it predates them) and one soft
+    one that never rejects a reply, an answer that is (nearly) a copy of the original.
+    Many answers of this bank are already short and exact, so a copy is not an error.
     """
-    prompt = item.get("prompt") or {}
-    originals = [clean_plain(a) for a in prompt.get("answers", [])]
-    result = "\n".join([parsed["question"], *parsed["answers"]]).lower()
-
-    warnings = []
-    seen = set()
-    for match in _IDENTIFIER.finditer("\n".join(originals)):
-        term = (match.group(1) or match.group(2)).strip()
-        if term.lower() not in seen and term.lower() not in result:
-            warnings.append(f"identifier {term!r} missing from simplified text")
-        seen.add(term.lower())
+    originals = [clean_plain(a) for a in (item.get("prompt") or {}).get("answers", [])]
+    warnings = fidelity_errors(item, parsed)
     for i, (orig, new) in enumerate(zip(originals, parsed["answers"])):
         if SequenceMatcher(None, orig.lower(), new.lower()).ratio() >= _COPY_RATIO:
             warnings.append(f"answer {chr(65 + i)} is not simplified (near copy)")
@@ -200,39 +372,73 @@ def _validate_shape(
                 )
 
 
+def _repair_note(previous: dict, errors: list[str]) -> str:
+    """What the model gets after a rejected reply: that reply and what is wrong with
+    it. Without its own text it writes a new one and loses something else."""
+    listed = "\n".join(f"- {e}" for e in errors)
+    return (
+        "\n\nYOUR PREVIOUS REPLY:\n"
+        f"{json.dumps(previous, ensure_ascii=False, indent=1)}\n\n"
+        "IT WAS REJECTED FOR THESE REASONS ONLY:\n"
+        f"{listed}\n"
+        "Reply with the same JSON object, changing only the places named above and "
+        "leaving every other sentence exactly as it is. Copy an exact term letter "
+        "for letter into the place it belongs."
+    )
+
+
 async def simplify_item(
     ica: IcaClient,
     item: dict,
     model_id: IcaModelId,
     max_tokens: int | None = None,
+    story: dict | None = None,
 ) -> tuple[SimplifiedPrompt, IcaMeta]:
     """
     Run one exam item (needs `prompt`, `correct_response`, `section`) through the
-    ICA chat model and return the validated simplified prompt plus call metadata.
+    ICA chat model and return its validated game text plus call metadata. `story` is
+    where the question stands in the story (`scenario`, `stage`, `beat`, as
+    `game.domain.story_of` returns them); without it the text is set in the chapter the
+    question's own scenario paragraph names, or just in the company.
+
+    A reply that breaks `fidelity_errors` is sent back with what was wrong; when the
+    last of `MAX_ATTEMPTS` replies still breaks it the call raises 502. The metadata counts the tokens of all attempts.
     """
     n_answers = len((item.get("prompt") or {}).get("answers", []))
     if n_answers == 0:
         raise HTTPException(
             status_code=422, detail="question has no answers to simplify"
         )
-    data = await ica.chat_model(
-        model_id,
-        _build_user_message(item),
-        system=_build_system_message(n_answers),
-        max_tokens=max_tokens,
-    )
-    choice = (data.get("choices") or [{}])[0]
-    finish_reason = choice.get("finish_reason")
-    if finish_reason and finish_reason != "stop":
+    system = _build_system_message(n_answers, chapter_key(item, story))
+    user = _build_user_message(item, story)
+
+    errors: list[str] = []
+    parsed: dict = {}
+    tokens = 0
+    for _ in range(MAX_ATTEMPTS):
+        parsed, meta = await ask_json(
+            ica,
+            model_id,
+            user + (_repair_note(parsed, errors) if errors else ""),
+            system=system,
+            what="output",
+            max_tokens=max_tokens,
+        )
+        tokens += meta.total_tokens
+        _validate_shape(parsed, n_answers, item.get("correct_response") or [])
+        errors = fidelity_errors(item, parsed)
+        if not errors:
+            break
+        logger.info("game text of %s needs repair: %s", item.get("_id"), "; ".join(errors))
+    else:
         raise HTTPException(
             status_code=502,
-            detail=f"ICA model stopped with finish_reason={finish_reason!r} — cannot parse output",
+            detail=f"Exam Explainer output rejected: {'; '.join(errors)}",
         )
-    parsed = extract_json((choice.get("message") or {}).get("content") or "")
-    _validate_shape(parsed, n_answers, item.get("correct_response") or [])
-    for warning in quality_warnings(item, parsed):
-        logger.warning("simplify %s: %s", item.get("_id"), warning)
 
+    for warning in quality_warnings(item, parsed):
+        logger.info("simplify %s: %s", item.get("_id"), warning)
+    meta.total_tokens = tokens
     return (
         SimplifiedPrompt(
             question=parsed["question"],
@@ -240,11 +446,17 @@ async def simplify_item(
             feedbacks=parsed["feedbacks"],
             explanation=parsed["explanation"],
         ),
-        IcaMeta(
-            model_id=model_id,
-            finish_reason=finish_reason,
-            total_tokens=(data.get("usage") or {}).get("total_tokens", 0),
-        ),
+        meta,
+    )
+
+
+def is_current(record: dict | None, doc: dict, story: dict | None = None) -> bool:
+    """Whether a stored simplified record was written with today's prompt and with the
+    story of the question's chapter as it is today."""
+    return (
+        record is not None
+        and record.get("prompt_version") == PROMPT_VERSION
+        and record.get("frame_version") == frame_version(chapter_key(doc, story))
     )
 
 
@@ -255,20 +467,22 @@ async def simplify_and_store(
     model_id: IcaModelId,
     max_tokens: int | None = None,
     with_entities: bool = True,
+    story: dict | None = None,
 ) -> SimplifiedQuestion:
     """
-    Simplify one examination document and upsert the result into
+    Write the game text of one examination document and upsert the result into
     `examination_simplified`, keyed by `question_id`. An existing record is
-    replaced and keeps its `created_at`.
+    replaced and keeps its `created_at`. `story` is passed on to `simplify_item`.
 
     Unless `with_entities` is false, a second ICA call extracts the visual entities
-    of the simplified text. That call is best effort: if it fails the simplified
-    record is still stored, with empty entities (backfill them later via
+    of the new text. That call is best effort: if it fails the record is still
+    stored, with empty entities (backfill them later via
     `entities.enrich_and_store`); entities stored earlier survive only when the new
-    simplified question and answers are unchanged. After a successful extraction a
-    third call picks the icons, best effort too (`icons.assign_and_store` backfills).
+    question and answers are unchanged, and so does the result of the check step.
+    After a successful extraction a third call picks the icons, best effort too
+    (`icons.assign_and_store` backfills).
     """
-    prompt, meta = await simplify_item(ica, doc, model_id, max_tokens)
+    prompt, meta = await simplify_item(ica, doc, model_id, max_tokens, story)
 
     entities, entities_meta, icons_meta = PromptEntities(), None, None
     if with_entities:
@@ -293,18 +507,18 @@ async def simplify_and_store(
             )
 
     question_id = str(doc["_id"])
-    keep_entities = False
-    if entities_meta is None:
-        # No fresh entities: keep the stored ones only while they still index into
-        # the same text, otherwise they would point at the wrong words.
-        existing = await simplified.find_one({"question_id": question_id})
-        old = (existing or {}).get("prompt") or {}
-        keep_entities = (
-            existing is not None
-            and existing.get("entities_ica") is not None
-            and old.get("question") == prompt.question
-            and old.get("answers") == prompt.answers
-        )
+    existing = await simplified.find_one({"question_id": question_id})
+    old = (existing or {}).get("prompt") or {}
+    # What was derived from the stored text still fits only while the text is the same;
+    # otherwise entities would point at the wrong words and a check at another wording.
+    same_text = (
+        existing is not None
+        and old.get("question") == prompt.question
+        and old.get("answers") == prompt.answers
+    )
+    keep_entities = (
+        entities_meta is None and same_text and existing.get("entities_ica") is not None
+    )
 
     now = datetime.now(timezone.utc)
     fields = {
@@ -315,12 +529,16 @@ async def simplify_and_store(
         "related_lectures": doc.get("related_lectures", []),
         "prompt": prompt.model_dump(),
         "ica": meta.model_dump(),
+        "prompt_version": PROMPT_VERSION,
+        "frame_version": frame_version(chapter_key(doc, story)),
         "updated_at": now,
     }
     if not keep_entities:
         fields["entities"] = entities.model_dump()
         fields["entities_ica"] = entities_meta.model_dump() if entities_meta else None
         fields["icons_ica"] = icons_meta.model_dump() if icons_meta else None
+    if not same_text:
+        fields["check"] = None
     stored = await simplified.find_one_and_update(
         {"question_id": question_id},
         {"$set": fields, "$setOnInsert": {"created_at": now}},

@@ -1,17 +1,23 @@
 import asyncio
 import logging
 from datetime import datetime, timezone
+from typing import NamedTuple
 
 from bson import ObjectId
 from fastapi import HTTPException
 from pymongo import AsyncMongoClient
 
+from claude_exam.api import check, simplify
+from claude_exam.api.check import check_and_store
 from claude_exam.api.entities import enrich_and_store
+from claude_exam.api.game.domain import difficulty_of, story_of
 from claude_exam.api.ica import IcaClient
 from claude_exam.api.icons import assign_and_store
 from claude_exam.api.objectives import current_query, tag_and_store
 from claude_exam.api.schemas import IcaModelId, JobMode, JobStage
 from claude_exam.api.simplify import simplify_and_store
+from claude_exam.api.story import current_query as current_story_query
+from claude_exam.api.story import story_and_store
 
 logger = logging.getLogger(__name__)
 
@@ -22,16 +28,40 @@ BACKOFF_SECONDS = 5.0
 # A running job refreshes `heartbeat_at` before every ICA attempt. Must exceed
 # the ICA call timeout plus the longest backoff sleep.
 STALE_JOB_SECONDS = 15 * 60
-# The steps each job mode runs for a question, in order.
+# Questions a job works on at the same time, unless the caller says otherwise
+# (`PIPELINE_CONCURRENCY` in the settings). The steps of one question stay in order.
+DEFAULT_CONCURRENCY = 3
+# The steps each job mode runs for a question, in order. In "full" the objectives come
+# first because the story step orders a question by its difficulty, and the story
+# before the game text because that text is set in the question's chapter and stage.
 STAGES: dict[JobMode, tuple[JobStage, ...]] = {
+    "full": ("objectives", "story", "simplify", "entities", "icons", "check"),
     "simplify": ("simplify", "entities", "icons"),
     "simplify_only": ("simplify",),
     "entities": ("entities", "icons"),
     "icons": ("icons",),
     "objectives": ("objectives",),
+    "story": ("story",),
+    "check": ("check",),
 }
-# Set on the simplified record only by a successful run of that step.
-_DONE_FIELD = {"entities": "entities_ica", "icons": "icons_ica"}
+# A step that needs what another step of the same job stores: when that one fails (or
+# could not run), this one is not tried. Steps not listed here run whatever happened
+# before them, so a question without objectives still gets its game text.
+_NEEDS: dict[JobStage, JobStage] = {
+    "entities": "simplify",
+    "icons": "entities",
+    "check": "simplify",
+}
+# Counters kept from before "full" existed: questions whose earlier steps were stored
+# but whose entity / icon step failed.
+_LEGACY_COUNTER = {"entities": "entities_failed", "icons": "icons_failed"}
+
+
+class Stores(NamedTuple):
+    examination: object
+    simplified: object
+    objectives: object
+    story: object
 
 
 def _now() -> datetime:
@@ -60,6 +90,7 @@ def new_job(
         "entities_failed": 0,
         "icons_failed": 0,
         "skipped": 0,
+        "stages_failed": {},
         "errors": [],
         "created_at": now,
         "heartbeat_at": now,
@@ -87,28 +118,152 @@ async def _with_retry(operation, jobs, job_id: ObjectId) -> None:
             attempt += 1
 
 
-async def _already_done(simplified, objectives, question_id: str, mode: JobMode) -> bool:
-    """Whether the question already has what an "entities", "icons" or "objectives" job
-    would add (objectives: tagged with the current catalog and prompt)."""
-    if mode == "objectives":
-        return await objectives.find_one(current_query(question_id), {"_id": 1}) is not None
-    found = await simplified.find_one(
-        {"question_id": question_id, _DONE_FIELD[mode]: {"$ne": None}}, {"_id": 1}
-    )
-    return found is not None
+async def _story(stores: Stores, doc: dict) -> dict:
+    """Where the question stands in the story today (chapter, stage, beat)."""
+    record = await stores.story.find_one({"question_id": str(doc["_id"])})
+    return story_of(doc, record)
 
 
-def _step(
-    stage: JobStage, ica: IcaClient, simplified, objectives, doc: dict, model_id: IcaModelId
-):
-    """The operation of one pipeline step for one question."""
+async def is_current(stage: JobStage, stores: Stores, doc: dict) -> bool:
+    """Whether the question already has what `stage` would store, written with today's
+    prompt and catalogs (for a story also: a seed record). A job with `only_missing`
+    skips such a step, which is what makes running it again cheap."""
+    question_id = str(doc["_id"])
     if stage == "objectives":
-        return lambda: tag_and_store(ica, objectives, doc, model_id)
+        found = await stores.objectives.find_one(current_query(question_id), {"_id": 1})
+        return found is not None
+    if stage == "story":
+        found = await stores.story.find_one(current_story_query(question_id), {"_id": 1})
+        return found is not None
+    record = await stores.simplified.find_one({"question_id": question_id})
+    if record is None:
+        return False
     if stage == "simplify":
-        return lambda: simplify_and_store(ica, simplified, doc, model_id, with_entities=False)
+        return simplify.is_current(record, doc, await _story(stores, doc))
     if stage == "entities":
-        return lambda: enrich_and_store(ica, simplified, doc, model_id)
-    return lambda: assign_and_store(ica, simplified, str(doc["_id"]), model_id)
+        return record.get("entities_ica") is not None
+    if stage == "icons":
+        return record.get("icons_ica") is not None
+    return check.is_current(record)
+
+
+async def missing_stages(mode: JobMode, stores: Stores, doc: dict) -> list[JobStage]:
+    """The steps of `mode` a question still needs."""
+    return [s for s in STAGES[mode] if not await is_current(s, stores, doc)]
+
+
+def _step(stage: JobStage, ica: IcaClient, stores: Stores, doc: dict, model_id: IcaModelId):
+    """The operation of one pipeline step for one question."""
+
+    async def objectives():
+        await tag_and_store(ica, stores.objectives, doc, model_id)
+
+    async def story():
+        tags = await stores.objectives.find_one({"question_id": str(doc["_id"])})
+        await story_and_store(
+            ica, stores.story, doc, model_id, difficulty=difficulty_of(tags)
+        )
+
+    async def game_text():
+        await simplify_and_store(
+            ica,
+            stores.simplified,
+            doc,
+            model_id,
+            with_entities=False,
+            story=await _story(stores, doc),
+        )
+
+    async def entities():
+        await enrich_and_store(ica, stores.simplified, doc, model_id)
+
+    async def icons():
+        await assign_and_store(ica, stores.simplified, str(doc["_id"]), model_id)
+
+    async def checked():
+        await check_and_store(
+            ica, stores.simplified, doc, model_id, story=await _story(stores, doc)
+        )
+
+    return {
+        "objectives": objectives,
+        "story": story,
+        "simplify": game_text,
+        "entities": entities,
+        "icons": icons,
+        "check": checked,
+    }[stage]
+
+
+async def _process(
+    object_id: ObjectId,
+    ica: IcaClient,
+    stores: Stores,
+    jobs,
+    job_id: ObjectId,
+    model_id: IcaModelId,
+    mode: JobMode,
+    only_missing: bool,
+) -> bool:
+    """Run the steps of `mode` for one question and record the outcome on the job.
+    Never raises. Returns whether anything was stored or was already there."""
+    question_id = str(object_id)
+    stages = STAGES[mode]
+    stored = skipped = 0
+    blocked: set[JobStage] = set()
+    errors: list[dict] = []
+
+    def failed(stage: JobStage, status_code: int, detail: str) -> None:
+        blocked.add(stage)
+        errors.append(
+            {
+                "question_id": question_id,
+                "stage": stage,
+                "status_code": status_code,
+                "detail": detail,
+            }
+        )
+
+    stage: JobStage = stages[0]
+    try:
+        doc = await stores.examination.find_one({"_id": object_id})
+        if doc is None:
+            raise HTTPException(status_code=404, detail="question not found")
+        for stage in stages:
+            if _NEEDS.get(stage) in blocked:
+                blocked.add(stage)
+                continue
+            try:
+                if only_missing and await is_current(stage, stores, doc):
+                    skipped += 1
+                    continue
+                await _with_retry(_step(stage, ica, stores, doc, model_id), jobs, job_id)
+                stored += 1
+            except HTTPException as exc:
+                failed(stage, exc.status_code, str(exc.detail))
+    except HTTPException as exc:
+        failed(stage, exc.status_code, str(exc.detail))
+    except Exception as exc:  # keep the batch going on any per-question failure
+        logger.exception("%s failed for %s", stage, question_id)
+        failed(stage, 500, f"{type(exc).__name__}: {exc}")
+
+    update: dict = {"$inc": {"processed": 1}, "$set": {"heartbeat_at": _now()}}
+    if errors:
+        update["$inc"]["failed"] = 1
+        update["$push"] = {"errors": {"$each": errors}}
+        for error in errors:
+            key = f"stages_failed.{error['stage']}"
+            update["$inc"][key] = update["$inc"].get(key, 0) + 1
+            legacy = _LEGACY_COUNTER.get(error["stage"])
+            if legacy and stored:
+                update["$inc"][legacy] = 1
+    elif stored:
+        update["$inc"]["succeeded"] = 1
+    else:
+        update["$inc"]["skipped"] = 1
+    await jobs.update_one({"_id": job_id}, update)
+    # Nothing left to do is not a failure.
+    return bool(stored or skipped)
 
 
 async def run_simplification_job(
@@ -120,29 +275,34 @@ async def run_simplification_job(
     model_id: IcaModelId,
     mode: JobMode = "simplify",
     only_missing: bool = False,
+    concurrency: int = 1,
 ) -> None:
     """
-    Process the given examination questions one by one (see `JobMode` and `STAGES`).
-    Simplifying replaces any stored simplified record; extracting entities and picking
-    icons each update only their own fields of the existing record. With
-    `mode="entities"`, `"icons"` or `"objectives"` and `only_missing`, a question that
-    has them by the time the job reaches it is skipped (`skipped`), so a repeated
-    backfill, or one queued behind an import job, costs no ICA calls.
+    Process the given examination questions (see `JobMode` and `STAGES`), `concurrency`
+    of them at a time; the steps of one question run in order. Writing the game text
+    replaces any stored simplified record; the other steps each update only their own
+    fields or their own collection.
 
-    The steps retry separately. Per-question failures are recorded on the job with the
-    step they come from (`stage`) and the batch continues; a step failing after an
-    earlier one was stored also counts in `entities_failed` / `icons_failed` (what was
-    stored is kept; backfill the rest later). Progress is written after every
-    question. Jobs in this process run one at a time (`lock`) so concurrent imports
-    do not multiply ICA load. The job fails only when no question got anything stored.
+    With `only_missing`, a step is skipped for a question that has its result by the
+    time the job reaches it (`is_current`), and a question whose every step was skipped
+    counts as `skipped`. So a repeated backfill, one queued behind an import job, or a
+    "full" job run again after a crash costs ICA calls only for what is left.
+
+    The steps retry separately. A failure is recorded on the job with the step it comes
+    from (`stage`) and the question goes on with the steps that do not need the failed
+    one (`_NEEDS`); what was stored is kept. Progress is written after every question.
+    Jobs in this process run one at a time (`lock`) so concurrent imports do not
+    multiply ICA load. The job fails only when no question got anything stored.
     """
     db = mongo.get_default_database()
-    examination = db["examination"]
-    simplified = db["examination_simplified"]
-    objectives = db["question_objectives"]
+    stores = Stores(
+        db["examination"],
+        db["examination_simplified"],
+        db["question_objectives"],
+        db["question_story"],
+    )
     jobs = db["simplification_jobs"]
 
-    stored_any = False
     status = "completed"
     try:
         async with lock:
@@ -156,65 +316,17 @@ async def run_simplification_job(
                     }
                 },
             )
-            for object_id in question_ids:
-                question_id = str(object_id)
-                stage: JobStage = STAGES[mode][0]
-                steps_stored = 0
-                skipped = False
-                error: dict | None = None
-                try:
-                    if (
-                        (mode in _DONE_FIELD or mode == "objectives")
-                        and only_missing
-                        and await _already_done(simplified, objectives, question_id, mode)
-                    ):
-                        skipped = True
-                    else:
-                        doc = await examination.find_one({"_id": object_id})
-                        if doc is None:
-                            raise HTTPException(status_code=404, detail="question not found")
-                        for stage in STAGES[mode]:
-                            await _with_retry(
-                                _step(stage, ica, simplified, objectives, doc, model_id),
-                                jobs,
-                                job_id,
-                            )
-                            steps_stored += 1
-                except HTTPException as exc:
-                    error = {
-                        "question_id": question_id,
-                        "stage": stage,
-                        "status_code": exc.status_code,
-                        "detail": str(exc.detail),
-                    }
-                except Exception as exc:  # keep the batch going on any per-question failure
-                    logger.exception("%s failed for %s", stage, question_id)
-                    error = {
-                        "question_id": question_id,
-                        "stage": stage,
-                        "status_code": 500,
-                        "detail": f"{type(exc).__name__}: {exc}",
-                    }
+            slots = asyncio.Semaphore(max(1, concurrency))
 
-                update: dict = {
-                    "$inc": {"processed": 1},
-                    "$set": {"heartbeat_at": _now()},
-                }
-                if skipped:
-                    update["$inc"]["skipped"] = 1
-                    stored_any = True  # nothing left to do is not a failure
-                elif error is None:
-                    update["$inc"]["succeeded"] = 1
-                    stored_any = True
-                else:
-                    update["$inc"]["failed"] = 1
-                    update["$push"] = {"errors": error}
-                    if steps_stored:
-                        update["$inc"][f"{stage}_failed"] = 1
-                        stored_any = True
-                await jobs.update_one({"_id": job_id}, update)
+            async def one(object_id: ObjectId) -> bool:
+                async with slots:
+                    return await _process(
+                        object_id, ica, stores, jobs, job_id, model_id, mode, only_missing
+                    )
+
+            results = await asyncio.gather(*(one(i) for i in question_ids))
         # Every question failing (bad key, ICA down) is a failed job, not a completed one.
-        if question_ids and not stored_any:
+        if question_ids and not any(results):
             status = "failed"
     except Exception:
         logger.exception("simplification job %s crashed", job_id)

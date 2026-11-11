@@ -1,0 +1,146 @@
+{
+  "company": "Copperline",
+  "intro": "Copperline sells home goods online and runs on a billing system older than most of its engineers. You are its first Claude architect. Its teams are waiting for you, each with a system to build on Claude, and each will bring you its decisions and its incidents.",
+  "chapters": [
+    {
+      "key": "dev-tools",
+      "title": "Know the Legacy",
+      "district": "The Archive",
+      "intro": "The platform team wants an agent that helps engineers explore the legacy billing code, generate boilerplate and automate chores, using the built-in tools and MCP servers. Nobody fully understands that code any more. Start here.",
+      "outro": "Engineers now ask the agent before they ask each other, and the billing code has a map.",
+      "count": 0,
+      "stages": [
+        {
+          "key": "design",
+          "title": "Design",
+          "count": 0
+        },
+        {
+          "key": "build",
+          "title": "Build",
+          "count": 0
+        },
+        {
+          "key": "team",
+          "title": "Team",
+          "count": 0
+        },
+        {
+          "key": "incident",
+          "title": "Incident",
+          "count": 0
+        },
+        {
+          "key": "scale",
+          "title": "Scale",
+          "count": 0
+        }
+      ]
+    },
+    {
+      "key": "support",
+      "title": "The Front Desk",
+      "district": "Front Desk",
+      "intro": "The support team wants an agent that resolves returns, billing disputes and account issues on first contact, using get_customer, lookup_order, process_refund and escalate_to_human, and that hands over to a person when it should. The target is 80% resolved at first contact.",
+      "outro": "The agent closes most cases alone, and the people behind it get cases they can act on.",
+      "count": 1,
+      "stages": [
+        {
+          "key": "design",
+          "title": "Design",
+          "count": 0
+        },
+        {
+          "key": "build",
+          "title": "Build",
+          "count": 1
+        },
+        {
+          "key": "team",
+          "title": "Team",
+          "count": 0
+        },
+        {
+          "key": "incident",
+          "title": "Incident",
+          "count": 0
+        },
+        {
+          "key": "scale",
+          "title": "Scale",
+          "count": 0
+        }
+      ]
+    },
+    {
+      "key": "pipeline",
+      "title": "Guard the Pipeline",
+      "district": "The Pipeline",
+      "intro": "The delivery team wants Claude Code in CI/CD: reviewing pull requests, generating tests and commenting where it matters, without burying developers in false positives.",
+      "outro": "Reviews arrive before the coffee does, and developers read them.",
+      "count": 0,
+      "stages": [
+        {
+          "key": "design",
+          "title": "Design",
+          "count": 0
+        },
+        {
+          "key": "build",
+          "title": "Build",
+          "count": 0
+        },
+        {
+          "key": "team",
+          "title": "Team",
+          "count": 0
+        },
+        {
+          "key": "incident",
+          "title": "Incident",
+          "count": 0
+        },
+        {
+          "key": "scale",
+          "title": "Scale",
+          "count": 0
+        }
+      ]
+    },
+    {
+      "key": "research",
+      "title": "The Research Desk",
+      "district": "Research Desk",
+      "intro": "The strategy team wants a research system: a coordinator that delegates to subagents for web search, document analysis, synthesis and report writing, and produces reports whose every claim has a source.",
+      "outro": "Leadership reads the reports and, more to the point, trusts the citations.",
+      "count": 0,
+      "stages": [
+        {
+          "key": "design",
+          "title": "Design",
+          "count": 0
+        },
+        {
+          "key": "build",
+          "title": "Build",
+          "count": 0
+        },
+        {
+          "key": "team",
+          "title": "Team",
+          "count": 0
+        },
+        {
+          "key": "incident",
+          "title": "Incident",
+          "count": 0
+        },
+        {
+          "key": "scale",
+          "title": "Scale",
+          "count": 0
+        }
+      ]
+    }
+  ]
+}

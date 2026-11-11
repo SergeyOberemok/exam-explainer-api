@@ -7,6 +7,7 @@ from claude_exam.api.dependencies import (
     get_async_objectives_collection,
     get_async_rounds_collection,
     get_async_simplified_collection,
+    get_async_story_collection,
 )
 from claude_exam.api.game import repository, service
 from claude_exam.api.game.domain import (
@@ -17,6 +18,7 @@ from claude_exam.api.game.domain import (
     to_review,
 )
 from claude_exam.api.main import app
+from claude_exam.api.scenario_catalog import text_hash
 from claude_exam.api.schemas import AnswerEntities
 from claude_exam.api.security import round_rate_limit
 
@@ -50,7 +52,7 @@ def test_public_question_has_no_answer_key():
     q = to_game_question(doc()).model_dump()
     assert set(q) == {
         "id", "simplified", "section", "assessment_type", "question", "answers", "entities",
-        "objectives", "difficulty",
+        "objectives", "difficulty", "scenario", "stage", "stem", "beat",
     }
     assert (q["objectives"], q["difficulty"]) == ([], 0)
     assert q["answers"][1] == {"index": 1, "text": "x"}
@@ -124,7 +126,8 @@ def test_entities_read_the_catalog_shape():
     assert q.entities.answers[0].entities[0].name == "Subagent"
 
 
-def client_with(exam=(), simple=(), rounds=None, tags=()):
+def client_with(exam=(), simple=(), rounds=None, tags=(), story=()):
+    app.dependency_overrides[get_async_story_collection] = lambda: FakeCollection(list(story))
     app.dependency_overrides[get_async_collection] = lambda: FakeCollection(list(exam))
     app.dependency_overrides[get_async_simplified_collection] = lambda: FakeCollection(list(simple))
     app.dependency_overrides[get_async_objectives_collection] = lambda: FakeCollection(list(tags))
@@ -164,8 +167,8 @@ def test_sections_simplified_flag():
     assert c.get("/v1/game/sections?simplified=true").json() == {"items": ["B"]}
 
 
-def start_round(exam, simple=(), rounds=None, tags=(), **body):
-    c = client_with(exam=exam, simple=simple, rounds=rounds, tags=tags)
+def start_round(exam, simple=(), rounds=None, tags=(), story=(), **body):
+    c = client_with(exam=exam, simple=simple, rounds=rounds, tags=tags, story=story)
     r = c.post("/v1/game/rounds", json={"count": 10, **body})
     assert r.status_code == 201, r.text
     return c, r.json()
@@ -616,3 +619,124 @@ def test_unversioned_paths_are_gone():
     assert c.get("/game/sections").status_code == 404
     assert c.get("/search/game-questions", params={"q": "ok"}).status_code == 404
     assert c.get("/v1/game/sections").status_code == 200
+
+
+# --- story -------------------------------------------------------------------------
+
+SUPPORT = "You are building a customer support resolution agent using the Claude Agent SDK."
+RESEARCH = "You are building a multi-agent research system."
+
+
+def story_doc(stem="What now?", paragraph=SUPPORT, **kw):
+    """A question in the source's layout, so it belongs to a chapter."""
+    d = doc(**kw)
+    d["prompt"] = {**d["prompt"], "question": f"SCENARIO: {paragraph}\n\nQUESTION: {stem}"}
+    return d
+
+
+def story_of_doc(original, stage="incident", order=1, scenario="support", **kw):
+    """A `question_story` record for `original`."""
+    return {
+        "_id": ObjectId(),
+        "question_id": str(original["_id"]),
+        "text_hash": text_hash(original),
+        "scenario": scenario,
+        "stage": stage,
+        "order": order,
+        "beat": f"beat of {stage} {order}",
+        "win": "it works",
+        "fail": "it breaks",
+        "origin": "seed",
+        **kw,
+    }
+
+
+def test_round_carries_the_story_but_not_its_outcome():
+    a, plain = story_doc("Which fix?"), doc()
+    c, body = start_round([a, plain], simple=[simplified_of(a)], story=[story_of_doc(a)])
+
+    told, untold = body["items"]
+    assert (told["scenario"], told["stage"], told["beat"]) == ("support", "incident", "beat of incident 1")
+    assert told["stem"] == "Which fix?" and told["question"].startswith("SCENARIO:")
+    assert (untold["scenario"], untold["stage"], untold["stem"], untold["beat"]) == ("", "", "", "")
+    # The simplified text has the scenario woven in: same story, no stem of its own.
+    simple = body["simplified"][0]
+    assert (simple["scenario"], simple["stage"], simple["beat"], simple["stem"]) == (
+        "support", "incident", "beat of incident 1", "",
+    )
+    assert "it works" not in str(body) and "it breaks" not in str(body)
+
+    url = f"/v1/game/rounds/{body['round_id']}/answers"
+    wrong = c.post(url, json={"question_id": str(a["_id"]), "answer_index": 0}).json()
+    assert wrong["outcome"] == "it breaks"
+    assert c.post(url, json={"question_id": str(plain["_id"]), "answer_index": 1}).json()["outcome"] == ""
+    other = start_round([a], story=[story_of_doc(a)])
+    right = other[0].post(
+        f"/v1/game/rounds/{other[1]['round_id']}/answers",
+        json={"question_id": str(a["_id"]), "answer_index": 1},
+    ).json()
+    assert right["outcome"] == "it works"
+
+
+def test_chapter_and_stem_need_no_story_record_but_the_rest_does():
+    a, unknown = story_doc(), story_doc(paragraph="You run a bakery.")
+    stale = story_of_doc(a, text_hash="written for another text")
+    _, body = start_round([a, unknown], story=[stale, story_of_doc(unknown, stage="nope")])
+    first, second = body["items"]
+    assert (first["scenario"], first["stem"], first["stage"], first["beat"]) == ("support", "What now?", "", "")
+    # A paragraph no chapter claims stays in the question: there is no intro to replace it.
+    assert (second["scenario"], second["stem"], second["stage"]) == ("", "", "")
+
+
+def test_ordered_round_and_its_batches_follow_the_story():
+    docs = [story_doc(f"q{i}") for i in range(5)]
+    other = story_doc("elsewhere", paragraph=RESEARCH)
+    story = [
+        story_of_doc(docs[0], "scale", 1),
+        story_of_doc(docs[1], "incident", 2),
+        story_of_doc(docs[2], "design", 1),
+        story_of_doc(docs[3], "incident", 1),
+        story_of_doc(other, "design", 1, scenario="research"),
+    ]  # docs[4] has no story record, so no round of a chapter holds it
+    in_order = [str(docs[i]["_id"]) for i in (2, 3, 1, 0)]
+
+    c, body = start_round([*docs, other], story=story, count=3, scenario="support", ordered=True)
+    assert [q["id"] for q in body["items"]] == in_order[:3] and body["total"] == 4
+    batch = c.post(f"/v1/game/rounds/{body['round_id']}/batches", json={"batch_index": 1}).json()
+    assert [q["id"] for q in batch["items"]] == in_order[3:] and batch["remaining"] == 0
+
+    _, stage = start_round([*docs, other], story=story, scenario="support", stage="incident", ordered=True)
+    assert [q["id"] for q in stage["items"]] == [in_order[1], in_order[2]]
+    # Without `ordered` the filter still holds (the fake's "random" order is stored order).
+    _, shuffled = start_round([*docs, other], story=story, stage="design")
+    assert [q["id"] for q in shuffled["items"]] == [str(docs[2]["_id"]), str(other["_id"])]
+
+    empty = client_with(exam=docs, story=story).post("/v1/game/rounds", json={"scenario": "pipeline"})
+    assert empty.status_code == 404 and empty.json()["code"] == "no_questions"
+
+
+def test_added_question_carries_its_story():
+    a, b = doc(), story_doc("added?")
+    c, body = start_round([a], story=[story_of_doc(b)])
+    c.app.dependency_overrides[get_async_collection] = lambda: FakeCollection([a, b])
+    added = c.post(f"/v1/game/rounds/{body['round_id']}/questions", json={"question_id": str(b["_id"])}).json()
+    assert (added["item"]["stage"], added["item"]["stem"]) == ("incident", "added?")
+    result = c.post(
+        f"/v1/game/rounds/{body['round_id']}/answers", json={"question_id": str(b["_id"]), "answer_index": 1}
+    ).json()
+    assert result["outcome"] == "it works"
+
+
+def test_story_lists_chapters_and_counts_playable_questions():
+    a, b, multi = story_doc("a"), story_doc("b"), story_doc("m", correct_response=["a", "b"])
+    story = [story_of_doc(a), story_of_doc(b, "scale"), story_of_doc(multi)]
+    body = client_with(exam=[a, b, multi], story=story).get("/v1/game/story").json()
+    assert body["company"] and body["intro"]
+    assert [c["key"] for c in body["chapters"]] == ["dev-tools", "support", "pipeline", "research"]
+    support = body["chapters"][1]
+    assert set(support) == {"key", "title", "district", "intro", "outro", "count", "stages"}
+    assert [s["key"] for s in support["stages"]] == ["design", "build", "team", "incident", "scale"]
+    assert {s["key"]: s["count"] for s in support["stages"]} == {
+        "design": 0, "build": 0, "team": 0, "incident": 1, "scale": 1,
+    }
+    assert support["count"] == 2 and body["chapters"][0]["count"] == 0

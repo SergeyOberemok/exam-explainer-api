@@ -24,6 +24,7 @@ from claude_exam.api.schemas import (
     GameRoundQuestionRequest,
     GameRoundRequest,
     GameSectionList,
+    GameStory,
 )
 from claude_exam.api.security import round_rate_limit
 
@@ -47,9 +48,17 @@ AssessmentType = Annotated[str | None, Query(max_length=100)]
 async def create_game_round(body: GameRoundRequest, service: GameServiceDep) -> GameRound:
     """Start a round: random playable questions and their simplified versions, in one
     response. The answer key stays in the round document. 404 `no_questions` when nothing
-    matches the filters (`objective` keeps only questions tagged with that objective)."""
+    matches the filters (`objective` keeps only questions tagged with that objective;
+    `scenario` and `stage` only those of that chapter and stage of the story, and with
+    `ordered` the round and its batches serve them in story order)."""
     return await service.create_round(
-        body.count, body.section, body.assessment_type, body.objective
+        body.count,
+        body.section,
+        body.assessment_type,
+        body.objective,
+        body.scenario,
+        body.stage,
+        body.ordered,
     )
 
 
@@ -157,3 +166,11 @@ async def list_game_objectives(service: GameServiceDep) -> GameObjectiveList:
     """The learning objectives questions are tagged with, and how many playable
     questions each has. A key can be sent as `objective` when starting a round."""
     return await service.objectives()
+
+
+@router.get("/story")
+async def get_game_story(service: GameServiceDep) -> GameStory:
+    """The game's main scenario: the company, its chapters in play order and the stages
+    of each with their playable question counts (what a map needs). A chapter and stage
+    key can be sent as `scenario` and `stage` when starting a round."""
+    return await service.story()

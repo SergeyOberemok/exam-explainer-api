@@ -15,7 +15,8 @@ from pymongo import ReturnDocument
 from pymongo.asynchronous.collection import AsyncCollection
 
 from claude_exam.api.ica import IcaClient
-from claude_exam.api.json_reply import extract_json
+from claude_exam.api.ica_json import ask_json
+from claude_exam.api.scenario_catalog import stem_of
 from claude_exam.api.schemas import (
     IcaMeta,
     IcaModelId,
@@ -67,6 +68,10 @@ An entity found in either version of a question or answer belongs to that questi
 answer, even if the other version leaves it out.
 - Entities come from the question and from ALL answer options, correct or not. The \
 feedback and explanation are context only; do not reference them.
+- The simplified text is set in a company and may name its people. A named person is \
+the role they have (a support lead is "Support Lead", kind "actor", with the first \
+name as an alias), and only when that role takes part in what the question is about. \
+The company itself, and "you" (the player), are never entities.
 
 WHAT TO EXTRACT
 Concrete things that can be shown as a recognizable diagram element, in three kinds:
@@ -193,11 +198,20 @@ def _build_user_message(item: dict, simplified: SimplifiedPrompt) -> str:
     )
     return (
         f"Section: {item.get('section', '')}\n\n"
-        f"ORIGINAL QUESTION:\n{clean_question(prompt.get('question', ''))}\n\n"
+        f"ORIGINAL QUESTION:\n{_question_text(item)}\n\n"
         f"ORIGINAL ANSWERS:\n{original_answers}\n\n"
         f"SIMPLIFIED QUESTION:\n{simplified.question}\n\n"
         f"SIMPLIFIED ANSWERS:\n{simplified_answers}"
     )
+
+
+def _question_text(item: dict) -> str:
+    """The original question as the model reads it: without the scenario paragraph when
+    the question has a chapter. The paragraph is the same in every question of a
+    chapter, so it would give them all the same entities; an unknown paragraph stays,
+    because it is then the only context."""
+    question = clean_question((item.get("prompt") or {}).get("question", ""))
+    return stem_of({"prompt": {"question": question}}) or question
 
 
 def _mentions(entity: VisualEntity, text: str) -> bool:
@@ -354,28 +368,15 @@ async def extract_entities(
     resolved entities are index-aligned with its answers).
     """
     n_answers = len(simplified.answers)
-    data = await ica.chat_model(
+    parsed, meta = await ask_json(
+        ica,
         model_id,
         _build_user_message(item, simplified),
         system=_build_system_message(n_answers),
+        what="entities",
         max_tokens=max_tokens,
     )
-    choice = (data.get("choices") or [{}])[0]
-    finish_reason = choice.get("finish_reason")
-    if finish_reason and finish_reason != "stop":
-        raise HTTPException(
-            status_code=502,
-            detail=f"ICA model stopped with finish_reason={finish_reason!r} — cannot parse entities",
-        )
-    parsed = extract_json((choice.get("message") or {}).get("content") or "")
-    return (
-        parse_entities(parsed, n_answers, _source_texts(item, simplified)),
-        IcaMeta(
-            model_id=model_id,
-            finish_reason=finish_reason,
-            total_tokens=(data.get("usage") or {}).get("total_tokens", 0),
-        ),
-    )
+    return parse_entities(parsed, n_answers, _source_texts(item, simplified)), meta
 
 
 async def enrich_and_store(

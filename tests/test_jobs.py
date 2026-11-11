@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 import pytest
 from bson import ObjectId
-from fakes import matches, set_path
+from fakes import MISSING, get_path, matches, set_path
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pymongo import AsyncMongoClient
@@ -28,13 +28,16 @@ from claude_exam.api.dependencies import (
     get_async_mongo_client,
     get_async_objectives_collection,
     get_async_simplified_collection,
+    get_async_story_collection,
     get_ica_client,
     get_simplification_lock,
 )
 from claude_exam.api.entities import MAX_ENTITIES, MAX_PER_ANSWER, _build_system_message
 from claude_exam.api.main import app
 from claude_exam.api.objective_catalog import CATALOG_VERSION
+from claude_exam.api.scenario_catalog import text_hash
 from claude_exam.api.schemas import PromptEntities, SimplificationJob, SimplifiedQuestion
+from claude_exam.api.story import ICA_ORDER as STORY_ORDER
 
 pytestmark = pytest.mark.anyio
 MONGO_URL = os.environ.get("TEST_MONGO_URL")
@@ -81,9 +84,11 @@ class Coll:
         for key, value in update.get("$set", {}).items():
             set_path(doc, key, copy.deepcopy(value))
         for key, value in update.get("$inc", {}).items():
-            doc[key] = doc.get(key, 0) + value
+            current = get_path(doc, key)
+            set_path(doc, key, (0 if current is MISSING else current) + value)
         for key, value in update.get("$push", {}).items():
-            doc.setdefault(key, []).append(copy.deepcopy(value))
+            items = value["$each"] if isinstance(value, dict) and "$each" in value else [value]
+            doc.setdefault(key, []).extend(copy.deepcopy(items))
 
     async def find_one(self, query, projection=None):
         doc = self._first(query)
@@ -123,6 +128,7 @@ class FakeMongo:
             "examination": Coll(*examination),
             "examination_simplified": Coll(),
             "question_objectives": Coll(),
+            "question_story": Coll(),
             "simplification_jobs": Coll(),
         }
 
@@ -162,13 +168,22 @@ def objectives_reply():
         "primary": "claude-code-planning",
         "secondary": [],
         "level": "apply",
-        "difficulty": 1,
+        "tempting": [],
         "distractors": [{"misconception": "Auto-accepting edits keeps files unchanged.", "confused_with": None}, None],
     }
 
 
+def story_reply():
+    return {
+        "stage": "build",
+        "beat": "The team cannot agree on a working mode.",
+        "win": "Reviews happen before edits.",
+        "fail": "Edits land unreviewed.",
+    }
+
+
 class ScriptedIca:
-    """Answers the simplify, entity, icon and objectives calls from separate queues (an
+    """Answers the calls of each pipeline step from separate queues (an
     Exception item is raised); defaults to good replies once a queue is empty. Records
     the call kinds."""
 
@@ -177,24 +192,30 @@ class ScriptedIca:
         "entities": entities_reply,
         "icons": icons_reply,
         "objectives": objectives_reply,
+        "story": lambda: story_reply(),
+        "check": lambda: {"reason": "It blocks edits.", "answer": "B"},
     }
 
-    def __init__(self, simplify=(), entities=(), icons=(), objectives=()):
+    def __init__(self, simplify=(), entities=(), icons=(), objectives=(), story=(), check=()):
         self.queues = {
             "simplify": list(simplify),
             "entities": list(entities),
             "icons": list(icons),
             "objectives": list(objectives),
+            "story": list(story),
+            "check": list(check),
         }
         self.calls = []
         self.max_tokens = []
 
-    async def chat_model(self, model_id, prompt, system=None, max_tokens=None):
+    async def chat_model(self, model_id, prompt, system=None, max_tokens=None, json_object=False):
         system = system or ""
         kind = (
             "icons" if "icon catalog" in system
             else "objectives" if "learning objective" in system
+            else "story" if "story of a quiz game" in system
             else "entities" if "visual entities" in system
+            else "check" if "You answer one multiple-choice question" in system
             else "simplify"
         )
         self.calls.append(kind)
@@ -406,7 +427,7 @@ async def test_objectives_job_tags_without_a_simplified_record():
     assert (job.mode, job.status, job.succeeded) == ("objectives", "completed", 1)
     record = await tags(mongo, q)
     assert record["objectives"] == ["claude-code-planning"] and record["section"] == TAGGABLE
-    assert (record["level"], record["difficulty"]) == ("apply", 1)
+    assert (record["level"], record["tempting"], record["difficulty"]) == ("apply", [], 1)
     assert record["distractors"][1] is None and record["distractors"][0]["misconception"]
     assert record["catalog_version"] == CATALOG_VERSION and record["created_at"] == record["updated_at"]
     assert await stored(mongo, q) is None
@@ -467,6 +488,86 @@ def test_objectives_backfill_and_single_question_route():
     assert client.post(f"/examination/{ObjectId()}/objectives").status_code == 404
 
 
+# --- story -------------------------------------------------------------------------
+
+
+def in_chapter(**kw):
+    """A question whose scenario paragraph the "pipeline" chapter claims."""
+    q = question(**kw)
+    q["prompt"]["question"] = (
+        "SCENARIO: You are integrating Claude Code into your Continuous Integration pipeline. "
+        "QUESTION: Which mode?"
+    )
+    return q
+
+
+def outsider(**kw):
+    """A question whose scenario paragraph no chapter claims."""
+    q = question(**kw)
+    q["prompt"]["question"] = "SCENARIO: You run a bakery. QUESTION: Which mode?"
+    return q
+
+
+async def story_record(mongo, doc):
+    return await mongo.get_default_database()["question_story"].find_one(
+        {"question_id": str(doc["_id"])}
+    )
+
+
+async def test_story_job_writes_a_record_and_skips_what_is_done():
+    q, plain = in_chapter(), outsider()
+    mongo, ica = FakeMongo([q, plain]), ScriptedIca()
+    job = await run_job(mongo, ica, [q["_id"], plain["_id"]], "story")
+    assert ica.calls == ["story"]  # none for the question of an unknown scenario
+    assert (job.mode, job.succeeded, job.failed) == ("story", 1, 1)
+    assert (job.errors[0].stage, job.errors[0].status_code) == ("story", 422)
+    record = await story_record(mongo, q)
+    assert (record["scenario"], record["stage"], record["origin"]) == ("pipeline", "build", "ica")
+    assert (record["order"], record["text_hash"]) == (STORY_ORDER, text_hash(q))
+    assert record["beat"] and record["ica"]["total_tokens"] == 7
+    assert await story_record(mongo, plain) is None
+
+    job = await run_job(mongo, ica, [q["_id"]], "story", only_missing=True)
+    assert (job.skipped, job.succeeded) == (1, 0) and ica.calls == ["story"]
+
+    # An older prompt: redone, unless the record is a hand-written seed one.
+    db = mongo.get_default_database()
+    await db["question_story"].update_one({"question_id": str(q["_id"])}, {"$set": {"prompt_version": "old"}})
+    job = await run_job(mongo, ica, [q["_id"]], "story", only_missing=True)
+    assert (job.skipped, job.succeeded) == (0, 1) and ica.calls == ["story"] * 2
+    await db["question_story"].update_one(
+        {"question_id": str(q["_id"])}, {"$set": {"prompt_version": "old", "origin": "seed"}}
+    )
+    job = await run_job(mongo, ica, [q["_id"]], "story", only_missing=True)
+    assert job.skipped == 1 and ica.calls == ["story"] * 2
+
+
+async def test_story_job_retries_a_rejected_reply():
+    q = in_chapter()
+    bad = reply({**story_reply(), "stage": "finale"})
+    mongo, ica = FakeMongo([q]), ScriptedIca(story=[bad])
+    job = await run_job(mongo, ica, [q["_id"]], "story")
+    assert ica.calls == ["story", "story"] and job.succeeded == 1
+
+
+def test_story_backfill_and_single_question_route():
+    a, b = in_chapter(), outsider()
+    mongo, ica = FakeMongo([a, b]), ScriptedIca()
+    client = client_for(mongo, ica)
+
+    first = client.post("/examination/story/backfill")
+    assert first.status_code == 202 and first.json()["total"] == 2
+    job = client.get(f"/examination/jobs/{first.json()['job_id']}").json()
+    assert (job["mode"], job["succeeded"], job["failed"]) == ("story", 1, 1)
+    assert client.post("/examination/story/backfill").json()["total"] == 1  # only `b` is left
+    assert client.post("/examination/story/backfill", params={"only_missing": "false", "limit": 1}).json()["total"] == 1
+
+    single = client.post(f"/examination/{a['_id']}/story")
+    assert single.status_code == 200 and single.json()["stage"] == "build"
+    assert client.post(f"/examination/{b['_id']}/story").status_code == 422
+    assert client.post(f"/examination/{ObjectId()}/story").status_code == 404
+
+
 # --- routes ------------------------------------------------------------------------
 
 
@@ -476,6 +577,7 @@ def client_for(mongo, ica, lock=None):
     app.dependency_overrides[get_async_collection] = lambda: db["examination"]
     app.dependency_overrides[get_async_simplified_collection] = lambda: db["examination_simplified"]
     app.dependency_overrides[get_async_objectives_collection] = lambda: db["question_objectives"]
+    app.dependency_overrides[get_async_story_collection] = lambda: db["question_story"]
     app.dependency_overrides[get_async_jobs_collection] = lambda: db["simplification_jobs"]
     app.dependency_overrides[get_async_mongo_client] = lambda: mongo
     app.dependency_overrides[get_ica_client] = lambda: ica
@@ -483,8 +585,8 @@ def client_for(mongo, ica, lock=None):
     return TestClient(app)  # background tasks run before the call returns
 
 
-def upload(client, **params):
-    item = {k: v for k, v in question().items() if k != "_id"}
+def upload(client, item=None, **params):
+    item = {k: v for k, v in (item or in_chapter(section=TAGGABLE)).items() if k != "_id"}
     body = json.dumps({"results": [item]}).encode()
     return client.post(
         "/examination/import", params=params, files={"file": ("x.json", body, "application/json")}
@@ -493,9 +595,12 @@ def upload(client, **params):
 
 @pytest.mark.parametrize(
     ("params", "mode", "calls"),
-    [({}, "simplify", ["simplify", "entities", "icons"]), ({"entities": "false"}, "simplify_only", ["simplify"])],
+    [
+        ({}, "full", ["objectives", "story", "simplify", "entities", "icons", "check"]),
+        ({"entities": "false"}, "simplify_only", ["simplify"]),
+    ],
 )
-def test_import_runs_entities_unless_disabled(params, mode, calls):
+def test_import_runs_the_whole_pipeline_unless_disabled(params, mode, calls):
     mongo, ica = FakeMongo(), ScriptedIca()
     client = client_for(mongo, ica)
     resp = upload(client, **params)

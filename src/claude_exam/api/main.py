@@ -40,6 +40,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     # Serializes simplification jobs within this process (limits ICA 429s).
     app.state.simplification_lock = asyncio.Semaphore(1)
+    app.state.pipeline_concurrency = settings.pipeline_concurrency
     ica_client = IcaClient(settings.ica_url, settings.ica_api_key)
     app.state.ica_client = ica_client
     try:

@@ -16,6 +16,9 @@ class Settings(BaseSettings):
     # which return the answer key, require an `X-API-Key` header with this value.
     # The game routes stay open. Unset keeps every route open.
     api_key: str | None = None
+    # Questions a pipeline job sends to ICA at the same time. Lower it when ICA
+    # answers with rate limits; 1 processes one question after the other.
+    pipeline_concurrency: int = 3
 
 
 @lru_cache

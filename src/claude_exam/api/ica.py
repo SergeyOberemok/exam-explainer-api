@@ -139,8 +139,11 @@ class IcaClient:
         prompt: str,
         system: str | None = None,
         max_tokens: int | None = None,
+        json_object: bool = False,
     ) -> dict[str, Any]:
-        """POST /chat-models/chat/completions — raw model, no assistant system prompt."""
+        """POST /chat-models/chat/completions — raw model, no assistant system prompt.
+        With `json_object` the gateway is asked for a bare JSON object (no markdown
+        fence, no prose around it); the prompt must still describe the object."""
         messages: list[dict[str, str]] = []
         if system:
             messages.append({"role": "system", "content": system})
@@ -150,6 +153,8 @@ class IcaClient:
             "messages": messages,
             "stream": False,
         }
+        if json_object:
+            payload["response_format"] = {"type": "json_object"}
         if max_tokens is not None:
             # Only sonnet/opus use extended thinking and need the token reserve.
             reserve = THINKING_RESERVE if model_id in _THINKING_MODELS else 0

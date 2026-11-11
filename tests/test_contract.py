@@ -27,9 +27,11 @@ from claude_exam.api.dependencies import (
     get_async_objectives_collection,
     get_async_rounds_collection,
     get_async_simplified_collection,
+    get_async_story_collection,
 )
 from claude_exam.api.icon_catalog import ICONS
 from claude_exam.api.main import app
+from claude_exam.api.scenario_catalog import text_hash
 
 CONTRACT_DIR = Path(__file__).parent / "contract"
 UNITY_CONTRACT_DIR = (
@@ -60,7 +62,13 @@ def question(oid, text, answers, correct, **kw):
 
 
 EXAM = [
-    question(Q1, "Which header carries the API key?", ["Authorization", "x-api-key", "X-Key"], "b"),
+    question(
+        Q1,
+        "SCENARIO: You are building a customer support resolution agent.\n\n"
+        "QUESTION: Which header carries the API key?",
+        ["Authorization", "x-api-key", "X-Key"],
+        "b",
+    ),
     question(Q2, "What caches prompts?", ["cache_control", "retries", "batches", "tools"], "a"),
     question(Q3, "Which <tag> is literal?", ["<example>", "<b>", "none"], "a"),
 ]
@@ -110,9 +118,28 @@ TAGS = [
 ]
 
 
+# Q1 belongs to the "support" chapter (its scenario paragraph) and has a story record;
+# the others have no chapter and no story.
+STORY = [
+    {
+        "_id": ObjectId("65f0000000000000000000d1"),
+        "question_id": str(Q1),
+        "text_hash": text_hash(EXAM[0]),
+        "scenario": "support",
+        "stage": "build",
+        "order": 1,
+        "beat": "The first API call of the support agent is refused.",
+        "win": "The agent reaches the API.",
+        "fail": "Every call still comes back unauthorized.",
+        "origin": "seed",
+    }
+]
+
+
 @pytest.fixture
 def client():
     rounds = FakeRounds()
+    app.dependency_overrides[get_async_story_collection] = lambda: FakeCollection(STORY)
     app.dependency_overrides[get_async_objectives_collection] = lambda: FakeCollection(TAGS)
     app.dependency_overrides[get_async_collection] = lambda: FakeCollection(EXAM)
     app.dependency_overrides[get_async_simplified_collection] = lambda: FakeCollection(SIMPLE)
@@ -161,6 +188,7 @@ def test_game_flow_responses(client):
     check("batch_empty.json", client.post(f"{base}/batches", json={"batch_index": 2}).json())
     check("add_question.json", client.post(f"{base}/questions", json={"question_id": str(Q1)}).json())
     check("search.json", client.get("/v1/search/game-questions", params={"q": "key"}).json())
+    check("story.json", client.get("/v1/game/story").json())
 
 
 def test_icon_catalog():

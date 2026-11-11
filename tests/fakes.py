@@ -41,6 +41,10 @@ def matches(doc, query):
     for path, cond in query.items():
         if path == "$text":
             continue
+        if path == "$or":
+            if not any(matches(doc, q) for q in cond):
+                return False
+            continue
         value = get_path(doc, path)
         if not isinstance(cond, dict):
             if cond is None and value is MISSING:

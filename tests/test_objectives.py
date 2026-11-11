@@ -43,7 +43,7 @@ GOOD = {
     "primary": "claude-code-planning",
     "secondary": ["agents-hooks"],
     "level": "apply",
-    "difficulty": 2,
+    "tempting": ["C"],
     "distractors": [
         {"misconception": "Accepting edits automatically still keeps files unchanged.", "confused_with": None},
         None,
@@ -79,7 +79,8 @@ def test_parse_returns_the_fields_to_store():
     assert parse() == {
         "objectives": ["claude-code-planning", "agents-hooks"],
         "level": "apply",
-        "difficulty": 2,
+        "tempting": [2],
+        "difficulty": 1,
         "distractors": [
             {"confused_with": None, "misconception": GOOD["distractors"][0]["misconception"]},
             None,
@@ -105,6 +106,17 @@ def test_parse_trims_only_the_optional_extras():
     ]
 
 
+def test_parse_reads_distractors_keyed_by_answer_letter():
+    first, _, last = GOOD["distractors"]
+    assert parse(distractors={"C": last, "A": first}) == parse()
+    # A null entry for the correct answer is the same as none.
+    assert parse(distractors={"A": first, "B": None, "C": last}) == parse()
+    for broken in ({"A": first}, {"A": first, "B": first, "C": last}, {"A": first, "C": last, "D": last}):
+        with pytest.raises(HTTPException) as exc:
+            parse(distractors=broken)
+        assert exc.value.status_code == 502
+
+
 def test_main_objective_may_belong_to_another_section():
     assert parse(primary="tools-errors")["objectives"] == ["tools-errors", "agents-hooks"]
 
@@ -116,8 +128,8 @@ def test_main_objective_may_belong_to_another_section():
         {"primary": None},
         {"secondary": "agents-hooks"},
         {"level": "create"},
-        {"difficulty": 4},
-        {"difficulty": True},
+        {"tempting": "C"},
+        {"tempting": None},
         {"distractors": GOOD["distractors"][:2]},
         {"distractors": "none"},
         # The correct answer must not get a misconception...
@@ -140,8 +152,8 @@ def test_system_message_separates_the_sections_objectives_from_the_rest():
     assert "- claude-code-planning: " in own and "- tools-errors: " not in own
     assert "- tools-errors: " in others
     assert all(f"- {o.key}: {o.statement}" in message for o in OBJECTIVES)
-    assert "exactly 3 items" in message
-    # The schema shows null where the correct answer is.
+    assert "exactly these keys: A, C." in message
+    # The schema has no entry for the correct answer.
     assert '"<for A>"' in message and '"<for B>"' not in message and '"<for C>"' in message
 
 

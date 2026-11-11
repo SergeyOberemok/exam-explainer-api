@@ -1,6 +1,8 @@
 import html
 import re
 
+from claude_exam.api.scenario_catalog import text_hash
+
 _HTML_TAG_NAMES = (
     "a|b|i|u|p|br|hr|code|pre|strong|em|img|"
     "ul|ol|li|span|div|blockquote|table|thead|tbody|tr|td|th|h[1-6]"
@@ -35,5 +37,8 @@ def normalize_result(item: dict, source: str) -> dict:
     if "explanation" in prompt:
         prompt["explanation"] = strip_html(prompt["explanation"])
     item["prompt"] = prompt
+    # Identifies the question by its text and answers: an import skips a question the
+    # bank already holds, and the story seed finds its question under any id.
+    item["text_hash"] = text_hash(item)
 
     return item

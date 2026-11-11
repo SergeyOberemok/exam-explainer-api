@@ -12,6 +12,14 @@ from pydantic import ValidationError
 
 from claude_exam.api.icon_catalog import known as known_icon
 from claude_exam.api.objective_catalog import known as known_objective
+from claude_exam.api.scenario_catalog import (
+    known_scenario,
+    known_stage,
+    scenario_of,
+    split_scenario,
+    stem_of,
+    text_hash,
+)
 from claude_exam.api.schemas import (
     AnswerEntities,
     GameAnswer,
@@ -33,6 +41,12 @@ MAX_ROUND_QUESTIONS = 500
 # `$sample` runs on the pre-filter and `is_playable` has the last word, so ask for more
 # than needed and trim: a round then rarely comes back short.
 OVERSAMPLE_FACTOR = 2
+# Verdicts the check step stores on a simplified record (`check.verdict`): a model
+# answering the game text without the key picked the right answer ("same"); it picked
+# another one there but the right one on the original, so the rewrite is at fault
+# ("changed", and the game does not offer that text); or it missed both, which says
+# the question is hard, not that the rewrite is wrong ("hard").
+CHECK_SAME, CHECK_CHANGED, CHECK_HARD = "same", "changed", "hard"
 
 # Pre-filter for pick-one questions the game can show; `is_playable` has the final say.
 PLAYABLE_QUERY: dict = {
@@ -70,7 +84,11 @@ def is_playable(doc: dict) -> bool:
 
 
 def simplified_matches(original: dict, simplified: dict) -> bool:
-    """A simplified version is only usable if it keeps the answers and the correct one."""
+    """A simplified version is only usable if it keeps the answers and the correct one,
+    and the check step (`check.py`) has not found that its wording changed which answer
+    is right. A version that was never checked is usable."""
+    if ((simplified.get("check") or {}).get("verdict")) == CHECK_CHANGED:
+        return False
     return len(answers_of(simplified)) == len(answers_of(original)) and correct_indices(
         simplified
     ) == correct_indices(original)
@@ -133,12 +151,63 @@ def misconceptions_of(tags: dict | None, count: int, correct: int) -> list[str]:
     return texts
 
 
+def usable_story(original: dict, record: dict | None) -> dict | None:
+    """`record` (a `question_story` record) if it was written for this text of the
+    question and names a known stage, else None: a question edited since has no story."""
+    if not isinstance(record, dict) or known_stage(record.get("stage")) is None:
+        return None
+    return record if record.get("text_hash") == text_hash(original) else None
+
+
+def chapter_of(original: dict, record: dict | None) -> str:
+    """The key of the question's chapter, "" when it has none. A scenario paragraph
+    decides it; a question without a paragraph belongs to the chapter its (usable)
+    story record names, which the model picked. A paragraph no chapter claims gives
+    none, whatever a record says."""
+    scenario = scenario_of(original)
+    if scenario is not None:
+        return scenario.key
+    if split_scenario((original.get("prompt") or {}).get("question"))[0]:
+        return ""
+    return known_scenario((usable_story(original, record) or {}).get("scenario")) or ""
+
+
+def story_of(original: dict, record: dict | None) -> dict:
+    """What a question shows of the story before it is answered. For a question with a
+    scenario paragraph the chapter and the stem come from its text, so they are there
+    without a story record; the stage and the beat need one."""
+    chapter = chapter_of(original, record)
+    record = usable_story(original, record) if chapter else None
+    return {
+        "scenario": chapter,
+        "stem": stem_of(original),
+        "stage": record["stage"] if record else "",
+        "beat": (record.get("beat") or "") if record else "",
+    }
+
+
+def outcomes_of(original: dict, record: dict | None) -> dict:
+    """The story line for a correct and for a wrong answer ("" without a record). Part
+    of what a round keeps back until the question is answered."""
+    record = usable_story(original, record) if chapter_of(original, record) else None
+    return {
+        "win": (record.get("win") or "") if record else "",
+        "fail": (record.get("fail") or "") if record else "",
+    }
+
+
 def to_game_question(
-    doc: dict, *, simplified: bool = False, tags: dict | None = None
+    doc: dict,
+    *,
+    simplified: bool = False,
+    tags: dict | None = None,
+    story: dict | None = None,
 ) -> GameQuestion:
     """Map an `examination` doc, or an `examination_simplified` doc when `simplified`
-    (only those carry entities). `tags` is the question's `question_objectives` record."""
+    (only those carry entities). `tags` is the question's `question_objectives` record
+    and `story` what `story_of` returned for the original."""
     prompt = doc.get("prompt") or {}
+    story = story or {}
     return GameQuestion(
         id=str(doc["question_id"] if simplified else doc["_id"]),
         simplified=simplified,
@@ -151,6 +220,11 @@ def to_game_question(
         entities=entities_of(doc) if simplified else PromptEntities(),
         objectives=objectives_of(tags),
         difficulty=difficulty_of(tags),
+        scenario=story.get("scenario", ""),
+        stage=story.get("stage", ""),
+        # A simplified text has the scenario woven in, so it has no separate stem.
+        stem="" if simplified else story.get("stem", ""),
+        beat=story.get("beat", ""),
     )
 
 
@@ -167,8 +241,14 @@ def to_review(doc: dict) -> GameReview:
     )
 
 
-def round_entry(doc: dict, simplified: dict | None, tags: dict | None = None) -> dict:
-    """What a round document keeps for one playable question: its answer key and reviews."""
+def round_entry(
+    doc: dict,
+    simplified: dict | None,
+    tags: dict | None = None,
+    record: dict | None = None,
+) -> dict:
+    """What a round document keeps for one playable question: its answer key and reviews
+    (`record` is its `question_story` record)."""
     correct = correct_indices(doc)[0]
     count = len(answers_of(doc))
     return {
@@ -177,6 +257,7 @@ def round_entry(doc: dict, simplified: dict | None, tags: dict | None = None) ->
         "original": to_review(doc).model_dump(),
         "simplified": to_review(simplified).model_dump() if simplified else None,
         "misconceptions": misconceptions_of(tags, count, correct),
+        "outcomes": outcomes_of(doc, record),
     }
 
 

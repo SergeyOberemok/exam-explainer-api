@@ -14,11 +14,36 @@ from pydantic import (
 logger = logging.getLogger(__name__)
 
 
+class ImportCount(BaseModel):
+    name: str
+    count: int
+
+
 class ImportResult(BaseModel):
     source: str
+    # Questions stored by this call (0 for a dry run).
     inserted: int
-    # Set when a background simplification job was started for the import.
+    # Set when a background pipeline job was started for the import.
     job_id: str | None = None
+    # True when nothing was stored: the rest of the report says what an import would do.
+    dry_run: bool = False
+    # Questions that would be (or were) stored: in the file, and not a duplicate.
+    new: int = 0
+    # Left out: the same question and answers are already stored, or occur earlier in
+    # the file.
+    duplicates: int = 0
+    # New questions the game cannot play (not pick-one with 2-4 answers). They are
+    # stored and processed, for the study routes.
+    unplayable: int = 0
+    # New questions per chapter the text names, and how many have no scenario
+    # paragraph (the story step picks their chapter).
+    chapters: list[ImportCount] = []
+    without_scenario: int = 0
+    # Scenario paragraphs no chapter claims (the start of each): these questions get
+    # no story until `scenario_catalog.py` has a chapter for them.
+    unknown_scenarios: list[ImportCount] = []
+    # Sections without objectives in `objective_catalog.py`: not tagged until added.
+    unknown_sections: list[ImportCount] = []
 
 
 class QuestionSummary(BaseModel):
@@ -157,6 +182,16 @@ class GameQuestion(BaseModel):
     objectives: list[str] = []
     # 1 (easy) to 3 (hard); 0 until the question is tagged.
     difficulty: int = 0
+    # Chapter key from `scenario_catalog.SCENARIOS`; "" when the question's scenario
+    # paragraph is missing or unknown.
+    scenario: str = ""
+    # Stage key from `scenario_catalog.STAGES`; "" until the question has a story record.
+    stage: str = ""
+    # `question` without its scenario paragraph, for a client that shows the chapter's
+    # intro instead. "" when there is no chapter, and on simplified questions.
+    stem: str = ""
+    # One line to show before the question; "" until the question has a story record.
+    beat: str = ""
 
 
 class GameQuestionList(BaseModel):
@@ -175,6 +210,11 @@ class GameRoundRequest(BaseModel):
     assessment_type: str = Field(default="", max_length=100)
     # An objective key: only questions tagged with it (as main or secondary objective).
     objective: str = Field(default="", max_length=100)
+    # A chapter key and a stage key: only questions whose story record has them.
+    scenario: str = Field(default="", max_length=100)
+    stage: str = Field(default="", max_length=100)
+    # With `scenario` or `stage`: serve the questions in story order instead of at random.
+    ordered: bool = False
 
 
 class GameRound(BaseModel):
@@ -233,6 +273,8 @@ class GameAnswerResult(BaseModel):
     # What picking `answer_index` suggests the player got wrong; "" for the correct
     # answer and for a question that is not tagged.
     misconception: str = ""
+    # What happens in the story after this answer; "" without a story record.
+    outcome: str = ""
 
 
 class GameFiftyFiftyRequest(BaseModel):
@@ -273,6 +315,35 @@ class GameObjective(BaseModel):
 
 class GameObjectiveList(BaseModel):
     items: list[GameObjective]
+
+
+class GameStage(BaseModel):
+    key: str
+    title: str
+    # Playable questions of the chapter in this stage.
+    count: int
+
+
+class GameChapter(BaseModel):
+    key: str
+    title: str
+    # The chapter's place on the game's map.
+    district: str
+    # Shown when the player enters the chapter, and when it is finished.
+    intro: str
+    outro: str
+    # Playable questions with a story record.
+    count: int
+    stages: list[GameStage]
+
+
+class GameStory(BaseModel):
+    """The game's main scenario: one company, chapters in play order, the same stages
+    in each. Send a chapter and stage key as `scenario` and `stage` to start a round."""
+
+    company: str
+    intro: str
+    chapters: list[GameChapter]
 
 
 class IcaChatRequest(BaseModel):
@@ -336,6 +407,22 @@ class IcaMeta(BaseModel):
     total_tokens: int
 
 
+class SimplifiedCheck(BaseModel):
+    """What the check step found for a game text (`check.py`)."""
+
+    # "same": a model answering the game text without the key picked the right answer.
+    # "changed": it picked another one there but the right one on the original, so the
+    # rewrite is at fault and the game does not offer this text.
+    # "hard": it missed both; the question is hard, the rewrite is not shown to be wrong.
+    verdict: Literal["same", "changed", "hard"]
+    # Index of the answer picked on the game text, and on the original (None when the
+    # original was not asked: only a disagreement asks it).
+    picked: int
+    picked_original: int | None = None
+    prompt_version: str
+    ica: IcaMeta
+
+
 class SimplifiedQuestion(BaseModel):
     """Record stored in `examination_simplified`, keyed by the examination `_id`."""
 
@@ -354,6 +441,13 @@ class SimplifiedQuestion(BaseModel):
     # Metadata of the icon call; None until icons were picked for the stored entities
     # (the icons themselves are the `icon` fields inside `entities`).
     icons_ica: IcaMeta | None = None
+    # What the text was written with (`simplify.PROMPT_VERSION`, and
+    # `scenario_catalog.frame_version` of the question's chapter); None on records
+    # written before the game text existed. A pipeline backfill redoes other versions.
+    prompt_version: str | None = None
+    frame_version: str | None = None
+    # Result of the check step; None until it has run for this text.
+    check: SimplifiedCheck | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -389,7 +483,11 @@ class QuestionObjectives(BaseModel):
     # Keys from `objective_catalog.OBJECTIVES`; the first is the main objective.
     objectives: list[str]
     level: ObjectiveLevel
+    # 1-3, derived from `level` and `tempting` (`objectives.difficulty_of`).
     difficulty: int
+    # Indices of the wrong answers that would partly work. Absent on records tagged
+    # before prompt version 4.
+    tempting: list[int] = []
     # One per answer, index-aligned with `prompt.answers`; None for a correct answer.
     distractors: list[Distractor | None]
     # What the record was tagged with; a backfill redoes records of another version.
@@ -400,8 +498,34 @@ class QuestionObjectives(BaseModel):
     updated_at: datetime
 
 
+class QuestionStory(BaseModel):
+    """Record stored in `question_story`, keyed by the examination `_id` (as a string).
+    Written by `story.story_and_store` or loaded from `data/story_seed.json`."""
+
+    question_id: str
+    # `scenario_catalog.text_hash` of the question the record was written for.
+    text_hash: str
+    scenario: str
+    # "text": the chapter the question's scenario paragraph names. "model": picked by
+    # the model for a question without a paragraph.
+    scenario_origin: Literal["text", "model"] = "text"
+    stage: str
+    # Position inside the stage, lowest first.
+    order: int
+    beat: str
+    win: str
+    fail: str
+    origin: Literal["seed", "ica"]
+    catalog_version: str
+    prompt_version: str
+    # None for a seed record.
+    ica: IcaMeta | None = None
+    created_at: datetime
+    updated_at: datetime
+
+
 class EntitiesBackfill(BaseModel):
-    """Result of starting an entity, icon or objectives backfill; `job_id` is None when
+    """Result of starting an entity, icon, objectives or story backfill; `job_id` is None when
     nothing needs it."""
 
     job_id: str | None = None
@@ -417,9 +541,18 @@ class EntitiesBackfill(BaseModel):
 # "objectives": tag questions with learning objectives. It reads the original question
 # and writes `question_objectives`, so it needs no simplified record and is not part
 # of the import job: the objectives of a section must be in the catalog first.
-JobMode = Literal["simplify", "simplify_only", "entities", "icons", "objectives"]
+# "story": place questions in their chapter's stages and write their story lines. Like
+# "objectives" it reads the original question and writes its own collection
+# (`question_story`); the question's scenario must be in the scenario catalog first.
+# "check": test that the game text of already simplified questions keeps the right answer.
+# "full": everything for a question, in the order objectives -> story -> simplify ->
+# entities -> icons -> check. This is what an import starts. With `only_missing` each
+# step is skipped where its result is current, so the same job resumes a broken one.
+JobMode = Literal[
+    "full", "simplify", "simplify_only", "entities", "icons", "objectives", "story", "check"
+]
 # Which step a per-question job error comes from.
-JobStage = Literal["simplify", "entities", "icons", "objectives"]
+JobStage = Literal["simplify", "entities", "icons", "objectives", "story", "check"]
 
 
 class SimplificationError(BaseModel):
@@ -451,6 +584,9 @@ class SimplificationJob(BaseModel):
     icons_failed: int = 0
     # Entity and icon jobs with `only_missing`: questions that already had them when reached.
     skipped: int = 0
+    # Failures per step, every one counted (a question can fail more than one step of
+    # a "full" job).
+    stages_failed: dict[str, int] = {}
     errors: list[SimplificationError]
     created_at: datetime
     started_at: datetime | None = None

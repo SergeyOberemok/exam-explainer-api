@@ -27,7 +27,11 @@
         "answers": []
       },
       "objectives": [],
-      "difficulty": 0
+      "difficulty": 0,
+      "scenario": "",
+      "stage": "",
+      "stem": "",
+      "beat": ""
     }
   ],
   "simplified": [],

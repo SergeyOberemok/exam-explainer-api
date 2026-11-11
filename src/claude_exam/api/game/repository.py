@@ -4,7 +4,8 @@ A `game_rounds` document:
 
     {
       "created_at": datetime,                 # TTL index: dropped after ROUND_TTL_SECONDS
-      "filters": {"section": str, "assessment_type": str, "objective": str},
+      "filters": {"section": str, "assessment_type": str, "objective": str,
+                  "scenario": str, "stage": str, "ordered": bool},
       "questions": {question_id: round_entry},# answer key and reviews, never sent before answering
       "question_ids": [question_id, ...],     # every question in the round, in the order added
       "batches": [[question_id, ...], ...],   # batch 0 is the start; each later one is one /batches call
@@ -29,21 +30,25 @@ from claude_exam.api.game.domain import (
     MAX_ROUND_QUESTIONS,
     PLAYABLE_QUERY,
 )
+from claude_exam.api.scenario_catalog import BY_KEY, STAGE_KEYS
 
 
 class QuestionRepository:
-    """Reads `examination`, `examination_simplified` and `question_objectives` (the
-    learning-objective tags; without that collection every question reads as untagged)."""
+    """Reads `examination`, `examination_simplified`, `question_objectives` (the
+    learning-objective tags) and `question_story` (chapter stage and story lines).
+    Without one of the last two, every question reads as untagged or without a story."""
 
     def __init__(
         self,
         examination: AsyncCollection,
         simplified: AsyncCollection,
         objectives: AsyncCollection | None = None,
+        story: AsyncCollection | None = None,
     ) -> None:
         self.examination = examination
         self.simplified = simplified
         self.objectives = objectives
+        self.story = story
 
     @staticmethod
     async def _fetch(
@@ -70,6 +75,11 @@ class QuestionRepository:
 
     async def sample(self, query: dict, size: int) -> list[dict]:
         return await self._fetch(self.examination, query, size, shuffle=True)
+
+    async def find_all(self, query: dict) -> list[dict]:
+        """Every matching `examination` doc (for a story round, whose pool is one chapter
+        or stage)."""
+        return await self.examination.find(query).to_list()
 
     async def count(self, query: dict) -> int:
         return await self.examination.count_documents(query)
@@ -119,6 +129,42 @@ class QuestionRepository:
                 for key in set(record.get("objectives") or []):
                     counts[key] = counts.get(key, 0) + 1
         return counts
+
+    async def get_story_many(self, question_ids: list[str]) -> dict[str, dict]:
+        """The `question_story` records of the given questions, by question id."""
+        if self.story is None or not question_ids:
+            return {}
+        cursor = self.story.find({"question_id": {"$in": list(question_ids)}})
+        return {str(d["question_id"]): d for d in await cursor.to_list()}
+
+    async def story_records(self, scenario: str = "", stage: str = "") -> list[dict]:
+        """Story records of a chapter and/or stage (all of them without either), in story
+        order: chapter, stage, `order`, then question id so the order is stable."""
+        if self.story is None:
+            return []
+        query = {k: v for k, v in (("scenario", scenario), ("stage", stage)) if v}
+        records = await self.story.find(
+            query, {"question_id": 1, "scenario": 1, "stage": 1, "order": 1}
+        ).to_list()
+
+        def position(keys: tuple[str, ...], key: object) -> int:
+            return keys.index(key) if key in keys else len(keys)
+
+        return sorted(
+            records,
+            key=lambda r: (
+                position(tuple(BY_KEY), r.get("scenario")),
+                position(STAGE_KEYS, r.get("stage")),
+                r.get("order") or 0,
+                str(r.get("question_id")),
+            ),
+        )
+
+    async def playable_ids(self, question_ids: list[str]) -> set[str]:
+        """Which of the given questions pass the playable pre-filter."""
+        ids = [ObjectId(i) for i in question_ids if ObjectId.is_valid(i)]
+        cursor = self.examination.find({**PLAYABLE_QUERY, "_id": {"$in": ids}}, {"_id": 1})
+        return {str(d["_id"]) for d in await cursor.to_list()}
 
     async def sections(self, *, simplified: bool = False) -> list[str]:
         collection = self.simplified if simplified else self.examination

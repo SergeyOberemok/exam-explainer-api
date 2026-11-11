@@ -14,7 +14,7 @@ from pymongo.asynchronous.collection import AsyncCollection
 
 from claude_exam.api.ica import IcaClient
 from claude_exam.api.icon_catalog import ICONS, KIND_FALLBACK, known
-from claude_exam.api.json_reply import extract_json
+from claude_exam.api.ica_json import ask_json
 from claude_exam.api.schemas import (
     AnswerEntities,
     IcaMeta,
@@ -176,28 +176,15 @@ async def pick_icons(
     """Ask the ICA chat model for the icons of one simplified question and its
     entities; returns the entities with `icon` fields set."""
     n_answers = len(prompt.answers)
-    data = await ica.chat_model(
+    parsed, meta = await ask_json(
+        ica,
         model_id,
         _build_user_message(section, prompt, entities),
         system=_build_system_message(n_answers),
+        what="icons",
         max_tokens=max_tokens,
     )
-    choice = (data.get("choices") or [{}])[0]
-    finish_reason = choice.get("finish_reason")
-    if finish_reason and finish_reason != "stop":
-        raise HTTPException(
-            status_code=502,
-            detail=f"ICA model stopped with finish_reason={finish_reason!r} — cannot parse icons",
-        )
-    parsed = extract_json((choice.get("message") or {}).get("content") or "")
-    return (
-        parse_icons(parsed, entities, n_answers),
-        IcaMeta(
-            model_id=model_id,
-            finish_reason=finish_reason,
-            total_tokens=(data.get("usage") or {}).get("total_tokens", 0),
-        ),
-    )
+    return parse_icons(parsed, entities, n_answers), meta
 
 
 async def assign_and_store(

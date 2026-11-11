@@ -100,7 +100,7 @@ class FakeIca:
         self.replies = list(replies)
         self.calls = []
 
-    async def chat_model(self, model_id, prompt, system=None, max_tokens=None):
+    async def chat_model(self, model_id, prompt, system=None, max_tokens=None, json_object=False):
         self.calls.append({"model_id": model_id, "prompt": prompt, "system": system})
         item = self.replies.pop(0)
         if isinstance(item, Exception):

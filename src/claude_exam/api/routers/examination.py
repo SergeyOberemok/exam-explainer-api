@@ -12,65 +12,147 @@ from fastapi import (
     UploadFile,
 )
 
-from claude_exam.api.batch import new_job, run_simplification_job
+from claude_exam.api.batch import (
+    Stores,
+    missing_stages,
+    new_job,
+    run_simplification_job,
+)
+from claude_exam.api.check import check_and_store
 from claude_exam.api.dependencies import (
     AsyncCollectionDep,
     AsyncJobsCollectionDep,
     AsyncMongoClientDep,
     AsyncObjectivesCollectionDep,
     AsyncSimplifiedCollectionDep,
+    AsyncStoryCollectionDep,
     IcaClientDep,
+    PipelineConcurrencyDep,
     QuestionObjectIdDep,
     SimplificationLockDep,
 )
 from claude_exam.api.entities import enrich_and_store
+from claude_exam.api.game.domain import story_of
 from claude_exam.api.icons import assign_and_store
+from claude_exam.api.ingest import plan_import
 from claude_exam.api.normalization import normalize_result
 from claude_exam.api.objectives import current_query, tag_and_store
 from claude_exam.api.schemas import (
     EntitiesBackfill,
     IcaModelId,
     ImportResult,
+    JobMode,
     QuestionObjectives,
+    QuestionStory,
     SimplificationJob,
     SimplifiedQuestion,
 )
 from claude_exam.api.security import require_api_key
+from claude_exam.api.story import current_query as current_story_query
+from claude_exam.api.story import story_and_store
 
 # Study/admin routes: they need the API key when one is configured.
 router = APIRouter(
     prefix="/examination", tags=["examination"], dependencies=[Depends(require_api_key)]
 )
 
+ModelIdQuery = Annotated[
+    IcaModelId, Query(description="ICA model the job or call uses")
+]
+MaxTokensQuery = Annotated[
+    int | None, Query(ge=1, description="Token limit for the reply")
+]
+
+
+class _JobStarter:
+    """What every route that starts a background job needs, as one dependency."""
+
+    def __init__(
+        self,
+        jobs: AsyncJobsCollectionDep,
+        mongo: AsyncMongoClientDep,
+        ica: IcaClientDep,
+        lock: SimplificationLockDep,
+        concurrency: PipelineConcurrencyDep,
+        background_tasks: BackgroundTasks,
+    ) -> None:
+        self.jobs, self.mongo, self.ica, self.lock = jobs, mongo, ica, lock
+        self.concurrency, self.background_tasks = concurrency, background_tasks
+
+    async def start(
+        self,
+        source: str,
+        question_ids: list[ObjectId],
+        model_id: IcaModelId,
+        mode: JobMode,
+        only_missing: bool = False,
+    ) -> str | None:
+        """Queue a job for `question_ids` and return its id; None when there are none."""
+        if not question_ids:
+            return None
+        job = await self.jobs.insert_one(
+            new_job(source, model_id, len(question_ids), mode, only_missing)
+        )
+        self.background_tasks.add_task(
+            run_simplification_job,
+            self.mongo,
+            self.ica,
+            self.lock,
+            job.inserted_id,
+            question_ids,
+            model_id,
+            mode,
+            only_missing,
+            self.concurrency,
+        )
+        return str(job.inserted_id)
+
+
+JobStarterDep = Annotated[_JobStarter, Depends(_JobStarter)]
+
+
+def _refuse_while_a_job_runs(lock) -> None:
+    """The single-question routes share the job lock so they never add ICA load on top
+    of a running job: while one runs they answer 409 instead of waiting."""
+    if lock.locked():
+        raise HTTPException(
+            status_code=409,
+            detail="a simplification job is running; retry when it has finished",
+        )
+
 
 @router.post("/import")
 async def import_practice_exam(
     file: UploadFile,
     collection: AsyncCollectionDep,
-    jobs: AsyncJobsCollectionDep,
-    mongo: AsyncMongoClientDep,
-    ica: IcaClientDep,
-    lock: SimplificationLockDep,
-    background_tasks: BackgroundTasks,
+    starter: JobStarterDep,
     simplify: Annotated[
-        bool, Query(description="Start a background simplification job after import")
+        bool, Query(description="Start the background pipeline job after import")
     ] = True,
-    model_id: Annotated[
-        IcaModelId, Query(description="ICA model used for simplification")
-    ] = "claude-haiku-5-5",
+    model_id: ModelIdQuery = "claude-haiku-5-5",
     entities: Annotated[
         bool,
         Query(
-            description="Also extract visual entities after simplifying each question "
-            "(false: simplify only; add them later with POST /examination/entities/backfill)"
+            description="false: only write the game text of each question (no "
+            "objectives, story, entities, icons or check; add them later with "
+            "POST /examination/pipeline/backfill)"
         ),
     ] = True,
+    dry_run: Annotated[
+        bool,
+        Query(description="Store nothing and start no job: only report what an import would do"),
+    ] = False,
 ) -> ImportResult:
     """
-    Import a practice-exam JSON file. Unless `simplify=false`, a background job
-    then simplifies each newly imported question through ICA, replacing any
-    stored simplified record, and (unless `entities=false`) extracts its visual
-    entities onto that record; track it via `GET /examination/jobs/{job_id}`.
+    Import a practice-exam JSON file. A question the bank already holds (same question
+    text and answers) is left out, so the same file can be uploaded again. Unless
+    `simplify=false`, a background job then runs the whole pipeline for each new
+    question (job mode "full": objectives, story, game text, entities, icons, check);
+    track it via `GET /examination/jobs/{job_id}`.
+
+    The result also says what the pipeline cannot do for the new questions until a
+    catalog is extended (`unknown_scenarios`, `unknown_sections`). Call it with
+    `dry_run=true` first to see that before anything is stored.
     """
     try:
         data = json.loads(await file.read())
@@ -88,28 +170,66 @@ async def import_practice_exam(
 
     source = file.filename or "unknown"
     documents = [normalize_result(item, source) for item in results]
+    hashes = [doc["text_hash"] for doc in documents]
+    stored = {
+        doc["text_hash"]
+        async for doc in collection.find({"text_hash": {"$in": hashes}}, {"text_hash": 1})
+    }
+    new, report = plan_import(documents, stored)
+    if dry_run:
+        return ImportResult(source=source, inserted=0, dry_run=True, **report)
 
     inserted_ids: list[ObjectId] = []
-    if documents:
-        inserted_ids = (await collection.insert_many(documents)).inserted_ids
+    if new:
+        inserted_ids = (await collection.insert_many(new)).inserted_ids
 
     job_id: str | None = None
-    if simplify and inserted_ids:
-        mode = "simplify" if entities else "simplify_only"
-        job = await jobs.insert_one(new_job(source, model_id, len(inserted_ids), mode))
-        job_id = str(job.inserted_id)
-        background_tasks.add_task(
-            run_simplification_job,
-            mongo,
-            ica,
-            lock,
-            job.inserted_id,
-            inserted_ids,
-            model_id,
-            mode,
-        )
+    if simplify:
+        mode: JobMode = "full" if entities else "simplify_only"
+        job_id = await starter.start(source, inserted_ids, model_id, mode)
 
-    return ImportResult(source=source, inserted=len(inserted_ids), job_id=job_id)
+    return ImportResult(source=source, inserted=len(inserted_ids), job_id=job_id, **report)
+
+
+@router.post("/pipeline/backfill", status_code=202)
+async def backfill_pipeline(
+    collection: AsyncCollectionDep,
+    simplified: AsyncSimplifiedCollectionDep,
+    objectives: AsyncObjectivesCollectionDep,
+    story: AsyncStoryCollectionDep,
+    starter: JobStarterDep,
+    model_id: ModelIdQuery = "claude-haiku-5-5",
+    only_missing: Annotated[
+        bool,
+        Query(
+            description="Only questions that lack a step or have one written with an "
+            "older prompt or catalog, and only those steps"
+        ),
+    ] = True,
+    source: Annotated[
+        str | None, Query(max_length=300, description="Only questions imported from this file")
+    ] = None,
+    limit: Annotated[
+        int | None, Query(ge=1, description="Process at most this many questions")
+    ] = None,
+) -> EntitiesBackfill:
+    """
+    Start a background job that runs the whole pipeline (job mode "full") for stored
+    questions. By default it does only what is missing or outdated, step by step, so
+    it is how an interrupted import is resumed and how a changed prompt or catalog is
+    applied; `only_missing=false` redoes everything. Track it via
+    `GET /examination/jobs/{job_id}`.
+    """
+    stores = Stores(collection, simplified, objectives, story)
+    question_ids: list[ObjectId] = []
+    async for doc in collection.find({"source": source} if source else {}):
+        if only_missing and not await missing_stages("full", stores, doc):
+            continue
+        question_ids.append(doc["_id"])
+        if limit is not None and len(question_ids) >= limit:
+            break
+    job_id = await starter.start("pipeline-backfill", question_ids, model_id, "full", only_missing)
+    return EntitiesBackfill(job_id=job_id, total=len(question_ids))
 
 
 @router.post("/{question_id}/entities")
@@ -119,12 +239,8 @@ async def extract_question_entities(
     simplified: AsyncSimplifiedCollectionDep,
     ica: IcaClientDep,
     lock: SimplificationLockDep,
-    model_id: Annotated[
-        IcaModelId, Query(description="ICA model used for extraction")
-    ] = "claude-haiku-5-5",
-    max_tokens: Annotated[
-        int | None, Query(ge=1, description="Token limit for the extraction reply")
-    ] = None,
+    model_id: ModelIdQuery = "claude-haiku-5-5",
+    max_tokens: MaxTokensQuery = None,
 ) -> SimplifiedQuestion:
     """
     (Re)extract the visual entities of one already simplified question through ICA
@@ -136,27 +252,16 @@ async def extract_question_entities(
     doc = await collection.find_one({"_id": question_id})
     if doc is None:
         raise HTTPException(status_code=404, detail="question not found")
-    if lock.locked():
-        raise HTTPException(
-            status_code=409,
-            detail="a simplification job is running; retry when it has finished",
-        )
+    _refuse_while_a_job_runs(lock)
     async with lock:
         return await enrich_and_store(ica, simplified, doc, model_id, max_tokens)
 
 
 @router.post("/entities/backfill", status_code=202)
 async def backfill_entities(
-    collection: AsyncCollectionDep,
     simplified: AsyncSimplifiedCollectionDep,
-    jobs: AsyncJobsCollectionDep,
-    mongo: AsyncMongoClientDep,
-    ica: IcaClientDep,
-    lock: SimplificationLockDep,
-    background_tasks: BackgroundTasks,
-    model_id: Annotated[
-        IcaModelId, Query(description="ICA model used for extraction")
-    ] = "claude-haiku-5-5",
+    starter: JobStarterDep,
+    model_id: ModelIdQuery = "claude-haiku-5-5",
     only_missing: Annotated[
         bool, Query(description="Skip records that already have entities")
     ] = True,
@@ -175,24 +280,8 @@ async def backfill_entities(
         async for doc in simplified.find(query, {"question_id": 1})
         if ObjectId.is_valid(doc.get("question_id", ""))
     ]
-    if not question_ids:
-        return EntitiesBackfill(job_id=None, total=0)
-
-    job = await jobs.insert_one(
-        new_job("entities-backfill", model_id, len(question_ids), "entities", only_missing)
-    )
-    background_tasks.add_task(
-        run_simplification_job,
-        mongo,
-        ica,
-        lock,
-        job.inserted_id,
-        question_ids,
-        model_id,
-        "entities",
-        only_missing,
-    )
-    return EntitiesBackfill(job_id=str(job.inserted_id), total=len(question_ids))
+    job_id = await starter.start("entities-backfill", question_ids, model_id, "entities", only_missing)
+    return EntitiesBackfill(job_id=job_id, total=len(question_ids))
 
 
 @router.post("/{question_id}/icons")
@@ -201,23 +290,15 @@ async def pick_question_icons(
     simplified: AsyncSimplifiedCollectionDep,
     ica: IcaClientDep,
     lock: SimplificationLockDep,
-    model_id: Annotated[
-        IcaModelId, Query(description="ICA model used for picking")
-    ] = "claude-haiku-5-5",
-    max_tokens: Annotated[
-        int | None, Query(ge=1, description="Token limit for the reply")
-    ] = None,
+    model_id: ModelIdQuery = "claude-haiku-5-5",
+    max_tokens: MaxTokensQuery = None,
 ) -> SimplifiedQuestion:
     """
     (Re)pick the icons of one already simplified question through ICA: one key from
     the icon catalog for each of its entities, for the question and for each answer.
     Only the icon fields change. Answers 409 while a job runs, like the entity route.
     """
-    if lock.locked():
-        raise HTTPException(
-            status_code=409,
-            detail="a simplification job is running; retry when it has finished",
-        )
+    _refuse_while_a_job_runs(lock)
     async with lock:
         return await assign_and_store(ica, simplified, str(question_id), model_id, max_tokens)
 
@@ -225,14 +306,8 @@ async def pick_question_icons(
 @router.post("/icons/backfill", status_code=202)
 async def backfill_icons(
     simplified: AsyncSimplifiedCollectionDep,
-    jobs: AsyncJobsCollectionDep,
-    mongo: AsyncMongoClientDep,
-    ica: IcaClientDep,
-    lock: SimplificationLockDep,
-    background_tasks: BackgroundTasks,
-    model_id: Annotated[
-        IcaModelId, Query(description="ICA model used for picking")
-    ] = "claude-haiku-5-5",
+    starter: JobStarterDep,
+    model_id: ModelIdQuery = "claude-haiku-5-5",
     only_missing: Annotated[
         bool, Query(description="Skip records that already have icons")
     ] = True,
@@ -248,24 +323,36 @@ async def backfill_icons(
         async for doc in simplified.find(query, {"question_id": 1})
         if ObjectId.is_valid(doc.get("question_id", ""))
     ]
-    if not question_ids:
-        return EntitiesBackfill(job_id=None, total=0)
+    job_id = await starter.start("icons-backfill", question_ids, model_id, "icons", only_missing)
+    return EntitiesBackfill(job_id=job_id, total=len(question_ids))
 
-    job = await jobs.insert_one(
-        new_job("icons-backfill", model_id, len(question_ids), "icons", only_missing)
-    )
-    background_tasks.add_task(
-        run_simplification_job,
-        mongo,
-        ica,
-        lock,
-        job.inserted_id,
-        question_ids,
-        model_id,
-        "icons",
-        only_missing,
-    )
-    return EntitiesBackfill(job_id=str(job.inserted_id), total=len(question_ids))
+
+@router.post("/{question_id}/check")
+async def check_question(
+    question_id: QuestionObjectIdDep,
+    collection: AsyncCollectionDep,
+    simplified: AsyncSimplifiedCollectionDep,
+    story: AsyncStoryCollectionDep,
+    ica: IcaClientDep,
+    lock: SimplificationLockDep,
+    model_id: ModelIdQuery = "claude-haiku-5-5",
+    max_tokens: MaxTokensQuery = None,
+) -> SimplifiedQuestion:
+    """
+    (Re)check the game text of one already simplified question: a model answers it
+    without the key, and the verdict is stored on the simplified record (`check`).
+    A text whose verdict is "changed" is not offered by the game. Answers 409 while a
+    job runs, like the entity route.
+    """
+    doc = await collection.find_one({"_id": question_id})
+    if doc is None:
+        raise HTTPException(status_code=404, detail="question not found")
+    _refuse_while_a_job_runs(lock)
+    async with lock:
+        record = await story.find_one({"question_id": str(question_id)})
+        return await check_and_store(
+            ica, simplified, doc, model_id, max_tokens, story=story_of(doc, record)
+        )
 
 
 @router.post("/{question_id}/objectives")
@@ -275,12 +362,8 @@ async def tag_question_objectives(
     objectives: AsyncObjectivesCollectionDep,
     ica: IcaClientDep,
     lock: SimplificationLockDep,
-    model_id: Annotated[
-        IcaModelId, Query(description="ICA model used for tagging")
-    ] = "claude-haiku-5-5",
-    max_tokens: Annotated[
-        int | None, Query(ge=1, description="Token limit for the reply")
-    ] = None,
+    model_id: ModelIdQuery = "claude-haiku-5-5",
+    max_tokens: MaxTokensQuery = None,
 ) -> QuestionObjectives:
     """
     (Re)tag one question through ICA with its learning objectives, level, difficulty
@@ -291,11 +374,7 @@ async def tag_question_objectives(
     doc = await collection.find_one({"_id": question_id})
     if doc is None:
         raise HTTPException(status_code=404, detail="question not found")
-    if lock.locked():
-        raise HTTPException(
-            status_code=409,
-            detail="a simplification job is running; retry when it has finished",
-        )
+    _refuse_while_a_job_runs(lock)
     async with lock:
         return await tag_and_store(ica, objectives, doc, model_id, max_tokens)
 
@@ -304,14 +383,8 @@ async def tag_question_objectives(
 async def backfill_objectives(
     collection: AsyncCollectionDep,
     objectives: AsyncObjectivesCollectionDep,
-    jobs: AsyncJobsCollectionDep,
-    mongo: AsyncMongoClientDep,
-    ica: IcaClientDep,
-    lock: SimplificationLockDep,
-    background_tasks: BackgroundTasks,
-    model_id: Annotated[
-        IcaModelId, Query(description="ICA model used for tagging")
-    ] = "claude-haiku-5-5",
+    starter: JobStarterDep,
+    model_id: ModelIdQuery = "claude-haiku-5-5",
     only_missing: Annotated[
         bool,
         Query(description="Skip questions already tagged with the current catalog and prompt"),
@@ -336,24 +409,70 @@ async def backfill_objectives(
         question_ids.append(doc["_id"])
         if limit is not None and len(question_ids) >= limit:
             break
-    if not question_ids:
-        return EntitiesBackfill(job_id=None, total=0)
+    job_id = await starter.start(
+        "objectives-backfill", question_ids, model_id, "objectives", only_missing
+    )
+    return EntitiesBackfill(job_id=job_id, total=len(question_ids))
 
-    job = await jobs.insert_one(
-        new_job("objectives-backfill", model_id, len(question_ids), "objectives", only_missing)
-    )
-    background_tasks.add_task(
-        run_simplification_job,
-        mongo,
-        ica,
-        lock,
-        job.inserted_id,
-        question_ids,
-        model_id,
-        "objectives",
-        only_missing,
-    )
-    return EntitiesBackfill(job_id=str(job.inserted_id), total=len(question_ids))
+
+@router.post("/{question_id}/story")
+async def write_question_story(
+    question_id: QuestionObjectIdDep,
+    collection: AsyncCollectionDep,
+    story: AsyncStoryCollectionDep,
+    ica: IcaClientDep,
+    lock: SimplificationLockDep,
+    model_id: ModelIdQuery = "claude-haiku-5-5",
+    max_tokens: MaxTokensQuery = None,
+) -> QuestionStory:
+    """
+    (Re)write the story of one question through ICA: the stage of its chapter and the
+    lines shown before and after it (and the chapter itself for a question without a
+    scenario paragraph), replacing its `question_story` record (also a hand-written
+    seed record; load the seed again to restore that). 422 when the question's scenario
+    paragraph is not in the scenario catalog. Answers 409 while a job runs, like the
+    entity route.
+    """
+    doc = await collection.find_one({"_id": question_id})
+    if doc is None:
+        raise HTTPException(status_code=404, detail="question not found")
+    _refuse_while_a_job_runs(lock)
+    async with lock:
+        return await story_and_store(ica, story, doc, model_id, max_tokens)
+
+
+@router.post("/story/backfill", status_code=202)
+async def backfill_story(
+    collection: AsyncCollectionDep,
+    story: AsyncStoryCollectionDep,
+    starter: JobStarterDep,
+    model_id: ModelIdQuery = "claude-haiku-5-5",
+    only_missing: Annotated[
+        bool,
+        Query(
+            description="Skip questions with a seed record or one written with the "
+            "current scenario catalog and prompt"
+        ),
+    ] = True,
+    limit: Annotated[
+        int | None, Query(ge=1, description="Write at most this many stories")
+    ] = None,
+) -> EntitiesBackfill:
+    """
+    Start a background job that writes the story of questions (by default only those
+    without a current record, so questions covered by the seed file cost nothing and
+    a new import is the usual reason to run it); track it via
+    `GET /examination/jobs/{job_id}`.
+    """
+    question_ids: list[ObjectId] = []
+    async for doc in collection.find({}, {"_id": 1}):
+        if only_missing and await story.find_one(current_story_query(str(doc["_id"])), {"_id": 1}):
+            continue
+        question_ids.append(doc["_id"])
+        if limit is not None and len(question_ids) >= limit:
+            break
+    job_id = await starter.start("story-backfill", question_ids, model_id, "story", only_missing)
+    return EntitiesBackfill(job_id=job_id, total=len(question_ids))
 
 
 @router.get("/jobs/{job_id}")

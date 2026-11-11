@@ -4,7 +4,7 @@
   "is_correct": false,
   "correct_index": 1,
   "original": {
-    "explanation": "Why: Which header carries the API key?",
+    "explanation": "Why: SCENARIO: You are building a customer support resolution agent.\n\nQUESTION: Which header carries the API key?",
     "feedbacks": [
       "Feedback for Authorization.",
       "Feedback for x-api-key.",
@@ -20,5 +20,6 @@
       "Feedback for X-Key."
     ]
   },
-  "misconception": "Header names are free to choose."
+  "misconception": "Header names are free to choose.",
+  "outcome": "Every call still comes back unauthorized."
 }

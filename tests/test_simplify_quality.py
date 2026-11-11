@@ -54,5 +54,5 @@ def test_near_copy_answer_is_a_warning():
 def test_system_message_has_new_rules_and_no_placeholders():
     system = _build_system_message(2)
     assert "{{" not in system
-    assert 'start each feedback with "Correct."' in system
+    assert 'Start each feedback with "Correct."' in system
     assert "evaluator-optimizer" in system

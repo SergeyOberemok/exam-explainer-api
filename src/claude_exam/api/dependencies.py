@@ -57,6 +57,15 @@ AsyncObjectivesCollectionDep = Annotated[
 ]
 
 
+def get_async_story_collection(request: Request) -> AsyncCollection:
+    """Story records (chapter stage and story lines), one per examination question."""
+    client: AsyncMongoClient = request.app.state.async_mongo_client
+    return client.get_default_database()["question_story"]
+
+
+AsyncStoryCollectionDep = Annotated[AsyncCollection, Depends(get_async_story_collection)]
+
+
 def get_async_rounds_collection(request: Request) -> AsyncCollection:
     """Game rounds: which questions a round holds and what has been answered."""
     client: AsyncMongoClient = request.app.state.async_mongo_client
@@ -80,6 +89,14 @@ def get_simplification_lock(request: Request) -> asyncio.Semaphore:
 
 
 SimplificationLockDep = Annotated[asyncio.Semaphore, Depends(get_simplification_lock)]
+
+
+def get_pipeline_concurrency(request: Request) -> int:
+    """Questions a pipeline job works on at the same time (`PIPELINE_CONCURRENCY`)."""
+    return getattr(request.app.state, "pipeline_concurrency", 1)
+
+
+PipelineConcurrencyDep = Annotated[int, Depends(get_pipeline_concurrency)]
 
 
 def get_async_jobs_collection(request: Request) -> AsyncCollection:
@@ -119,9 +136,10 @@ def get_game_service(
     simplified: AsyncSimplifiedCollectionDep,
     rounds: AsyncRoundsCollectionDep,
     objectives: AsyncObjectivesCollectionDep,
+    story: AsyncStoryCollectionDep,
 ) -> GameService:
     return GameService(
-        QuestionRepository(examination, simplified, objectives), RoundRepository(rounds)
+        QuestionRepository(examination, simplified, objectives, story), RoundRepository(rounds)
     )
 
 

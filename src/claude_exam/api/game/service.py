@@ -19,13 +19,16 @@ from claude_exam.api.game.domain import (
     pick_playable,
     playable_query,
     round_entry,
+    story_of,
     to_game_question,
     usable_simplified,
 )
 from claude_exam.api.game.repository import QuestionRepository, RoundRepository
 from claude_exam.api.objective_catalog import OBJECTIVES
+from claude_exam.api.scenario_catalog import COMPANY, COMPANY_INTRO, SCENARIOS, STAGES
 from claude_exam.api.schemas import (
     GameAnswerResult,
+    GameChapter,
     GameFiftyFiftyResult,
     GameObjective,
     GameObjectiveList,
@@ -35,6 +38,8 @@ from claude_exam.api.schemas import (
     GameRound,
     GameRoundBatch,
     GameRoundQuestion,
+    GameStage,
+    GameStory,
 )
 
 
@@ -42,15 +47,19 @@ def answer_result(question_id: str, answer_index: int, entry: dict) -> GameAnswe
     simplified = entry.get("simplified")
     # Entries stored before objectives existed have no misconceptions.
     misconceptions = entry.get("misconceptions") or []
+    is_correct = answer_index == entry["correct"]
+    # ... and entries stored before the story existed have no outcomes.
+    outcomes = entry.get("outcomes") or {}
     return GameAnswerResult(
         question_id=question_id,
         answer_index=answer_index,
-        is_correct=answer_index == entry["correct"],
+        is_correct=is_correct,
         correct_index=entry["correct"],
         original=GameReview(**entry["original"]),
         has_simplified=simplified is not None,
         simplified=GameReview(**simplified) if simplified else GameReview(),
         misconception=misconceptions[answer_index] if answer_index < len(misconceptions) else "",
+        outcome=outcomes.get("win" if is_correct else "fail") or "",
     )
 
 
@@ -69,38 +78,82 @@ class GameService:
         ids = [str(d["_id"]) for d in docs]
         simplified_by_id = await self.questions.get_simplified_many(ids)
         tags_by_id = await self.questions.get_tags_many(ids)
+        story_by_id = await self.questions.get_story_many(ids)
         entries: dict[str, dict] = {}
         items: list[GameQuestion] = []
         simplified_items: list[GameQuestion] = []
         for doc in docs:
             question_id = str(doc["_id"])
             tags = tags_by_id.get(question_id)
+            record = story_by_id.get(question_id)
+            story = story_of(doc, record)
             simplified = usable_simplified(doc, simplified_by_id.get(question_id))
-            entries[question_id] = round_entry(doc, simplified, tags)
-            items.append(to_game_question(doc, tags=tags))
+            entries[question_id] = round_entry(doc, simplified, tags, record)
+            items.append(to_game_question(doc, tags=tags, story=story))
             if simplified is not None:
-                simplified_items.append(to_game_question(simplified, simplified=True, tags=tags))
+                simplified_items.append(
+                    to_game_question(simplified, simplified=True, tags=tags, story=story)
+                )
         return entries, items, simplified_items
 
-    async def _objective_ids(self, filters: dict) -> list[str] | None:
-        """The questions a round's `objective` filter allows; None when it has none."""
-        objective = filters.get("objective")
-        return await self.questions.ids_with_objective(objective) if objective else None
+    async def _only_ids(self, filters: dict) -> list[str] | None:
+        """The questions a round's `objective`, `scenario` and `stage` filters allow, in
+        story order when the story filters are set; None when it has none of them."""
+        only: list[str] | None = None
+        if filters.get("scenario") or filters.get("stage"):
+            records = await self.questions.story_records(
+                filters.get("scenario") or "", filters.get("stage") or ""
+            )
+            only = [str(r["question_id"]) for r in records]
+        if filters.get("objective"):
+            tagged = await self.questions.ids_with_objective(filters["objective"])
+            only = tagged if only is None else [i for i in only if i in set(tagged)]
+        return only
+
+    async def _pick(
+        self, filters: dict, exclude: list[str], count: int
+    ) -> tuple[list[dict], list[str] | None]:
+        """Up to `count` playable questions the round's filters allow and `exclude` does
+        not hold: the next ones in story order for an ordered story round, else a random
+        pick. Also returns the ids the filters allow (see `_only_ids`)."""
+        only = await self._only_ids(filters)
+        query = playable_query(
+            filters.get("section"), filters.get("assessment_type"), exclude, only
+        )
+        story_filter = filters.get("scenario") or filters.get("stage")
+        if filters.get("ordered") and story_filter and only is not None:
+            position = {question_id: i for i, question_id in enumerate(only)}
+            docs = sorted(
+                await self.questions.find_all(query), key=lambda d: position[str(d["_id"])]
+            )
+        else:
+            docs = await self.questions.sample(query, count * OVERSAMPLE_FACTOR)
+        return pick_playable(docs, count), only
 
     async def create_round(
-        self, count: int, section: str, assessment_type: str, objective: str = ""
+        self,
+        count: int,
+        section: str,
+        assessment_type: str,
+        objective: str = "",
+        scenario: str = "",
+        stage: str = "",
+        ordered: bool = False,
     ) -> GameRound:
-        """Random playable questions and their simplified versions; the key stays stored."""
+        """Playable questions and their simplified versions; the key stays stored. Random,
+        or in story order for an `ordered` round of a chapter or stage."""
         filters = {
             "section": section or "",
             "assessment_type": assessment_type or "",
             "objective": objective or "",
+            "scenario": scenario or "",
+            "stage": stage or "",
+            "ordered": bool(ordered),
         }
-        query = playable_query(
-            section, assessment_type, only_ids=await self._objective_ids(filters)
+        originals, only = await self._pick(filters, [], count)
+        total = await self.questions.count(
+            playable_query(section, assessment_type, only_ids=only)
         )
-        docs, total = await self.questions.fetch_with_total(query, count * OVERSAMPLE_FACTOR)
-        originals = pick_playable(docs, count)
         if not originals:
             # Nothing to play: don't store an empty round.
             raise errors.NoQuestions()
@@ -135,13 +188,7 @@ class GameService:
         if room <= 0:
             raise errors.RoundFull()
         count = min(count, room)
-        only = await self._objective_ids(filters)
-        query = playable_query(
-            filters.get("section"), filters.get("assessment_type"), in_round, only
-        )
-        originals = pick_playable(
-            await self.questions.sample(query, count * OVERSAMPLE_FACTOR), count
-        )
+        originals, only = await self._pick(filters, in_round, count)
         if not originals:
             return GameRoundBatch(batch_index=batch_index, items=[], simplified=[], remaining=0)
 
@@ -177,23 +224,27 @@ class GameService:
         stored = await self.rounds.get_entries(round_id, question_ids) or {}
         simplified_by_id = await self.questions.get_simplified_many(question_ids)
         tags_by_id = await self.questions.get_tags_many(question_ids)
+        story_by_id = await self.questions.get_story_many(question_ids)
         items, simplified_items = [], []
         for question_id in question_ids:
             doc = docs.get(question_id)
             if doc is None:  # Deleted from `examination` since; the round can't show it.
                 continue
             tags = tags_by_id.get(question_id)
-            items.append(to_game_question(doc, tags=tags))
+            story = story_of(doc, story_by_id.get(question_id))
+            items.append(to_game_question(doc, tags=tags, story=story))
             # Offer the simplified text only if the stored entry can review it.
             simplified = simplified_by_id.get(question_id)
             if simplified is not None and (stored.get(question_id) or {}).get("simplified"):
-                simplified_items.append(to_game_question(simplified, simplified=True, tags=tags))
+                simplified_items.append(
+                    to_game_question(simplified, simplified=True, tags=tags, story=story)
+                )
         remaining = await self.questions.count(
             playable_query(
                 filters.get("section"),
                 filters.get("assessment_type"),
                 in_round,
-                await self._objective_ids(filters),
+                await self._only_ids(filters),
             )
         )
         return GameRoundBatch(
@@ -296,9 +347,11 @@ class GameService:
             raise errors.QuestionNotPlayable()
         simplified = usable_simplified(doc, await self.questions.get_simplified(question_id))
         tags = (await self.questions.get_tags_many([question_id])).get(question_id)
+        record = (await self.questions.get_story_many([question_id])).get(question_id)
+        story = story_of(doc, record)
 
         if not await self.rounds.add_question(
-            round_id, question_id, round_entry(doc, simplified, tags)
+            round_id, question_id, round_entry(doc, simplified, tags, record)
         ):
             stored = await self.rounds.get_entries(round_id, [question_id])
             if stored is None:
@@ -311,9 +364,11 @@ class GameService:
                 simplified = None
 
         return GameRoundQuestion(
-            item=to_game_question(doc, tags=tags),
+            item=to_game_question(doc, tags=tags, story=story),
             simplified=(
-                [to_game_question(simplified, simplified=True, tags=tags)] if simplified else []
+                [to_game_question(simplified, simplified=True, tags=tags, story=story)]
+                if simplified
+                else []
             ),
         )
 
@@ -374,3 +429,32 @@ class GameService:
                 for o in OBJECTIVES
             ]
         )
+
+    async def story(self) -> GameStory:
+        """The main scenario: chapters in play order, each with every stage and how many
+        playable questions with a story record it has."""
+        records = await self.questions.story_records()
+        playable = await self.questions.playable_ids([str(r["question_id"]) for r in records])
+        counts: dict[tuple, int] = {}
+        for record in records:
+            if str(record["question_id"]) in playable:
+                key = (record.get("scenario"), record.get("stage"))
+                counts[key] = counts.get(key, 0) + 1
+        chapters = []
+        for scenario in SCENARIOS:
+            stages = [
+                GameStage(key=s.key, title=s.title, count=counts.get((scenario.key, s.key), 0))
+                for s in STAGES
+            ]
+            chapters.append(
+                GameChapter(
+                    key=scenario.key,
+                    title=scenario.title,
+                    district=scenario.district,
+                    intro=scenario.intro,
+                    outro=scenario.outro,
+                    count=sum(s.count for s in stages),
+                    stages=stages,
+                )
+            )
+        return GameStory(company=COMPANY, intro=COMPANY_INTRO, chapters=chapters)

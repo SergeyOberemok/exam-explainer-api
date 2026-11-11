@@ -6,11 +6,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from claude_exam.api.dependencies import (
     AsyncCollectionDep,
     AsyncSimplifiedCollectionDep,
+    AsyncStoryCollectionDep,
     IcaClientDep,
     PaginationDep,
     QuestionFiltersDep,
     QuestionObjectIdDep,
 )
+from claude_exam.api.game.domain import story_of
 from claude_exam.api.schemas import (
     Question,
     QuestionPage,
@@ -87,6 +89,7 @@ async def simplify_question(
     object_id: QuestionObjectIdDep,
     collection: AsyncCollectionDep,
     simplified: AsyncSimplifiedCollectionDep,
+    story: AsyncStoryCollectionDep,
     ica: IcaClientDep,
     body: SimplifyRequest | None = None,
     force: bool = False,
@@ -115,6 +118,14 @@ async def simplify_question(
         if existing is not None:
             return SimplifiedQuestion(**existing)
 
+    # The text is set where the question stands in the game's story, when it has a place.
+    record = await story.find_one({"question_id": question_id})
     return await simplify_and_store(
-        ica, simplified, doc, body.model_id, body.max_tokens, with_entities=entities
+        ica,
+        simplified,
+        doc,
+        body.model_id,
+        body.max_tokens,
+        with_entities=entities,
+        story=story_of(doc, record),
     )

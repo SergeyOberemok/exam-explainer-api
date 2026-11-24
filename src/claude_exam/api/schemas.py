@@ -82,6 +82,21 @@ class SearchResponse(BaseModel):
     total: int
 
 
+# Long enough for a whole pasted question (with its scenario paragraph, ~1.2k chars).
+SEARCH_TEXT_MAX = 2000
+
+
+class SearchRequest(BaseModel):
+    """The body of `POST /v1/search/...`: the same fields as the GET query, for texts
+    too long for a URL (a pasted question, percent-encoded, can pass a proxy's limit)."""
+
+    q: str = Field(min_length=2, max_length=SEARCH_TEXT_MAX)
+    # Empty means any: JsonUtility writes "" for an unset string, never null.
+    section: str = Field(default="", max_length=200)
+    assessment_type: str = Field(default="", max_length=100)
+    limit: int = Field(default=5, ge=1, le=50)
+
+
 class QuestionPage(BaseModel):
     items: list[QuestionSummary]
     total: int

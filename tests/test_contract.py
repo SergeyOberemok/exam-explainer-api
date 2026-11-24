@@ -188,6 +188,8 @@ def test_game_flow_responses(client):
     check("batch_empty.json", client.post(f"{base}/batches", json={"batch_index": 2}).json())
     check("add_question.json", client.post(f"{base}/questions", json={"question_id": str(Q1)}).json())
     check("search.json", client.get("/v1/search/game-questions", params={"q": "key"}).json())
+    # The game sends its search as a POST body; both forms answer the same.
+    check("search.json", client.post("/v1/search/game-questions", json={"q": "key"}).json())
     check("story.json", client.get("/v1/game/story").json())
 
 

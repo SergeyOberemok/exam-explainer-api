@@ -670,7 +670,7 @@
             "name": "q",
             "required": true,
             "schema": {
-              "maxLength": 200,
+              "maxLength": 2000,
               "minLength": 2,
               "title": "Q",
               "type": "string"
@@ -682,6 +682,7 @@
             "required": false,
             "schema": {
               "default": "",
+              "maxLength": 200,
               "title": "Section",
               "type": "string"
             }
@@ -692,6 +693,7 @@
             "required": false,
             "schema": {
               "default": "",
+              "maxLength": 100,
               "title": "Assessment Type",
               "type": "string"
             }
@@ -732,6 +734,46 @@
           }
         },
         "summary": "Search Game",
+        "tags": [
+          "search"
+        ]
+      },
+      "post": {
+        "description": "`GET /v1/search/game-questions` with the fields in a JSON body: what the game\nsends, since a pasted question can be too long for a URL.",
+        "operationId": "search_game_by_body_v1_search_game_questions_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SearchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GameQuestionList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Search Game By Body",
         "tags": [
           "search"
         ]
@@ -1402,6 +1444,41 @@
         }
       },
       "title": "PromptEntities",
+      "type": "object"
+    },
+    "SearchRequest": {
+      "description": "The body of `POST /v1/search/...`: the same fields as the GET query, for texts\ntoo long for a URL (a pasted question, percent-encoded, can pass a proxy's limit).",
+      "properties": {
+        "assessment_type": {
+          "default": "",
+          "maxLength": 100,
+          "title": "Assessment Type",
+          "type": "string"
+        },
+        "limit": {
+          "default": 5,
+          "maximum": 50.0,
+          "minimum": 1.0,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "q": {
+          "maxLength": 2000,
+          "minLength": 2,
+          "title": "Q",
+          "type": "string"
+        },
+        "section": {
+          "default": "",
+          "maxLength": 200,
+          "title": "Section",
+          "type": "string"
+        }
+      },
+      "required": [
+        "q"
+      ],
+      "title": "SearchRequest",
       "type": "object"
     },
     "ValidationError": {

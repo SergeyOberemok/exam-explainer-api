@@ -1,3 +1,5 @@
+import re
+
 from pymongo.asynchronous.collection import AsyncCollection
 
 from claude_exam.api.game.domain import (
@@ -27,10 +29,20 @@ TEXT_INDEX_WEIGHTS = {
 
 SCORE = {"$meta": "textScore"}
 
+# In `$search`, `"..."` is a phrase every match must contain and a word starting with `-`
+# is excluded. Pasted text is plain words: a pasted `--max-turns` would otherwise hide
+# the very question that mentions it, and one quoted phrase would hide almost all.
+_OPERATORS = re.compile(r'["\\“”„]|(?<!\S)[-‐-―−]+')
+
+
+def plain_terms(text: str) -> str:
+    """The words of `text` with the `$text` operators (phrases, negation) removed."""
+    return " ".join(_OPERATORS.sub(" ", text).split())
+
 
 def build_filter(query: str, section: str = "", assessment_type: str = "") -> dict:
     """`$text` match plus optional exact filters. Empty strings mean "any"."""
-    flt: dict = {"$text": {"$search": query}}
+    flt: dict = {"$text": {"$search": plain_terms(query)}}
     if section:
         flt["section"] = section
     if assessment_type:

@@ -101,22 +101,22 @@ async def test_full_job_run_again_does_only_what_is_missing():
     assert ica.calls == [] and (done.status, done.skipped) == ("completed", 1)
 
 
-async def test_a_new_prompt_or_story_frame_redoes_the_text_and_what_hangs_on_it():
+async def test_a_new_prompt_or_story_frame_redoes_the_text_and_what_hangs_on_it(monkeypatch):
+    from claude_exam.api import simplify
+
     q = ready()
     mongo, ica = FakeMongo([q]), ScriptedIca()
     await run_job(mongo, ica, [q["_id"]], "full")
     db = mongo.get_default_database()
-    await db["examination_simplified"].update_one(
-        {"question_id": str(q["_id"])}, {"$set": {"frame_version": "older"}}
-    )
+    # The company's intro changed (the frame the text is written in; nothing bumped).
+    monkeypatch.setattr(simplify, "COMPANY_INTRO", simplify.COMPANY_INTRO + " Now also in Lisbon.")
     ica.calls.clear()
     # Same text comes back, so its entities and its check still fit and are kept.
     await run_job(mongo, ica, [q["_id"]], "full", only_missing=True)
     assert ica.calls == ["simplify"]
 
-    await db["examination_simplified"].update_one(
-        {"question_id": str(q["_id"])}, {"$set": {"prompt_version": "older"}}
-    )
+    # The prompt changed.
+    monkeypatch.setattr(simplify, "_SYSTEM_MESSAGE", simplify._SYSTEM_MESSAGE + "\nNew rule.")
     ica.calls.clear()
     text = "Which mode, plan mode or acceptEdits mode, never edits?"
     other = {**{k: v for k, v in SIMPLE.items() if k != "question"}, "parts": [{"role": "ask", "text": text, "entity_ids": []}]}

@@ -54,6 +54,7 @@ from claude_exam.api.schemas import (
     QuestionDecomposition,
     Resolution,
 )
+from claude_exam.api.step_key import key_or_none, step_key
 from claude_exam.html_clean import clean_plain
 
 logger = logging.getLogger(__name__)
@@ -513,6 +514,56 @@ def with_question_label(flow: DecisionFlow, doc: dict) -> DecisionFlow:
     return flow
 
 
+# Bump when the gates, `prune_after_question` or `with_question_label` change what is
+# stored from the same reply (the prompts are in the input keys, `step_key.py`).
+FLOW_CODE_VERSION = "1"
+RESOLVE_CODE_VERSION = "1"
+
+
+def flow_messages(doc: dict, decomposition: QuestionDecomposition) -> tuple[str, str]:
+    """The (system, user) messages that draw the pre-answer flow of `doc`."""
+    user = (
+        f"{_question_block(doc, with_key=False)}\n\n"
+        f"DECOMPOSITION:\n{_compact(scenario_view(decomposition, doc))}"
+    )
+    return _system(_FLOW_SYSTEM, DecisionFlow), user
+
+
+def flow_input_key(doc: dict, decomposition: QuestionDecomposition) -> str:
+    """The input key of the pre-answer flow drawn from `decomposition` (`step_key.py`)."""
+    return step_key(FLOW_CODE_VERSION, *flow_messages(doc, decomposition))
+
+
+def resolve_messages(
+    doc: dict, decomposition: QuestionDecomposition, flow: DecisionFlow
+) -> tuple[str, str]:
+    """The (system, user) messages that resolve `doc` after `flow`; 422 unless it has
+    exactly one correct answer (which a job does not retry)."""
+    if len(correct_indices(doc)) != 1:
+        raise HTTPException(status_code=422, detail="the resolution needs exactly one correct answer")
+    questions = {n.id for n in flow.nodes if n.is_question}
+    before = flow.model_copy(deep=True)
+    before.nodes = [n for n in before.nodes if n.id not in questions]
+    before.edges = [e for e in before.edges if e.target not in questions and e.source not in questions]
+    chose_after = [e.source for e in flow.edges if e.target in questions]
+    user = (
+        f"{_question_block(doc, with_key=True)}\n\n"
+        f"DECOMPOSITION:\n{_compact(decomposition)}\n\n"
+        f"FLOW BEFORE ANSWERING (without the question node):\n{_compact(before)}\n\n"
+        f"THE LEARNER CHOSE AN ANSWER AFTER: {', '.join(chose_after) or '(the start)'}"
+    )
+    return _system(_RESOLVE_SYSTEM, Resolution), user
+
+
+def resolve_input_key(
+    doc: dict, decomposition: QuestionDecomposition, flow: DecisionFlow
+) -> str | None:
+    """The input key of the resolution that continues `flow` (`step_key.py`)."""
+    return key_or_none(
+        lambda: step_key(RESOLVE_CODE_VERSION, *resolve_messages(doc, decomposition, flow))
+    )
+
+
 async def flow_item(
     ica: IcaClient,
     doc: dict,
@@ -523,15 +574,12 @@ async def flow_item(
     """The pre-answer flow of one question. The model reads the scenario and the stem
     and the decomposition's `scenario_view`: never the key, the answers, or what only
     they mention."""
-    user = (
-        f"{_question_block(doc, with_key=False)}\n\n"
-        f"DECOMPOSITION:\n{_compact(scenario_view(decomposition, doc))}"
-    )
+    system, user = flow_messages(doc, decomposition)
     parsed, meta = await ask_validated(
         ica,
         model_id,
         user,
-        system=_system(_FLOW_SYSTEM, DecisionFlow),
+        system=system,
         what="flow",
         validate=lambda parsed: flow_errors(doc, decomposition, parsed),
         max_attempts=MAX_ATTEMPTS,
@@ -557,24 +605,12 @@ async def resolve_item(
 ) -> tuple[Resolution, IcaMeta]:
     """The resolution of one question: needs exactly one correct answer (422 otherwise,
     which a job does not retry)."""
-    if len(correct_indices(doc)) != 1:
-        raise HTTPException(status_code=422, detail="the resolution needs exactly one correct answer")
-    questions = {n.id for n in flow.nodes if n.is_question}
-    before = flow.model_copy(deep=True)
-    before.nodes = [n for n in before.nodes if n.id not in questions]
-    before.edges = [e for e in before.edges if e.target not in questions and e.source not in questions]
-    chose_after = [e.source for e in flow.edges if e.target in questions]
-    user = (
-        f"{_question_block(doc, with_key=True)}\n\n"
-        f"DECOMPOSITION:\n{_compact(decomposition)}\n\n"
-        f"FLOW BEFORE ANSWERING (without the question node):\n{_compact(before)}\n\n"
-        f"THE LEARNER CHOSE AN ANSWER AFTER: {', '.join(chose_after) or '(the start)'}"
-    )
+    system, user = resolve_messages(doc, decomposition, flow)
     parsed, meta = await ask_validated(
         ica,
         model_id,
         user,
-        system=_system(_RESOLVE_SYSTEM, Resolution),
+        system=system,
         what="resolution",
         validate=lambda parsed: resolution_errors(doc, decomposition, parsed),
         max_attempts=MAX_ATTEMPTS,
@@ -626,9 +662,11 @@ async def flow_and_store(
             "flow": flow.model_dump(),
             "flow_version": FLOW_VERSION,
             "flow_ica": meta.model_dump(),
+            "flow_input_key": flow_input_key(doc, decomposition),
             "resolution": None,
             "resolution_version": None,
             "resolution_ica": None,
+            "resolution_input_key": None,
         },
     )
 
@@ -653,6 +691,7 @@ async def resolve_and_store(
             "resolution": resolution.model_dump(),
             "resolution_version": RESOLUTION_VERSION,
             "resolution_ica": meta.model_dump(),
+            "resolution_input_key": resolve_input_key(doc, decomposition, flow),
         },
     )
 

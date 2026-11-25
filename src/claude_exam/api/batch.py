@@ -7,7 +7,7 @@ from bson import ObjectId
 from fastapi import HTTPException
 from pymongo import AsyncMongoClient
 
-from claude_exam.api import check, decompose, entities, flow, icons, simplify
+from claude_exam.api import check, decompose, entities, flow, icons, pipeline_keys, simplify
 from claude_exam.api.check import check_and_store
 from claude_exam.api.decompose import decompose_and_store, read_decomposition
 from claude_exam.api.entities import derive_and_store, enrich_and_store
@@ -16,6 +16,7 @@ from claude_exam.api.game.domain import difficulty_of, story_of
 from claude_exam.api.ica import IcaClient
 from claude_exam.api.icons import assign_and_store
 from claude_exam.api.objectives import current_query, tag_and_store
+from claude_exam.api.pipeline_keys import Records
 from claude_exam.api.schemas import IcaModelId, JobMode, JobStage
 from claude_exam.api.simplify import simplify_and_store
 from claude_exam.api.story import current_query as current_story_query
@@ -156,10 +157,65 @@ async def _decomposition(stores: Stores, doc: dict):
     return read_decomposition(await _decomposition_record(stores, doc), doc)
 
 
+async def load_records(stores: Stores, doc: dict) -> Records:
+    """The question's stored records, as `pipeline_keys` reads them."""
+    query = {"question_id": str(doc["_id"])}
+
+    async def find(collection) -> dict | None:
+        return await collection.find_one(query) if collection is not None else None
+
+    return Records(
+        objectives=await find(stores.objectives),
+        story=await find(stores.story),
+        decomposition=await find(stores.decomposition),
+        simplified=await find(stores.simplified),
+    )
+
+
 async def is_current(stage: JobStage, stores: Stores, doc: dict) -> bool:
-    """Whether the question already has what `stage` would store, written with today's
-    prompt and catalogs (for a story also: a seed record). A job with `only_missing`
-    skips such a step, which is what makes running it again cheap."""
+    """Whether the question already has what `stage` would store, written from today's
+    inputs (`pipeline_keys.is_current`; a seed story record counts as current). A job
+    with `only_missing` skips such a step, which is what makes running it again cheap."""
+    return pipeline_keys.is_current(stage, doc, await load_records(stores, doc))
+
+
+async def adopt_input_keys(stores: Stores, doc: dict, dry_run: bool = False) -> list[JobStage]:
+    """Stamp today's input key on every result of `doc` that the version fields call
+    current but that has no matching key yet, so the first backfill after the keys
+    came does not redo the whole bank. Returns the steps stamped (or, with `dry_run`,
+    that would be). `updated_at` is left alone: the conditional writes compare it."""
+    stamped: list[JobStage] = []
+    # Stamped in memory as well, so a later step whose key needs an earlier one's
+    # (the resolution needs a current flow) is counted in a dry run too.
+    records = await load_records(stores, doc)
+    for stage in STAGES["full"]:
+        if pipeline_keys.is_current(stage, doc, records):
+            continue
+        if not await legacy_is_current(stage, stores, doc):
+            continue
+        key = pipeline_keys.expected_key(stage, doc, records)
+        if key is None:
+            continue
+        stamped.append(stage)
+        record_name, field = pipeline_keys.KEY_FIELD[stage]
+        record = getattr(records, record_name)
+        *parents, last = field.split(".")
+        target = record
+        for name in parents:
+            target = target.setdefault(name, {})
+        target[last] = key
+        if not dry_run:
+            collection = getattr(stores, record_name)
+            await collection.update_one(
+                {"question_id": str(doc["_id"])}, {"$set": {field: key}}
+            )
+    return stamped
+
+
+async def legacy_is_current(stage: JobStage, stores: Stores, doc: dict) -> bool:
+    """The check by the per-step version fields that the input keys replace. Only
+    `scripts/adopt_input_keys.py` uses it, to stamp keys on the records it calls
+    current; it goes with those fields."""
     question_id = str(doc["_id"])
     if stage == "objectives":
         found = await stores.objectives.find_one(current_query(question_id), {"_id": 1})

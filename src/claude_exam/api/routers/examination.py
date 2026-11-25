@@ -15,6 +15,7 @@ from pydantic import ValidationError
 
 from claude_exam.api.batch import (
     Stores,
+    is_current,
     missing_stages,
     new_job,
     run_simplification_job,
@@ -41,7 +42,7 @@ from claude_exam.api.game.domain import story_of
 from claude_exam.api.icons import assign_and_store
 from claude_exam.api.ingest import plan_import
 from claude_exam.api.normalization import normalize_result
-from claude_exam.api.objectives import current_query, tag_and_store
+from claude_exam.api.objectives import tag_and_store
 from claude_exam.api.schemas import (
     DecompositionRecord,
     EntitiesBackfill,
@@ -54,7 +55,6 @@ from claude_exam.api.schemas import (
     SimplifiedQuestion,
 )
 from claude_exam.api.security import require_api_key
-from claude_exam.api.story import current_query as current_story_query
 from claude_exam.api.story import story_and_store
 
 # Study/admin routes: they need the API key when one is configured.
@@ -482,8 +482,9 @@ async def backfill_objectives(
     track it via `GET /examination/jobs/{job_id}`.
     """
     question_ids: list[ObjectId] = []
-    async for doc in collection.find({"section": section} if section else {}, {"_id": 1}):
-        if only_missing and await objectives.find_one(current_query(str(doc["_id"])), {"_id": 1}):
+    stores = Stores(collection, None, objectives, None)
+    async for doc in collection.find({"section": section} if section else {}):
+        if only_missing and await is_current("objectives", stores, doc):
             continue
         question_ids.append(doc["_id"])
         if limit is not None and len(question_ids) >= limit:
@@ -544,8 +545,9 @@ async def backfill_story(
     `GET /examination/jobs/{job_id}`.
     """
     question_ids: list[ObjectId] = []
-    async for doc in collection.find({}, {"_id": 1}):
-        if only_missing and await story.find_one(current_story_query(str(doc["_id"])), {"_id": 1}):
+    stores = Stores(collection, None, None, story)
+    async for doc in collection.find({}):
+        if only_missing and await is_current("story", stores, doc):
             continue
         question_ids.append(doc["_id"])
         if limit is not None and len(question_ids) >= limit:

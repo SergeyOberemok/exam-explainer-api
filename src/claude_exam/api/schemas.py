@@ -463,6 +463,8 @@ class SimplifiedCheck(BaseModel):
     picked: int
     picked_original: int | None = None
     prompt_version: str
+    # `step_key.py`: what the check was asked from (None on older records).
+    input_key: str | None = None
     ica: IcaMeta
 
 
@@ -499,6 +501,11 @@ class SimplifiedQuestion(BaseModel):
     # written before the game text existed. A pipeline backfill redoes other versions.
     prompt_version: str | None = None
     frame_version: str | None = None
+    # `step_key.py` input keys of the game text, its entities and its icons (None on
+    # records written before they existed, or while that part is missing).
+    input_key: str | None = None
+    entities_input_key: str | None = None
+    icons_input_key: str | None = None
     # Result of the check step; None until it has run for this text.
     check: SimplifiedCheck | None = None
     created_at: datetime
@@ -546,6 +553,8 @@ class QuestionObjectives(BaseModel):
     # What the record was tagged with; a backfill redoes records of another version.
     catalog_version: str
     prompt_version: str
+    # `step_key.py`: what the record was tagged from (None on older records).
+    input_key: str | None = None
     ica: IcaMeta
     created_at: datetime
     updated_at: datetime
@@ -571,6 +580,8 @@ class QuestionStory(BaseModel):
     origin: Literal["seed", "ica"]
     catalog_version: str
     prompt_version: str
+    # `step_key.py`: what a model-written record was written from (None for a seed).
+    input_key: str | None = None
     # None for a seed record.
     ica: IcaMeta | None = None
     created_at: datetime
@@ -909,12 +920,16 @@ class DecompositionRecord(BaseModel):
     # `decompose.fingerprint` of `semantic` (None on records written before it was
     # stored); a game text's `decomposition_version` must equal it.
     fingerprint: str | None = None
+    # `step_key.py` input keys of the decomposition, the flow and the resolution.
+    input_key: str | None = None
     flow: DecisionFlow | None = None
     flow_version: str | None = None
     flow_ica: IcaMeta | None = None
+    flow_input_key: str | None = None
     resolution: Resolution | None = None
     resolution_version: str | None = None
     resolution_ica: IcaMeta | None = None
+    resolution_input_key: str | None = None
     created_at: datetime
     updated_at: datetime
 

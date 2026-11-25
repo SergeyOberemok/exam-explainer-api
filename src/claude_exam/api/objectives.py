@@ -30,12 +30,17 @@ from claude_exam.api.objective_catalog import (
     normalize_section,
 )
 from claude_exam.api.schemas import IcaMeta, IcaModelId, QuestionObjectives
+from claude_exam.api.step_key import key_or_none, step_key
 
 logger = logging.getLogger(__name__)
 
-# Bump when the prompt or the meaning of a stored field changes: records tagged with
-# another version count as missing for an objectives backfill.
+# Stored with each record (read by `scripts/objective_coverage.py`); the job no longer decides by it: a step is
+# redone when its input key changes (`step_key.py`), so a prompt edit needs no bump.
+# To redo it without a prompt change, bump `CODE_VERSION`. Goes in iteration 1b.
 PROMPT_VERSION = "4"
+# Bump when `parse_objectives` changes what is stored from the same reply (the prompt
+# itself is in the input key, `step_key.py`).
+CODE_VERSION = "1"
 LEVELS = ("remember", "understand", "apply", "analyze")
 MAX_SECONDARY = 2
 MAX_MISCONCEPTION_CHARS = 160
@@ -241,10 +246,8 @@ def parse_objectives(parsed: dict, section: str, n_answers: int, correct: list[i
     }
 
 
-async def tag_question(
-    ica: IcaClient, doc: dict, model_id: IcaModelId, max_tokens: int | None = None
-) -> tuple[dict, IcaMeta]:
-    """Ask the ICA chat model for the objective tags of one `examination` question."""
+def messages(doc: dict) -> tuple[str, str]:
+    """The (system, user) messages that tag `doc`; 422 when it cannot be tagged."""
     section = doc.get("section") or ""
     n_answers = len(answers_of(doc))
     correct = correct_indices(doc)
@@ -257,16 +260,25 @@ async def tag_question(
             detail=f"no objectives for section {normalize_section(section)!r}; "
             "add them to objective_catalog.py",
         )
+    return _build_system_message(section, n_answers, correct), _build_user_message(doc, correct)
 
+
+def input_key(doc: dict) -> str | None:
+    """The input key of the objectives of `doc` (`step_key.py`); None when it cannot be
+    tagged."""
+    return key_or_none(lambda: step_key(CODE_VERSION, *messages(doc)))
+
+
+async def tag_question(
+    ica: IcaClient, doc: dict, model_id: IcaModelId, max_tokens: int | None = None
+) -> tuple[dict, IcaMeta]:
+    """Ask the ICA chat model for the objective tags of one `examination` question."""
+    system, user = messages(doc)
     parsed, meta = await ask_json(
-        ica,
-        model_id,
-        _build_user_message(doc, correct),
-        system=_build_system_message(section, n_answers, correct),
-        what="objectives",
-        max_tokens=max_tokens,
+        ica, model_id, user, system=system, what="objectives", max_tokens=max_tokens
     )
-    return parse_objectives(parsed, section, n_answers, correct), meta
+    section = doc.get("section") or ""
+    return parse_objectives(parsed, section, len(answers_of(doc)), correct_indices(doc)), meta
 
 
 def current_query(question_id: str) -> dict:
@@ -297,6 +309,7 @@ async def tag_and_store(
                 "section": doc.get("section") or "",
                 "catalog_version": CATALOG_VERSION,
                 "prompt_version": PROMPT_VERSION,
+                "input_key": input_key(doc),
                 "ica": meta.model_dump(),
                 "updated_at": now,
             },

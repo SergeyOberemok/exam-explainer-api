@@ -27,8 +27,9 @@ from collections import Counter
 
 from pymongo import MongoClient
 
-from claude_exam.api import check, decompose, entities, icons, simplify
+from claude_exam.api import decompose, pipeline_keys
 from claude_exam.api.batch import STAGES
+from claude_exam.api.pipeline_keys import Records
 from claude_exam.api.game.domain import (
     CHECK_CHANGED,
     CHECK_HARD,
@@ -36,16 +37,12 @@ from claude_exam.api.game.domain import (
     correct_indices,
     is_playable,
     simplified_matches,
-    story_of,
 )
-from claude_exam.api.objective_catalog import CATALOG_VERSION as OBJECTIVE_CATALOG
 from claude_exam.api.objective_catalog import for_section, normalize_section
-from claude_exam.api.objectives import PROMPT_VERSION as OBJECTIVE_PROMPT
-from claude_exam.api.scenario_catalog import CHAPTER_VERSIONS, unknown_paragraph
+from claude_exam.api.scenario_catalog import unknown_paragraph
 from claude_exam.api.flow import leak_warning
 from claude_exam.api.schemas import DecisionFlow
 from claude_exam.api.simplify import quality_warnings
-from claude_exam.api.story import PROMPT_VERSION as STORY_PROMPT
 
 
 def database_url(args: list[str]) -> str:
@@ -65,54 +62,10 @@ def stage_states(
     story: dict | None,
     decomposition: dict | None = None,
 ) -> dict:
-    """For each step of the full pipeline: "current", "outdated" or "missing". The same
-    rules as `batch.is_current`, on records already read."""
-
-    def state(record, current: bool) -> str:
-        return "missing" if record is None else "current" if current else "outdated"
-
-    place = story_of(doc, story)
-    found = decompose.read_decomposition(decomposition, doc)
-    fingerprint = decompose.fingerprint(found) if found else None
-    decomposed = decompose.is_current(decomposition, doc)
-    return {
-        "objectives": state(
-            tags,
-            bool(tags)
-            and (tags.get("catalog_version"), tags.get("prompt_version"))
-            == (OBJECTIVE_CATALOG, OBJECTIVE_PROMPT),
-        ),
-        "story": state(
-            story,
-            bool(story)
-            and (
-                story.get("origin") == "seed"
-                or (
-                    story.get("catalog_version") in CHAPTER_VERSIONS
-                    and story.get("prompt_version") == STORY_PROMPT
-                )
-            ),
-        ),
-        "decompose": state(decomposition, decomposed),
-        "simplify": state(simplified, simplify.is_current(simplified, doc, place, fingerprint)),
-        "entities": state(
-            simplified and simplified.get("entities_ica"),
-            entities.is_current(simplified, found is not None),
-        ),
-        "icons": state(
-            simplified and simplified.get("icons_ica"),
-            icons.is_current(simplified),
-        ),
-        "flow": state(
-            decomposition and decomposition.get("flow"),
-            decomposed and decompose.flow_is_current(decomposition),
-        ),
-        "resolve": state(
-            decomposition and decomposition.get("resolution"),
-            decomposed and decompose.resolution_is_current(decomposition),
-        ),
-        "check": state(simplified and simplified.get("check"), check.is_current(simplified)),
-    }
+    """For each step of the full pipeline: "current", "outdated" or "missing", by the
+    same rule as the job (`pipeline_keys.state`), on records already read."""
+    records = Records(objectives=tags, story=story, decomposition=decomposition, simplified=simplified)
+    return {stage: pipeline_keys.state(stage, doc, records) for stage in STAGES["full"]}
 
 
 def show(doc: dict, simplified: dict) -> None:
@@ -154,9 +107,10 @@ def main() -> int:
         question_id = str(doc["_id"])
         text = simplified.get(question_id)
         record = decompositions.get(question_id)
-        for stage, state in stage_states(
+        question_states = stage_states(
             doc, text, tags.get(question_id), stories.get(question_id), record
-        ).items():
+        )
+        for stage, state in question_states.items():
             states[stage][state] += 1
         if decompose.is_current(record, doc) and decompose.flow_is_current(record):
             try:
@@ -185,7 +139,7 @@ def main() -> int:
             hard.append(question_id)
         if is_playable(doc) and not simplified_matches(doc, text) and verdict != CHECK_CHANGED:
             unusable.append(question_id)
-        if text.get("prompt_version") == simplify.PROMPT_VERSION:
+        if question_states["simplify"] == "current":
             hard_problems = [w for w in quality_warnings(doc, text["prompt"]) if "near copy" not in w]
             if hard_problems:
                 lossy.append((question_id, hard_problems))

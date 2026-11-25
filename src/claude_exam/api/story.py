@@ -40,12 +40,17 @@ from claude_exam.api.scenario_catalog import (
     unknown_paragraph,
 )
 from claude_exam.api.schemas import IcaMeta, IcaModelId, QuestionStory
+from claude_exam.api.step_key import key_or_none, step_key
 
 logger = logging.getLogger(__name__)
 
-# Bump when the prompt or the meaning of a stored field changes: "ica" records of
-# another version count as missing for a story backfill.
+# Stored with each record (read by `scripts/story_coverage.py`); the job no longer decides by it: a step is
+# redone when its input key changes (`step_key.py`), so a prompt edit needs no bump.
+# To redo it without a prompt change, bump `CODE_VERSION`. Goes in iteration 1b.
 PROMPT_VERSION = "2"
+# Bump when `parse_story` / `record_fields` change what is stored from the same reply
+# (the prompt itself is in the input key, `step_key.py`).
+CODE_VERSION = "1"
 # The prompt asks for less than the parser allows: a model counts words loosely.
 PROMPT_LINE_WORDS = 16
 MAX_LINE_WORDS = 20
@@ -246,10 +251,9 @@ def record_fields(doc: dict, fields: dict, origin: str, order: int) -> dict:
     }
 
 
-async def write_story(
-    ica: IcaClient, doc: dict, model_id: IcaModelId, max_tokens: int | None = None
-) -> tuple[dict, IcaMeta]:
-    """Ask the ICA chat model for the story fields of one `examination` question."""
+def messages(doc: dict) -> tuple[str, str]:
+    """The (system, user) messages that write the story of `doc`; 422 when it cannot
+    have one."""
     correct = correct_indices(doc)
     # Not retried by a job (unlike 502): asking again cannot help.
     if not answers_of(doc) or not correct:
@@ -259,17 +263,28 @@ async def write_story(
             status_code=422,
             detail="the question's scenario is not in scenario_catalog.py",
         )
+    return _build_system_message(doc), _build_user_message(doc, correct)
 
+
+def input_key(doc: dict) -> str | None:
+    """The input key of a model-written story of `doc` (`step_key.py`); None when it
+    cannot have one. Seed records have none: they are current as they are."""
+    return key_or_none(lambda: step_key(CODE_VERSION, *messages(doc)))
+
+
+async def write_story(
+    ica: IcaClient, doc: dict, model_id: IcaModelId, max_tokens: int | None = None
+) -> tuple[dict, IcaMeta]:
+    """Ask the ICA chat model for the story fields of one `examination` question."""
+    system, user = messages(doc)
     parsed, meta = await ask_json(
-        ica,
-        model_id,
-        _build_user_message(doc, correct),
-        system=_build_system_message(doc),
-        what="the story",
-        max_tokens=max_tokens,
+        ica, model_id, user, system=system, what="the story", max_tokens=max_tokens
     )
     fields = parse_story(
-        parsed, answers_of(doc), correct=correct, pick_chapter=needs_chapter_pick(doc)
+        parsed,
+        answers_of(doc),
+        correct=correct_indices(doc),
+        pick_chapter=needs_chapter_pick(doc),
     )
     return fields, meta
 
@@ -313,7 +328,10 @@ async def story_and_store(
     stored = await story.find_one_and_update(
         {"question_id": str(doc["_id"])},
         upsert_update(
-            record_fields(doc, fields, "ica", ICA_ORDER + difficulty),
+            {
+                **record_fields(doc, fields, "ica", ICA_ORDER + difficulty),
+                "input_key": input_key(doc),
+            },
             meta,
             datetime.now(timezone.utc),
         ),

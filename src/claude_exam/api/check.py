@@ -36,11 +36,16 @@ from claude_exam.api.ica_json import ask_json
 from claude_exam.api.scenario_catalog import BY_KEY, COMPANY_INTRO
 from claude_exam.api.schemas import IcaMeta, IcaModelId, SimplifiedQuestion
 from claude_exam.api.simplify import chapter_key
+from claude_exam.api.step_key import key_or_none, step_key
 
 logger = logging.getLogger(__name__)
 
-# Bump when the prompt changes: a check of another version counts as missing.
+# Stored with each record (`check.prompt_version`); the job no longer decides by it: a step is
+# redone when its input key changes (`step_key.py`), so a prompt edit needs no bump.
+# To redo it without a prompt change, bump `CODE_VERSION`. Goes in iteration 1b.
 PROMPT_VERSION = "1"
+# Bump when the verdict logic changes (the prompt is in the input key, `step_key.py`).
+CODE_VERSION = "1"
 
 _SYSTEM_MESSAGE = """\
 You answer one multiple-choice question of an exam about Claude Code, the Claude \
@@ -88,20 +93,45 @@ def parse_pick(parsed: dict, n_answers: int) -> int:
 async def _pick(
     ica: IcaClient,
     model_id: IcaModelId,
-    question: str,
-    answers: list,
-    background: str,
+    system: str,
+    user: str,
+    n_answers: int,
     max_tokens: int | None,
 ) -> tuple[int, IcaMeta]:
     parsed, meta = await ask_json(
-        ica,
-        model_id,
-        _build_user_message(question, answers, background),
-        system=_build_system_message(len(answers)),
-        what="the check",
-        max_tokens=max_tokens,
+        ica, model_id, user, system=system, what="the check", max_tokens=max_tokens
     )
-    return parse_pick(parsed, len(answers)), meta
+    return parse_pick(parsed, n_answers), meta
+
+
+def messages(doc: dict, simplified: dict, story: dict | None = None) -> tuple[str, str, str, str]:
+    """The messages of both checks: (system, user) of the game text, with the company
+    and chapter as background, then of the original (asked only when the first pick is
+    wrong; its messages don't depend on that reply). 422 when the text can't be checked."""
+    correct = correct_indices(doc)
+    answers = answers_of(simplified)
+    # Not retried by a job (unlike 502): asking again cannot help.
+    if len(correct) != 1 or len(answers) != len(answers_of(doc)):
+        raise HTTPException(
+            status_code=422,
+            detail="the check needs exactly one correct answer and a text with the same answers",
+        )
+    chapter = BY_KEY.get(chapter_key(doc, story) or "")
+    background = f"{COMPANY_INTRO}\n{chapter.intro}" if chapter else COMPANY_INTRO
+    prompt = simplified.get("prompt") or {}
+    original = doc.get("prompt") or {}
+    system = _build_system_message(len(answers))
+    return (
+        system,
+        _build_user_message(prompt.get("question") or "", answers, background),
+        system,
+        _build_user_message(original.get("question") or "", answers_of(doc), ""),
+    )
+
+
+def input_key(doc: dict, simplified: dict, story: dict | None = None) -> str | None:
+    """The input key of the check of a game text (`step_key.py`)."""
+    return key_or_none(lambda: step_key(CODE_VERSION, *messages(doc, simplified, story)))
 
 
 async def check_item(
@@ -115,28 +145,16 @@ async def check_item(
     """Check the game text of `simplified` against its original `doc` and return the
     `check` field to store. `story` is what `game.domain.story_of` returned for the
     question (its chapter gives the background a player has read)."""
+    system, user, original_system, original_user = messages(doc, simplified, story)
     correct = correct_indices(doc)
-    answers = answers_of(simplified)
-    # Not retried by a job (unlike 502): asking again cannot help.
-    if len(correct) != 1 or len(answers) != len(answers_of(doc)):
-        raise HTTPException(
-            status_code=422,
-            detail="the check needs exactly one correct answer and a text with the same answers",
-        )
-    chapter = BY_KEY.get(chapter_key(doc, story) or "")
-    background = f"{COMPANY_INTRO}\n{chapter.intro}" if chapter else COMPANY_INTRO
-
-    prompt = simplified.get("prompt") or {}
-    picked, meta = await _pick(
-        ica, model_id, prompt.get("question") or "", answers, background, max_tokens
-    )
+    n_answers = len(answers_of(doc))
+    picked, meta = await _pick(ica, model_id, system, user, n_answers, max_tokens)
     picked_original = None
     if picked == correct[0]:
         verdict = CHECK_SAME
     else:
-        original = doc.get("prompt") or {}
         picked_original, second = await _pick(
-            ica, model_id, original.get("question") or "", answers_of(doc), "", max_tokens
+            ica, model_id, original_system, original_user, n_answers, max_tokens
         )
         meta.total_tokens += second.total_tokens
         verdict = CHECK_CHANGED if picked_original == correct[0] else CHECK_HARD
@@ -153,6 +171,9 @@ async def check_item(
         "picked": picked,
         "picked_original": picked_original,
         "prompt_version": PROMPT_VERSION,
+        "input_key": step_key(
+            CODE_VERSION, system, user, original_system, original_user
+        ),
         "ica": meta.model_dump(),
     }
 

@@ -17,7 +17,8 @@ from pymongo.asynchronous.collection import AsyncCollection
 from claude_exam.api.ica import IcaClient
 from claude_exam.api.ica_json import ask_json
 from claude_exam.api.scenario_catalog import stem_of
-from claude_exam.api.decompose import VISUAL_KIND
+from claude_exam.api.decompose import VISUAL_KIND, fingerprint
+from claude_exam.api.step_key import step_key
 from claude_exam.api.schemas import (
     IcaMeta,
     IcaModelId,
@@ -32,9 +33,13 @@ from claude_exam.html_clean import clean_plain, clean_question
 
 logger = logging.getLogger(__name__)
 
-# Bump when the prompt or the derivation changes: a record of another version counts as
-# missing for a backfill (`batch.is_current`).
+# Stored with each record (`entities_version`); the job no longer decides by it: a step is
+# redone when its input key changes (`step_key.py`), so a prompt edit needs no bump.
+# To redo it without a prompt change, bump `CODE_VERSION`. Goes in iteration 1b.
 PROMPT_VERSION = "2"
+# Bump when `parse_entities` or `derive_entities` change what is stored from the same
+# reply or decomposition (the prompt itself is in the input key, `step_key.py`).
+CODE_VERSION = "1"
 # A question is a short scenario; more than this means the model is listing nouns.
 # Beyond the limits the reply is trimmed (in order), not rejected.
 MAX_ENTITIES = 16
@@ -376,15 +381,33 @@ async def extract_entities(
     resolved entities are index-aligned with its answers).
     """
     n_answers = len(simplified.answers)
+    system, user = messages(item, simplified)
     parsed, meta = await ask_json(
-        ica,
-        model_id,
-        _build_user_message(item, simplified),
-        system=_build_system_message(n_answers),
-        what="entities",
-        max_tokens=max_tokens,
+        ica, model_id, user, system=system, what="entities", max_tokens=max_tokens
     )
     return parse_entities(parsed, n_answers, _source_texts(item, simplified)), meta
+
+
+def messages(item: dict, simplified: SimplifiedPrompt) -> tuple[str, str]:
+    """The (system, user) messages that extract the entities of a game text."""
+    return (
+        _build_system_message(len(simplified.answers)),
+        _build_user_message(item, simplified),
+    )
+
+
+def input_key(
+    item: dict,
+    simplified: SimplifiedPrompt,
+    decomposition: QuestionDecomposition | None = None,
+) -> str:
+    """The input key of the entities of a game text (`step_key.py`): of the extraction
+    messages, or, with `decomposition`, of what they are derived from (no call)."""
+    if decomposition is not None:
+        return step_key(
+            CODE_VERSION, "derived", fingerprint(decomposition), _build_user_message(item, simplified)
+        )
+    return step_key(CODE_VERSION, *messages(item, simplified))
 
 
 def derive_entities(
@@ -427,6 +450,7 @@ async def _store_entities(
     entities: PromptEntities,
     meta: IcaMeta,
     source: str,
+    key: str,
 ) -> SimplifiedQuestion:
     # Conditional on the record not having been rewritten meanwhile: the references
     # index into the text that was sent, so they must not land on a newer text.
@@ -438,9 +462,11 @@ async def _store_entities(
                 "entities_ica": meta.model_dump(),
                 "entities_version": PROMPT_VERSION,
                 "entities_source": source,
+                "entities_input_key": key,
                 # New entities have no icons yet; `icons.assign_and_store` adds them.
                 "icons_ica": None,
                 "icons_version": None,
+                "icons_input_key": None,
                 "updated_at": datetime.now(timezone.utc),
             }
         },
@@ -477,7 +503,9 @@ async def enrich_and_store(
     existing = await _existing(simplified, doc)
     prompt = SimplifiedPrompt(**existing["prompt"])
     entities, meta = await extract_entities(ica, doc, prompt, model_id, max_tokens)
-    return await _store_entities(simplified, existing, entities, meta, "ica")
+    return await _store_entities(
+        simplified, existing, entities, meta, "ica", input_key(doc, prompt)
+    )
 
 
 async def derive_and_store(
@@ -493,7 +521,14 @@ async def derive_and_store(
     prompt = SimplifiedPrompt(**existing["prompt"])
     entities = derive_entities(decomposition, doc, prompt)
     meta = IcaMeta(model_id=model_id, finish_reason="derived", total_tokens=0)
-    return await _store_entities(simplified, existing, entities, meta, "decomposition")
+    return await _store_entities(
+        simplified,
+        existing,
+        entities,
+        meta,
+        "decomposition",
+        input_key(doc, prompt, decomposition),
+    )
 
 
 def is_current(record: dict | None, decomposed: bool = False) -> bool:

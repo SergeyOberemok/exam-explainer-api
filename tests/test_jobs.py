@@ -565,7 +565,7 @@ async def test_objectives_job_tags_without_a_simplified_record():
     assert await stored(mongo, q) is None
 
 
-async def test_objectives_job_skips_current_records_and_redoes_outdated_ones():
+async def test_objectives_job_skips_current_records_and_redoes_outdated_ones(monkeypatch):
     q = question(section=TAGGABLE)
     mongo, ica = FakeMongo([q]), ScriptedIca()
     await run_job(mongo, ica, [q["_id"]], "objectives")
@@ -574,11 +574,11 @@ async def test_objectives_job_skips_current_records_and_redoes_outdated_ones():
     job = await run_job(mongo, ica, [q["_id"]], "objectives", only_missing=True)
     assert (job.skipped, job.succeeded) == (1, 0) and ica.calls == ["objectives"]
 
-    # The catalog changed since: the record counts as missing and is tagged again.
+    # The prompt changed since (no version bumped): the record is outdated, tagged again.
+    from claude_exam.api import objectives
+
+    monkeypatch.setattr(objectives, "_SYSTEM_MESSAGE", objectives._SYSTEM_MESSAGE + "\nNew rule.")
     db = mongo.get_default_database()
-    await db["question_objectives"].update_one(
-        {"question_id": str(q["_id"])}, {"$set": {"catalog_version": "old"}}
-    )
     job = await run_job(mongo, ica, [q["_id"]], "objectives", only_missing=True)
     assert (job.skipped, job.succeeded) == (0, 1) and ica.calls == ["objectives"] * 2
     again = await tags(mongo, q)
@@ -646,7 +646,7 @@ async def story_record(mongo, doc):
     )
 
 
-async def test_story_job_writes_a_record_and_skips_what_is_done():
+async def test_story_job_writes_a_record_and_skips_what_is_done(monkeypatch):
     q, plain = in_chapter(), outsider()
     mongo, ica = FakeMongo([q, plain]), ScriptedIca()
     job = await run_job(mongo, ica, [q["_id"], plain["_id"]], "story")
@@ -662,13 +662,16 @@ async def test_story_job_writes_a_record_and_skips_what_is_done():
     job = await run_job(mongo, ica, [q["_id"]], "story", only_missing=True)
     assert (job.skipped, job.succeeded) == (1, 0) and ica.calls == ["story"]
 
-    # An older prompt: redone, unless the record is a hand-written seed one.
+    # A changed prompt: redone, unless the record is a hand-written seed one.
+    from claude_exam.api import story
+
     db = mongo.get_default_database()
-    await db["question_story"].update_one({"question_id": str(q["_id"])}, {"$set": {"prompt_version": "old"}})
+    monkeypatch.setattr(story, "_SYSTEM_MESSAGE", story._SYSTEM_MESSAGE + "\nNew rule.")
     job = await run_job(mongo, ica, [q["_id"]], "story", only_missing=True)
     assert (job.skipped, job.succeeded) == (0, 1) and ica.calls == ["story"] * 2
+    monkeypatch.setattr(story, "_SYSTEM_MESSAGE", story._SYSTEM_MESSAGE + "\nAnother rule.")
     await db["question_story"].update_one(
-        {"question_id": str(q["_id"])}, {"$set": {"prompt_version": "old", "origin": "seed"}}
+        {"question_id": str(q["_id"])}, {"$set": {"origin": "seed"}}
     )
     job = await run_job(mongo, ica, [q["_id"]], "story", only_missing=True)
     assert job.skipped == 1 and ica.calls == ["story"] * 2

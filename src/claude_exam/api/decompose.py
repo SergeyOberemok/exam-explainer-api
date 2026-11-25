@@ -42,17 +42,24 @@ from claude_exam.api.schemas import (
     IcaModelId,
     QuestionDecomposition,
 )
+from claude_exam.api.step_key import key_or_none, step_key
 from claude_exam.html_clean import clean_plain, clean_question
 
 logger = logging.getLogger(__name__)
 
-# Bump when the prompt or the meaning of a stored field changes: records of another
-# version count as missing for a backfill.
+# Still read: `read_decomposition` (and so the game and the later steps) takes only a
+# record of this version, and `fingerprint` starts with it, so bumping it still redoes
+# the decomposition and what is built on it (`pipeline_keys._readable`). A prompt
+# edit alone needs no bump: the input key (`step_key.py`) changes with it.
 PROMPT_VERSION = "3"
 # The versions of the two parts `flow.py` writes onto the same record. They live here
 # because the game (`game.domain`) reads them, and `flow.py` imports the game rules.
 FLOW_VERSION = "4"
 RESOLUTION_VERSION = "2"
+# Bump when the gates or the parsing change what is stored from the same reply (the
+# prompts themselves are in the input keys, `step_key.py`). The flow and resolution's
+# code versions live in `flow.py`.
+CODE_VERSION = "1"
 MAX_ATTEMPTS = 3
 # A question is a short scenario; more means the model is listing nouns.
 MAX_ENTITIES = 12
@@ -355,6 +362,18 @@ def decomposition_errors(doc: dict, parsed: dict) -> list[str]:
     return errors
 
 
+def messages(doc: dict) -> tuple[str, str]:
+    """The (system, user) messages that decompose `doc`; 422 without answers."""
+    if not (doc.get("prompt") or {}).get("answers"):
+        raise HTTPException(status_code=422, detail="question has no answers to decompose")
+    return _build_system_message(), _build_user_message(doc)
+
+
+def input_key(doc: dict) -> str | None:
+    """The input key of the decomposition of `doc` (`step_key.py`)."""
+    return key_or_none(lambda: step_key(CODE_VERSION, *messages(doc)))
+
+
 async def decompose_item(
     ica: IcaClient,
     doc: dict,
@@ -364,13 +383,12 @@ async def decompose_item(
     """Decompose one examination document (needs `prompt.question` and `prompt.answers`;
     the key is never read). 422 for a question without answers, 502 when the last reply
     still fails `decomposition_errors`."""
-    if not (doc.get("prompt") or {}).get("answers"):
-        raise HTTPException(status_code=422, detail="question has no answers to decompose")
+    system, user = messages(doc)
     parsed, meta = await ask_validated(
         ica,
         model_id,
-        _build_user_message(doc),
-        system=_build_system_message(),
+        user,
+        system=system,
         what="decomposition",
         validate=lambda parsed: decomposition_errors(doc, parsed),
         max_attempts=MAX_ATTEMPTS,
@@ -493,12 +511,15 @@ async def store_decomposition(
                 "semantic_version": PROMPT_VERSION,
                 "semantic_ica": meta.model_dump(),
                 "fingerprint": fingerprint(decomposition),
+                "input_key": input_key(doc),
                 "flow": None,
                 "flow_version": None,
                 "flow_ica": None,
+                "flow_input_key": None,
                 "resolution": None,
                 "resolution_version": None,
                 "resolution_ica": None,
+                "resolution_input_key": None,
                 "updated_at": now,
             },
             "$setOnInsert": {"created_at": now},

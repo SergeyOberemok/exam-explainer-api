@@ -49,13 +49,20 @@ from claude_exam.api.schemas import (
     SimplifiedPrompt,
     SimplifiedQuestion,
 )
+from claude_exam.api import entities as entities_step
+from claude_exam.api import icons as icons_step
+from claude_exam.api.step_key import key_or_none, step_key
 from claude_exam.html_clean import clean_plain, clean_question
 
 logger = logging.getLogger(__name__)
 
-# Bump when the prompt or the meaning of a stored field changes: records of another
-# version count as missing for a pipeline backfill.
+# Stored with each record (`prompt_version`); the job no longer decides by it: a step is
+# redone when its input key changes (`step_key.py`), so a prompt edit needs no bump.
+# To redo it without a prompt change, bump `CODE_VERSION`. Goes in iteration 1b.
 PROMPT_VERSION = "3"
+# Bump when the gates (`fidelity_errors`, `parts_errors`) or `joined` change what is
+# stored from the same reply (the prompt itself is in the input key, `step_key.py`).
+CODE_VERSION = "1"
 # How much longer than its original a rewritten answer may be before it is rejected.
 MAX_ANSWER_GROWTH = 1.25
 ANSWER_SLACK_CHARS = 15
@@ -469,6 +476,31 @@ def _validate_shape(
                 )
 
 
+def messages(
+    item: dict, story: dict | None, decomposition: QuestionDecomposition | None
+) -> tuple[str, str]:
+    """The (system, user) messages that write the game text of `item`, set where
+    `story` places it and, with `decomposition`, as its semantic parts; 422 without
+    answers."""
+    n_answers = len((item.get("prompt") or {}).get("answers", []))
+    if n_answers == 0:
+        raise HTTPException(
+            status_code=422, detail="question has no answers to simplify"
+        )
+    system = _build_system_message(
+        n_answers, chapter_key(item, story), decomposition is not None
+    )
+    return system, _build_user_message(item, story, decomposition)
+
+
+def input_key(
+    item: dict, story: dict | None, decomposition: QuestionDecomposition | None
+) -> str | None:
+    """The input key of the game text of `item` (`step_key.py`). It covers the
+    chapter's intro and people and the decomposition, since both are in the messages."""
+    return key_or_none(lambda: step_key(CODE_VERSION, *messages(item, story, decomposition)))
+
+
 async def simplify_item(
     ica: IcaClient,
     item: dict,
@@ -492,15 +524,9 @@ async def simplify_item(
     as semantic parts that name its entities (`parts_errors`); `question` is then their
     sentences joined, and every check of the plain text runs on that.
     """
+    system, user = messages(item, story, decomposition)
     n_answers = len((item.get("prompt") or {}).get("answers", []))
-    if n_answers == 0:
-        raise HTTPException(
-            status_code=422, detail="question has no answers to simplify"
-        )
     with_parts = decomposition is not None
-    system = _build_system_message(n_answers, chapter_key(item, story), with_parts)
-    user = _build_user_message(item, story, decomposition)
-
     correct = item.get("correct_response") or []
 
     def validate(parsed: dict) -> list[str]:
@@ -607,7 +633,10 @@ async def simplify_and_store(
                 doc.get("_id"),
                 getattr(exc, "detail", exc),
             )
+    entities_key = icons_key = None
     if entities_meta is not None:
+        entities_key = entities_step.input_key(doc, prompt, decomposition)
+        icons_key = icons_step.input_key(doc.get("section", ""), prompt, entities)
         try:
             entities, icons_meta = await pick_icons(
                 ica, doc.get("section", ""), prompt, entities, model_id, max_tokens
@@ -652,6 +681,7 @@ async def simplify_and_store(
         "prompt_version": PROMPT_VERSION,
         "frame_version": frame_version(chapter_key(doc, story)),
         "decomposition_version": fingerprint,
+        "input_key": input_key(doc, story, decomposition),
         "updated_at": now,
     }
     if not keep_entities:
@@ -661,6 +691,8 @@ async def simplify_and_store(
         fields["entities_version"] = entities_version if entities_meta else None
         fields["icons_version"] = icons_version if icons_meta else None
         fields["entities_source"] = entities_source
+        fields["entities_input_key"] = entities_key
+        fields["icons_input_key"] = icons_key if icons_meta else None
     if not same_text:
         fields["check"] = None
     stored = await simplified.find_one_and_update(

@@ -24,11 +24,17 @@ from claude_exam.api.schemas import (
     SimplifiedQuestion,
     VisualEntity,
 )
+from claude_exam.api.step_key import step_key
 
 logger = logging.getLogger(__name__)
 
-# Bump when the prompt changes: a record of another version counts as missing.
+# Stored with each record (`icons_version`); the job no longer decides by it: a step is
+# redone when its input key changes (`step_key.py`), so a prompt edit needs no bump.
+# To redo it without a prompt change, bump `CODE_VERSION`. Goes in iteration 1b.
 PROMPT_VERSION = "2"
+# Bump when `parse_icons` changes what is stored from the same reply (the prompt and
+# the catalog are in the input key, `step_key.py`).
+CODE_VERSION = "1"
 
 _SYSTEM_MESSAGE = """\
 You choose icons from an icon catalog for one multiple-choice exam question, so a quiz \
@@ -178,16 +184,22 @@ async def pick_icons(
 ) -> tuple[PromptEntities, IcaMeta]:
     """Ask the ICA chat model for the icons of one simplified question and its
     entities; returns the entities with `icon` fields set."""
-    n_answers = len(prompt.answers)
+    system, user = messages(section, prompt, entities)
     parsed, meta = await ask_json(
-        ica,
-        model_id,
-        _build_user_message(section, prompt, entities),
-        system=_build_system_message(n_answers),
-        what="icons",
-        max_tokens=max_tokens,
+        ica, model_id, user, system=system, what="icons", max_tokens=max_tokens
     )
-    return parse_icons(parsed, entities, n_answers), meta
+    return parse_icons(parsed, entities, len(prompt.answers)), meta
+
+
+def messages(section: str, prompt: SimplifiedPrompt, entities: PromptEntities) -> tuple[str, str]:
+    """The (system, user) messages that pick the icons of a game text. The entities'
+    own icons are not in them, so the key is the same before and after picking."""
+    return _build_system_message(len(prompt.answers)), _build_user_message(section, prompt, entities)
+
+
+def input_key(section: str, prompt: SimplifiedPrompt, entities: PromptEntities) -> str:
+    """The input key of the icons of a game text and its entities (`step_key.py`)."""
+    return step_key(CODE_VERSION, *messages(section, prompt, entities))
 
 
 async def assign_and_store(
@@ -223,6 +235,7 @@ async def assign_and_store(
                 "entities": with_icons.model_dump(),
                 "icons_ica": meta.model_dump(),
                 "icons_version": PROMPT_VERSION,
+                "icons_input_key": input_key(existing.get("section", ""), prompt, entities),
                 "updated_at": datetime.now(timezone.utc),
             }
         },

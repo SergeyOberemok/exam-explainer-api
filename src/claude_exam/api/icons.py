@@ -1,8 +1,11 @@
-"""Icon picking for simplified questions (third ICA call, after entity extraction).
+"""Icon picking for a question (an ICA call, after its decomposition).
 
 The model chooses, from the closed list in `icon_catalog.py`, one icon key for every
-extracted entity, one for the question and one for each answer. Only keys are stored,
-so the picture a client draws for a key can change without touching the data.
+entity of the decomposition (`entities.derive_entities`), one for the question and one
+for each answer. It reads the question through `KeyFreeQuestion`: icons are shown before
+the player answers. Only keys are stored, on the `question_decomposition` record (the
+`icon` fields inside `entities`, and `icons_ica`), so the picture a client draws for a
+key can change without touching the data; a new decomposition clears them.
 """
 
 import logging
@@ -15,23 +18,19 @@ from pymongo.asynchronous.collection import AsyncCollection
 from claude_exam.api.ica import IcaClient
 from claude_exam.api.icon_catalog import ICONS, KIND_FALLBACK, known
 from claude_exam.api.ica_json import ask_json
+from claude_exam.api.question_view import KeyFreeQuestion, key_free
 from claude_exam.api.schemas import (
     AnswerEntities,
+    DecompositionRecord,
     IcaMeta,
     IcaModelId,
     PromptEntities,
-    SimplifiedPrompt,
-    SimplifiedQuestion,
     VisualEntity,
 )
 from claude_exam.api.step_key import step_key
 
 logger = logging.getLogger(__name__)
 
-# Stored with each record (`icons_version`); the job no longer decides by it: a step is
-# redone when its input key changes (`step_key.py`), so a prompt edit needs no bump.
-# To redo it without a prompt change, bump `CODE_VERSION`. Goes in iteration 1b.
-PROMPT_VERSION = "2"
 # Bump when `parse_icons` changes what is stored from the same reply (the prompt and
 # the catalog are in the input key, `step_key.py`).
 CODE_VERSION = "1"
@@ -97,15 +96,15 @@ def _distinct(entities: PromptEntities) -> list[VisualEntity]:
     return list(seen.values())
 
 
-def _build_user_message(section: str, prompt: SimplifiedPrompt, entities: PromptEntities) -> str:
-    answers = "\n".join(f"  {chr(65 + i)}. {a}" for i, a in enumerate(prompt.answers))
+def _build_user_message(q: KeyFreeQuestion, entities: PromptEntities) -> str:
+    answers = "\n".join(f"  {chr(65 + i)}. {a}" for i, a in enumerate(q.answers))
     listed = "\n".join(
         f"- {e.name} ({e.kind})" + (f" - also: {', '.join(e.aliases)}" if e.aliases else "")
         for e in _distinct(entities)
     )
     return (
-        f"Section: {section}\n\n"
-        f"QUESTION:\n{prompt.question}\n\n"
+        f"Section: {q.section}\n\n"
+        f"QUESTION:\n{q.stem or q.question}\n\n"
         f"ANSWERS:\n{answers}\n\n"
         f"ENTITIES:\n{listed or '(none)'}"
     )
@@ -176,66 +175,64 @@ def parse_icons(parsed: dict, entities: PromptEntities, n_answers: int) -> Promp
 
 async def pick_icons(
     ica: IcaClient,
-    section: str,
-    prompt: SimplifiedPrompt,
+    q: KeyFreeQuestion,
     entities: PromptEntities,
     model_id: IcaModelId,
     max_tokens: int | None = None,
 ) -> tuple[PromptEntities, IcaMeta]:
-    """Ask the ICA chat model for the icons of one simplified question and its
-    entities; returns the entities with `icon` fields set."""
-    system, user = messages(section, prompt, entities)
+    """Ask the ICA chat model for the icons of one question and its entities; returns
+    the entities with `icon` fields set."""
+    system, user = messages(q, entities)
     parsed, meta = await ask_json(
         ica, model_id, user, system=system, what="icons", max_tokens=max_tokens
     )
-    return parse_icons(parsed, entities, len(prompt.answers)), meta
+    return parse_icons(parsed, entities, len(q.answers)), meta
 
 
-def messages(section: str, prompt: SimplifiedPrompt, entities: PromptEntities) -> tuple[str, str]:
-    """The (system, user) messages that pick the icons of a game text. The entities'
+def messages(q: KeyFreeQuestion, entities: PromptEntities) -> tuple[str, str]:
+    """The (system, user) messages that pick the icons of a question. The entities'
     own icons are not in them, so the key is the same before and after picking."""
-    return _build_system_message(len(prompt.answers)), _build_user_message(section, prompt, entities)
+    return _build_system_message(len(q.answers)), _build_user_message(q, entities)
 
 
-def input_key(section: str, prompt: SimplifiedPrompt, entities: PromptEntities) -> str:
-    """The input key of the icons of a game text and its entities (`step_key.py`)."""
-    return step_key(CODE_VERSION, *messages(section, prompt, entities))
+def input_key(q: KeyFreeQuestion, entities: PromptEntities) -> str:
+    """The input key of the icons of a question and its entities (`step_key.py`)."""
+    return step_key(CODE_VERSION, *messages(q, entities))
+
+
+def stored_entities(record: dict | None) -> PromptEntities:
+    """The entities of a `question_decomposition` record (none when malformed)."""
+    try:
+        return PromptEntities.model_validate((record or {}).get("entities") or {})
+    except ValueError:
+        return PromptEntities()
 
 
 async def assign_and_store(
     ica: IcaClient,
-    simplified: AsyncCollection,
-    question_id: str,
+    store: AsyncCollection,
+    doc: dict,
     model_id: IcaModelId,
     max_tokens: int | None = None,
-) -> SimplifiedQuestion:
-    """
-    Pick icons for an already simplified question and store them on its record: the
-    `icon` fields inside `entities`, and `icons_ica`. Works for a record without
-    entities too (the question and answers still get icons). Errors propagate.
-    """
-    existing = await simplified.find_one({"question_id": question_id})
+) -> DecompositionRecord:
+    """Pick icons for the entities of a decomposed question and store them on its
+    `question_decomposition` record (the `icon` fields inside `entities`, and
+    `icons_ica`). 404 without a decomposition; errors propagate."""
+    existing = await store.find_one({"question_id": str(doc["_id"])})
     if existing is None:
-        raise HTTPException(status_code=404, detail="simplified question not found")
-
-    prompt = SimplifiedPrompt(**existing["prompt"])
-    try:
-        entities = PromptEntities.model_validate(existing.get("entities") or {})
-    except ValueError:
-        entities = PromptEntities()
-    with_icons, meta = await pick_icons(
-        ica, existing.get("section", ""), prompt, entities, model_id, max_tokens
-    )
-    # Conditional like the entity step: the icons belong to the entities and text that
-    # were sent, so they must not land on a record rewritten meanwhile.
-    stored = await simplified.find_one_and_update(
-        {"question_id": question_id, "updated_at": existing["updated_at"]},
+        raise HTTPException(status_code=404, detail="question has no decomposition")
+    q = key_free(doc)
+    entities = stored_entities(existing)
+    with_icons, meta = await pick_icons(ica, q, entities, model_id, max_tokens)
+    # Conditional: the icons belong to the entities that were sent, so they must not
+    # land on a record rewritten meanwhile (a new decomposition has new entities).
+    stored = await store.find_one_and_update(
+        {"question_id": existing["question_id"], "updated_at": existing["updated_at"]},
         {
             "$set": {
                 "entities": with_icons.model_dump(),
                 "icons_ica": meta.model_dump(),
-                "icons_version": PROMPT_VERSION,
-                "icons_input_key": input_key(existing.get("section", ""), prompt, entities),
+                "icons_input_key": input_key(q, entities),
                 "updated_at": datetime.now(timezone.utc),
             }
         },
@@ -244,12 +241,6 @@ async def assign_and_store(
     if stored is None:
         raise HTTPException(
             status_code=409,
-            detail="simplified question changed while icons were picked; retry",
+            detail="decomposition changed while icons were picked; retry",
         )
-    return SimplifiedQuestion(**stored)
-
-
-def is_current(record: dict | None) -> bool:
-    """Whether a simplified record has icons of today's prompt."""
-    record = record or {}
-    return record.get("icons_ica") is not None and record.get("icons_version") == PROMPT_VERSION
+    return DecompositionRecord(**stored)

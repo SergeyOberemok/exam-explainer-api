@@ -40,7 +40,7 @@ async def ensure_indexes(db: AsyncDatabase) -> None:
         # One stored question per text: the import's duplicate check, made race-safe.
         # Not created while the bank holds the same question twice (logged below).
         ("examination", "text_hash", {"unique": True, "sparse": True}),
-        # One simplified record per question; makes the simplify upsert race-safe.
+        # One rephrase record per question; makes its upsert race-safe.
         ("examination_simplified", "question_id", {"unique": True}),
         # One objectives record per question; makes the tagging upsert race-safe.
         ("question_objectives", "question_id", {"unique": True}),

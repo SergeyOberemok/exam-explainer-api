@@ -6,8 +6,10 @@ description: Use when the user wants to add practice-exam questions to the game'
 # Ingest practice-exam questions
 
 One upload does everything for a new question: learning objectives, its place in the
-game's story, the game text (the question in plain words, set in the company), visual
-entities, icons, and a check that the game text still has the same right answer. Your
+game's story, its decomposition (with semantic parts and visual entities built from it),
+icons, the flow shown before answering and the resolution shown after, a rephrase (the
+question in plain words, set in the company, written without the key) and a check that
+the rephrase still has the same right answer. Your
 job is to run it, read the report, and fix what the report names. Do not hand-write
 records for questions: if the pipeline cannot do something, the fix is a catalog or a
 prompt, so the next upload needs no hand work either.
@@ -75,9 +77,10 @@ model calls each, more when a gate asks for a repair). In the job: `succeeded`, 
 curl -s -X POST "http://127.0.0.1:8000/examination/pipeline/backfill"
 ```
 
-Starts a job for every stored question that lacks a step or has one written with an
-older prompt or catalog, and runs only those steps. Use it after a crash, after fixing
-a catalog, and after changing a prompt (bump that module's `PROMPT_VERSION`).
+Starts a job for every stored question that lacks a step or has one written from other
+inputs (another prompt, catalog, chapter or upstream result: each step stores a key of
+the messages it sent, so there is nothing to bump), and runs only those steps. Use it
+after a crash, after fixing a catalog, and after changing a prompt.
 `{"job_id": null, "total": 0}` means nothing is left. `?source=<file name>` limits it
 to one upload; `?limit=N` to a few questions for a trial.
 
@@ -91,21 +94,21 @@ Exit status 0 means done. Otherwise it names what is left:
 
 - **steps to run**: step 5.
 - **section without objectives / scenario no chapter claims**: steps 3 and 2.
-- **game texts the check found changed**: a model answering the game text without the
-  key picked a wrong answer, but the right one on the original. The game does not serve
-  these texts (it falls back to the original). Read them with `--show`, write each again
-  with `POST /questions/<id>/simplify?force=true` and check it with
+- **rephrases the check found changed**: a model answering the rephrase without the
+  key picked a wrong answer, but the right one on the original. The game does not offer
+  these rephrases (only the original). Read them with `--show`, write each again
+  with `POST /questions/<id>/rephrase?force=true` and check it with
   `POST /examination/<id>/check`. If the same kind of mistake repeats, fix the prompt in
-  `simplify.py` instead.
-- **current game texts that break a fidelity rule**: should be 0; anything listed means
-  a rule changed since the text was written. Bump `simplify.PROMPT_VERSION` and run step 5.
+  `rephrase.py` instead.
+- **current rephrases that break a fidelity rule**: should be 0; anything listed means
+  a gate changed since the text was written. Bump `rephrase.CODE_VERSION` and run step 5.
 - **pre-answer flows that may point at the correct answer**: the flow shown before
   answering shares clearly more words with the correct answer than with the others.
   Look at one with `uv run python scripts/run_pipeline.py <id> --stages flow --dry-run --mermaid`;
   redo it with `POST /examination/<id>/flow` (then `/resolve`), or, when it repeats,
-  tighten the flow prompt in `flow.py` and bump `decompose.FLOW_VERSION`.
+  tighten the flow prompt in `flow.py` (the next backfill redoes the flows).
 - **hard** (for information): the model missed the question in both wordings. Nothing
-  is wrong with the text; these are the bank's hardest questions.
+  is wrong with the rephrase; these are the bank's hardest questions.
 
 To look at or redo one question step by step, use
 `uv run python scripts/run_pipeline.py <id> --show --mermaid` (add `--dry-run` to write
@@ -118,4 +121,4 @@ show how the new questions spread over chapters, stages and objectives.
 
 How many questions were stored and how many were duplicates; how many have everything;
 what is left and whose decision it is (a new chapter or new objectives are theirs to
-approve); and how many game texts the check held back.
+approve); and how many rephrases the check held back.

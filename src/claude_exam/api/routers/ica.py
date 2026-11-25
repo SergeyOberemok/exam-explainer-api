@@ -11,9 +11,11 @@ from claude_exam.api.schemas import (
     IcaAssistant,
     IcaChatRequest,
     IcaChatResponse,
+    SimplifiedPrompt,
 )
 from claude_exam.api.security import require_api_key
-from claude_exam.api.simplify import simplify_item
+from claude_exam.api.rephrase import rephrase_item
+from claude_exam.html_clean import clean_plain
 from claude_exam.paths import REPO_ROOT
 
 # Study/admin routes: they need the API key when one is configured.
@@ -78,10 +80,9 @@ async def chat(body: IcaChatRequest, ica: IcaClientDep) -> IcaChatResponse:
 @router.post("/explain", response_model_by_alias=True)
 async def explain(body: ExplainRequest, ica: IcaClientDep) -> ExplainResponse:
     """
-    Single-pass simplification pipeline:
-    Calls /chat-models/chat/completions directly on claude-haiku-5-5 with the
-    full Exam Explainer Agent persona baked into the system message, plus a JSON
-    output schema appended — one call, one structured JSON response.
+    Rephrase one item of the practice-exam file (`rephrase.rephrase_item`, one call,
+    written without the key) and return it in the item's shape; the feedback and the
+    explanation are the item's own (a rephrase has none).
     """
     items = _get_exam_items()
     item = items.get(body.question_id)
@@ -91,8 +92,13 @@ async def explain(body: ExplainRequest, ica: IcaClientDep) -> ExplainResponse:
             detail=f"Question id {body.question_id!r} not found in practice exam file",
         )
 
-    simplified_prompt, meta = await simplify_item(
-        ica, item, body.model_id, body.max_tokens
+    rephrase, meta = await rephrase_item(ica, item, body.model_id, body.max_tokens)
+    original = item.get("prompt") or {}
+    simplified_prompt = SimplifiedPrompt(
+        question=rephrase.question,
+        answers=rephrase.answers,
+        feedbacks=[clean_plain(f) for f in original.get("feedbacks", [])],
+        explanation=clean_plain(original.get("explanation", "")),
     )
 
     return ExplainResponse(

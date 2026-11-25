@@ -1,45 +1,41 @@
-"""Visual entity extraction for simplified questions (second ICA call).
+"""The visual entities of a question: who and what a diagram draws (no ICA call).
 
-The prompt below is the machine-readable version of `docs/extracting_actor_entities.md`:
-same selection rules, but the reply is one JSON object holding an entity catalog plus
-references (entity ids) for the question text and for each answer, so the app can map
-text to diagram elements by structure.
+They are taken from the question's decomposition (`decompose.py`), which was written
+without the answer key, so they may be shown before the player answers: its drawable
+entities become the catalog, the question names all of them and each answer lists the
+entities its answer option relies on first. `parse_entities` then grounds them in the
+original wording, adds the stable actors, drops generic names and applies the limits.
+Each entity keeps its decomposition id as `ref` (what a part's and a flow node's
+`entity_ids` match). They are stored with the decomposition, so writing a new one
+replaces them; `icons.py` adds a picture to each.
 """
 
 import logging
 import re
-from datetime import datetime, timezone
 
 from fastapi import HTTPException
-from pymongo import ReturnDocument
-from pymongo.asynchronous.collection import AsyncCollection
 
-from claude_exam.api.ica import IcaClient
-from claude_exam.api.ica_json import ask_json
-from claude_exam.api.scenario_catalog import stem_of
-from claude_exam.api.decompose import VISUAL_KIND, fingerprint
-from claude_exam.api.step_key import step_key
+from claude_exam.api.question_view import KeyFreeQuestion
 from claude_exam.api.schemas import (
-    IcaMeta,
-    IcaModelId,
     AnswerEntities,
     PromptEntities,
     QuestionDecomposition,
-    SimplifiedPrompt,
-    SimplifiedQuestion,
     VisualEntity,
 )
-from claude_exam.html_clean import clean_plain, clean_question
 
 logger = logging.getLogger(__name__)
 
-# Stored with each record (`entities_version`); the job no longer decides by it: a step is
-# redone when its input key changes (`step_key.py`), so a prompt edit needs no bump.
-# To redo it without a prompt change, bump `CODE_VERSION`. Goes in iteration 1b.
-PROMPT_VERSION = "2"
-# Bump when `parse_entities` or `derive_entities` change what is stored from the same
-# reply or decomposition (the prompt itself is in the input key, `step_key.py`).
-CODE_VERSION = "1"
+# Entity types a diagram draws, and the `VisualEntity.kind` each becomes. A `concept`
+# stays in the decomposition but is never drawn.
+VISUAL_KIND = {
+    "actor": "actor",
+    "system": "object",
+    "object": "object",
+    "knowledge_source": "object",
+    "artifact": "object",
+    "external_service": "object",
+}
+
 # A question is a short scenario; more than this means the model is listing nouns.
 # Beyond the limits the reply is trimmed (in order), not rejected.
 MAX_ENTITIES = 16
@@ -59,169 +55,6 @@ _STABLE_ACTORS = (
     ("Subagent", re.compile(r"\bsub-?agents?\b", re.I)),
     ("Main Agent", re.compile(r"\bmain agent\b", re.I)),
 )
-
-_SYSTEM_MESSAGE = """\
-You extract reusable visual entities from one multiple-choice exam question so an app \
-can draw them as diagram elements (icons, boxes, arrows). The exam is about Claude \
-Code, the Claude Agent SDK, the Claude API, MCP, prompt engineering, tool use and \
-agent design.
-
-SOURCES
-- ORIGINAL text is the primary source for what the question is about. The learner can \
-read its exact names (tools, parameters, settings, files) there, so the entities do \
-NOT repeat them one by one: they give the simplified version a basic, abstract picture \
-of who and what is involved.
-- SIMPLIFIED text is the plain-words retelling: use it for context and to find the \
-broad things the original only implies.
-- The two texts describe the same question and the same answers in the same order. \
-An entity found in either version of a question or answer belongs to that question or \
-answer, even if the other version leaves it out.
-- Entities come from the question and from ALL answer options, correct or not. The \
-feedback and explanation are context only; do not reference them.
-- The simplified text is set in a company and may name its people. A named person is \
-the role they have (a support lead is "Support Lead", kind "actor", with the first \
-name as an alias), and only when that role takes part in what the question is about. \
-The company itself, and "you" (the player), are never entities.
-
-WHAT TO EXTRACT
-Concrete things that can be shown as a recognizable diagram element, in three kinds:
-- "actor": performs or takes part in something (a person or role such as Customer or \
-Engineer, an AI agent, a model, a subagent, a coordinator).
-- "object": is processed, exchanged, accessed or represented (software, API, server, \
-database, SDK, MCP server, tool, file, setting or mode, document, session, repository, \
-business object, device).
-- "action": an operation that can be one workflow step (Escalate to Human, Review). \
-Use it sparingly, only for a step the question is really about.
-
-BROAD LEVEL
-Think of a simple diagram a beginner could read: a few boxes such as Customer, Order, \
-Refund, Agent, Human Reviewer, Database, Website. Entities live at that level.
-- Do NOT make an entity per tool, function, parameter, flag or setting name \
-(get_customer, lookup_order, process_refund, tool_choice, allowedTools). Fold each one \
-into the broad thing it works on or stands for: the customer tools -> "Customer", \
-lookup_order -> "Order", process_refund and a refund decision -> "Refund", \
-escalate_to_human -> "Human Reviewer". Put the exact name in "aliases" only if it is a \
-useful label in that place. Several tools of one area are ONE entity.
-- Keep a specific name as the entity name only when the name itself is what the \
-question tests: a product or platform (Claude Code, Claude Agent SDK, MCP), or a mode \
-or setting the options are chosen between (plan mode, acceptEdits).
-
-GROUPING
-- Merge synonyms and variants of the same thing into one entity (customer + customer \
-details -> "Customer"; order + order lookup data -> "Order").
-- Name = the shortest clear Title Case noun for the group (see BROAD LEVEL); keep the \
-original technical term only for products, modes and settings the question tests \
-(`acceptEdits`, plan mode, MCP). Put other wordings from the text in "aliases".
-- Do not make separate entities for attributes, versions or properties of one thing.
-- Reuse one name for the same thing everywhere in this reply. Use the stable names \
-"Claude Agent SDK", "Claude Code", "Claude API", "MCP Server", "Subagent", \
-"Main Agent" for those things instead of inventing variants - but ONLY where the \
-text actually refers to that thing. Tools that are reached over MCP are tools, not \
-an "MCP Server": add "MCP Server" only when a server (or the protocol itself) is \
-really mentioned in that text.
-- "aliases" are only other wordings of the SAME thing that appear in the original or \
-simplified text: never the name itself, never counts or numbers ("18 tools"), never a \
-different thing. A request, message, group or category is never an alias of a tool or \
-of what it works on (wrong: "Refund" with alias "refund requests"; wrong: "MCP" with \
-alias "backend systems").
-- Never make an entity for a generic group or word that cannot be drawn: "Tools", \
-"Tool Set", "Data", "System", "Information". Name the concrete things instead, or \
-leave the place empty.
-- An alias must be specific enough to point at this entity alone: never a single \
-generic word such as "refund", "policy" or "tool" (use the fuller phrase from the \
-text, e.g. "proposed refund decision").
-- Coverage check before you answer: every stable-name thing (Subagent, Main Agent, \
-MCP, ...) that the original or simplified text of the question or of an answer \
-mentions - including as "the subagent", "specialized subagents" or "MCP tools" - must \
-appear in that place's list. Re-read each answer once and add what you missed. When \
-the text says "MCP tools" or "Model Context Protocol", include an "MCP" entity.
-- When the text lists several categories of tools by role (for example shipping, \
-loyalty and subscription tools), fold them into the broad things they work on \
-(Shipment, Loyalty Account, Subscription) rather than one entity per tool; be \
-consistent: cover all categories or none.
-- A specific named instance of a stable-name thing (a subagent called \
-"test-gap-analyzer") is an alias of that stable name ("Subagent"), not a replacement \
-for it: keep the stable name as the entity name and reference it wherever the text \
-says "subagent" or uses the specific name.
-- Reference an entity from the question or from an answer only if its name or one of \
-its aliases appears in that text (original or simplified version). Do not attach an \
-entity to an answer because it is related to the topic.
-
-EXCLUDE
-Purely abstract ideas are never entities: confidence, accuracy, reasoning, \
-independence, verification, bias, threshold, reliability, decision quality, \
-performance metrics, cost, latency. Also leave out events, situations and facts \
-(a billing dispute, a failed audit, misrouting), message or conversation concepts \
-(context, history, a follow-up message) and generic groups of things already listed \
-individually ("MCP Tools" when each tool is named). Do not invent anything the text \
-does not support. Do not list every noun; keep a compact set (at most \
-{{MAX_ENTITIES}} entities, at most {{MAX_PER_ANSWER}} per answer).
-
-OUTPUT FORMAT - respond with ONLY a single valid JSON object and nothing else - no \
-markdown fences, no prose, no comments. Exactly this schema:
-
-{
-  "entities": [
-    {"id": "e1", "name": "<entity name>", "kind": "actor|object|action", \
-"aliases": ["<other wording>"]}
-  ],
-  "question_entities": ["<entity id>"],
-  {{ANSWERS_SCHEMA}}
-}
-
-Rules:
-- ids are "e1", "e2", ... unique within this reply.
-- "question_entities" lists the ids of entities mentioned in the ORIGINAL or the \
-SIMPLIFIED question.
-- "answers_entities" has exactly {{N}} lists, index-aligned with the answers (A is \
-index 0, B is 1, ...; original and simplified answers share the same order). Each list \
-holds the entities mentioned in the ORIGINAL or the SIMPLIFIED version of that answer. \
-Use [] for an answer with no entity.
-- Every id used in a reference must exist in "entities", and every entity must be \
-referenced at least once.
-- Output valid JSON only.\
-"""
-
-
-def _build_system_message(n_answers: int) -> str:
-    letters = [chr(65 + i) for i in range(n_answers)]
-    entries = ",\n    ".join(f'["<ids for answer {l}>"]' for l in letters)
-    return (
-        _SYSTEM_MESSAGE.replace(
-            "{{ANSWERS_SCHEMA}}", f'"answers_entities": [\n    {entries}\n  ]'
-        )
-        .replace("{{N}}", str(n_answers))
-        .replace("{{MAX_ENTITIES}}", str(MAX_ENTITIES))
-        .replace("{{MAX_PER_ANSWER}}", str(MAX_PER_ANSWER))
-    )
-
-
-def _build_user_message(item: dict, simplified: SimplifiedPrompt) -> str:
-    """Original and simplified texts side by side, labelled by source."""
-    prompt = item.get("prompt") or {}
-    original_answers = "\n".join(
-        f"  {chr(65 + i)}. {clean_plain(a)}"
-        for i, a in enumerate(prompt.get("answers", []))
-    )
-    simplified_answers = "\n".join(
-        f"  {chr(65 + i)}. {a}" for i, a in enumerate(simplified.answers)
-    )
-    return (
-        f"Section: {item.get('section', '')}\n\n"
-        f"ORIGINAL QUESTION:\n{_question_text(item)}\n\n"
-        f"ORIGINAL ANSWERS:\n{original_answers}\n\n"
-        f"SIMPLIFIED QUESTION:\n{simplified.question}\n\n"
-        f"SIMPLIFIED ANSWERS:\n{simplified_answers}"
-    )
-
-
-def _question_text(item: dict) -> str:
-    """The original question as the model reads it: without the scenario paragraph when
-    the question has a chapter. The paragraph is the same in every question of a
-    chapter, so it would give them all the same entities; an unknown paragraph stays,
-    because it is then the only context."""
-    question = clean_question((item.get("prompt") or {}).get("question", ""))
-    return stem_of({"prompt": {"question": question}}) or question
 
 
 def _mentions(entity: VisualEntity, text: str) -> bool:
@@ -354,75 +187,15 @@ def parse_entities(
     return PromptEntities(question=question_refs, answers=answers)
 
 
-def _source_texts(item: dict, simplified: SimplifiedPrompt) -> tuple[str, list[str]]:
-    """Original and simplified text of the question and of each answer, joined, for
-    the grounding check in `parse_entities`."""
-    prompt = item.get("prompt") or {}
-    originals = [clean_plain(a) for a in prompt.get("answers", [])]
-    return (
-        f"{clean_question(prompt.get('question', ''))}\n{simplified.question}",
-        [
-            f"{originals[i] if i < len(originals) else ''}\n{a}"
-            for i, a in enumerate(simplified.answers)
-        ],
-    )
+def _source_texts(question: KeyFreeQuestion) -> tuple[str, list[str]]:
+    """The question's text and each answer's, for the grounding check in
+    `parse_entities` (an entity is kept only where its name or an alias occurs)."""
+    return question.question, list(question.answers)
 
 
-async def extract_entities(
-    ica: IcaClient,
-    item: dict,
-    simplified: SimplifiedPrompt,
-    model_id: IcaModelId,
-    max_tokens: int | None = None,
-) -> tuple[PromptEntities, IcaMeta]:
-    """
-    Ask the ICA chat model for the visual entities of one question. `item` is the
-    original examination document, `simplified` its simplified prompt (whose text the
-    resolved entities are index-aligned with its answers).
-    """
-    n_answers = len(simplified.answers)
-    system, user = messages(item, simplified)
-    parsed, meta = await ask_json(
-        ica, model_id, user, system=system, what="entities", max_tokens=max_tokens
-    )
-    return parse_entities(parsed, n_answers, _source_texts(item, simplified)), meta
-
-
-def messages(item: dict, simplified: SimplifiedPrompt) -> tuple[str, str]:
-    """The (system, user) messages that extract the entities of a game text."""
-    return (
-        _build_system_message(len(simplified.answers)),
-        _build_user_message(item, simplified),
-    )
-
-
-def input_key(
-    item: dict,
-    simplified: SimplifiedPrompt,
-    decomposition: QuestionDecomposition | None = None,
-) -> str:
-    """The input key of the entities of a game text (`step_key.py`): of the extraction
-    messages, or, with `decomposition`, of what they are derived from (no call)."""
-    if decomposition is not None:
-        return step_key(
-            CODE_VERSION, "derived", fingerprint(decomposition), _build_user_message(item, simplified)
-        )
-    return step_key(CODE_VERSION, *messages(item, simplified))
-
-
-def derive_entities(
-    decomposition: QuestionDecomposition,
-    item: dict,
-    simplified: SimplifiedPrompt,
-) -> PromptEntities:
-    """
-    The visual entities of a question taken from its decomposition (no ICA call): its
-    drawable entities (`decompose.VISUAL_KIND`; a `concept` is never drawn) become the
-    catalog, each answer lists the entities its answer option relies on first, and
-    `parse_entities` then applies the same rules as to an extracted reply (grounding in
-    the original and simplified text, stable actors, no generic names, limits). Each
-    entity keeps its decomposition id as `ref`.
-    """
+def derive_entities(decomposition: QuestionDecomposition, question: KeyFreeQuestion) -> PromptEntities:
+    """The visual entities of a question taken from its decomposition (see the module
+    docstring). `question` is its key-free view: the answers count and ground them."""
     catalog = [
         {
             "id": e.id,
@@ -436,109 +209,10 @@ def derive_entities(
     ]
     ids = [e["id"] for e in catalog]
     options = {o.index: o.entity_ids for o in decomposition.answer_options}
+    count = len(question.answers)
     answers = [
         list(dict.fromkeys([*(i for i in options.get(n, []) if i in ids), *ids]))
-        for n in range(len(simplified.answers))
+        for n in range(count)
     ]
     reply = {"entities": catalog, "question_entities": ids, "answers_entities": answers}
-    return parse_entities(reply, len(simplified.answers), _source_texts(item, simplified))
-
-
-async def _store_entities(
-    simplified: AsyncCollection,
-    existing: dict,
-    entities: PromptEntities,
-    meta: IcaMeta,
-    source: str,
-    key: str,
-) -> SimplifiedQuestion:
-    # Conditional on the record not having been rewritten meanwhile: the references
-    # index into the text that was sent, so they must not land on a newer text.
-    stored = await simplified.find_one_and_update(
-        {"question_id": existing["question_id"], "updated_at": existing["updated_at"]},
-        {
-            "$set": {
-                "entities": entities.model_dump(),
-                "entities_ica": meta.model_dump(),
-                "entities_version": PROMPT_VERSION,
-                "entities_source": source,
-                "entities_input_key": key,
-                # New entities have no icons yet; `icons.assign_and_store` adds them.
-                "icons_ica": None,
-                "icons_version": None,
-                "icons_input_key": None,
-                "updated_at": datetime.now(timezone.utc),
-            }
-        },
-        return_document=ReturnDocument.AFTER,
-    )
-    if stored is None:
-        raise HTTPException(
-            status_code=409,
-            detail="simplified question changed while entities were extracted; retry",
-        )
-    return SimplifiedQuestion(**stored)
-
-
-async def _existing(simplified: AsyncCollection, doc: dict) -> dict:
-    existing = await simplified.find_one({"question_id": str(doc["_id"])})
-    if existing is None:
-        raise HTTPException(status_code=404, detail="simplified question not found")
-    return existing
-
-
-async def enrich_and_store(
-    ica: IcaClient,
-    simplified: AsyncCollection,
-    doc: dict,
-    model_id: IcaModelId,
-    max_tokens: int | None = None,
-) -> SimplifiedQuestion:
-    """
-    Backfill: extract entities for an already simplified question and store only
-    `entities` / `entities_ica` (text, `ica` and `created_at` stay as they are); the
-    icons of the replaced entities go with them (`icons_ica` is cleared).
-    Errors propagate, unlike inside `simplify_and_store`.
-    """
-    existing = await _existing(simplified, doc)
-    prompt = SimplifiedPrompt(**existing["prompt"])
-    entities, meta = await extract_entities(ica, doc, prompt, model_id, max_tokens)
-    return await _store_entities(
-        simplified, existing, entities, meta, "ica", input_key(doc, prompt)
-    )
-
-
-async def derive_and_store(
-    simplified: AsyncCollection,
-    doc: dict,
-    decomposition: QuestionDecomposition,
-    model_id: IcaModelId,
-) -> SimplifiedQuestion:
-    """Like `enrich_and_store`, with the entities derived from the question's
-    decomposition (`derive_entities`, no ICA call). `entities_ica` then records the
-    model only, with `finish_reason` "derived" and no tokens."""
-    existing = await _existing(simplified, doc)
-    prompt = SimplifiedPrompt(**existing["prompt"])
-    entities = derive_entities(decomposition, doc, prompt)
-    meta = IcaMeta(model_id=model_id, finish_reason="derived", total_tokens=0)
-    return await _store_entities(
-        simplified,
-        existing,
-        entities,
-        meta,
-        "decomposition",
-        input_key(doc, prompt, decomposition),
-    )
-
-
-def is_current(record: dict | None, decomposed: bool = False) -> bool:
-    """Whether a simplified record has entities of today's extraction, and from the
-    right source: derived when the question has a current decomposition (`decomposed`),
-    else extracted."""
-    record = record or {}
-    source = record.get("entities_source") or "ica"
-    return (
-        record.get("entities_ica") is not None
-        and record.get("entities_version") == PROMPT_VERSION
-        and source == ("decomposition" if decomposed else "ica")
-    )
+    return parse_entities(reply, count, _source_texts(question))

@@ -24,13 +24,11 @@ from claude_exam.api.game.domain import answers_of, correct_indices
 from claude_exam.api.ica import IcaClient
 from claude_exam.api.ica_json import ask_json
 from claude_exam.api.scenario_catalog import (
-    CHAPTER_VERSIONS,
     COMPANY,
     COMPANY_INTRO,
     SCENARIOS,
     STAGES,
     ScenarioDef,
-    chapter_version,
     known_scenario,
     known_stage,
     scenario_of,
@@ -44,10 +42,6 @@ from claude_exam.api.step_key import key_or_none, step_key
 
 logger = logging.getLogger(__name__)
 
-# Stored with each record (read by `scripts/story_coverage.py`); the job no longer decides by it: a step is
-# redone when its input key changes (`step_key.py`), so a prompt edit needs no bump.
-# To redo it without a prompt change, bump `CODE_VERSION`. Goes in iteration 1b.
-PROMPT_VERSION = "2"
 # Bump when `parse_story` / `record_fields` change what is stored from the same reply
 # (the prompt itself is in the input key, `step_key.py`).
 CODE_VERSION = "1"
@@ -246,8 +240,6 @@ def record_fields(doc: dict, fields: dict, origin: str, order: int) -> dict:
         "scenario_origin": "text" if scenario else "model",
         "order": order,
         "origin": origin,
-        "catalog_version": chapter_version(key),
-        "prompt_version": PROMPT_VERSION,
     }
 
 
@@ -287,21 +279,6 @@ async def write_story(
         pick_chapter=needs_chapter_pick(doc),
     )
     return fields, meta
-
-
-def current_query(question_id: str) -> dict:
-    """Matches the question's record if a backfill has nothing to do for it: it is a
-    seed record, or the model wrote it with today's prompt for a chapter as it is today."""
-    return {
-        "question_id": question_id,
-        "$or": [
-            {"origin": "seed"},
-            {
-                "catalog_version": {"$in": sorted(CHAPTER_VERSIONS)},
-                "prompt_version": PROMPT_VERSION,
-            },
-        ],
-    }
 
 
 def upsert_update(fields: dict, ica: IcaMeta | None, now: datetime) -> dict:

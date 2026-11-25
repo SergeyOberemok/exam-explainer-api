@@ -21,12 +21,12 @@ from pymongo import MongoClient
 from claude_exam.api.game.domain import is_playable
 from claude_exam.api.objective_catalog import (
     BY_KEY,
-    CATALOG_VERSION,
     OBJECTIVES,
     for_section,
     normalize_section,
 )
-from claude_exam.api.objectives import PROMPT_VERSION
+from claude_exam.api import pipeline_keys
+from claude_exam.api.pipeline_keys import Records
 
 
 def database_url(args: list[str]) -> str:
@@ -65,10 +65,7 @@ def main() -> int:
         if not keys:
             untagged.append(question_id)
             continue
-        if (record.get("catalog_version"), record.get("prompt_version")) != (
-            CATALOG_VERSION,
-            PROMPT_VERSION,
-        ):
+        if not pipeline_keys.is_current("objectives", doc, Records(objectives=record)):
             outdated.append(question_id)
         main_by_key[keys[0]][record.get("difficulty")] += 1
         elsewhere += BY_KEY[keys[0]].section != normalize_section(doc.get("section"))
@@ -78,7 +75,7 @@ def main() -> int:
             if item and item.get("confused_with") in BY_KEY:
                 confused[(keys[0], item["confused_with"])] += 1
 
-    print(f"Catalog {CATALOG_VERSION}, prompt {PROMPT_VERSION}: {len(OBJECTIVES)} objectives, "
+    print(f"{len(OBJECTIVES)} objectives, "
           f"{len(questions)} playable questions, {len(questions) - len(untagged)} tagged\n")
     section = None
     thin: list[str] = []

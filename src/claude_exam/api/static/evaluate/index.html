@@ -348,18 +348,18 @@ function stepsView(steps, planned) {
   return table(["step", "status", "tokens", "s", "detail / warnings"], rows);
 }
 
-function gameTextView(p) {
-  return h("div", {},
-    h("p", {}, h("strong", {}, p.question)),
-    p.parts?.length
-      ? table(["role", "text", "entities"], p.parts.map((x) => [chip(x.role), x.text, x.entity_ids.join(", ")]))
-      : empty("no semantic parts (written without a decomposition)"));
+// Parts are built in code from the decomposition (no model call), the last one is the ask.
+function partsView(parts) {
+  return table(["role", "text", "entities"], parts.map((x) => [chip(x.role), x.text, x.entity_ids.join(", ")]));
 }
 
-function answersView(p) {
+// The rephrase is written without the key; its answers stay in the original's order.
+function rephraseView(p) {
   const orig = current.original.answers;
-  return table(["", "original", "game text", "feedback"], p.answers.map((a, i) => [
-    h("strong", {}, LETTER(i), orig[i]?.correct ? " ✓" : ""), orig[i]?.text ?? "", a, p.feedbacks?.[i] ?? ""]));
+  return h("div", {},
+    h("p", {}, h("strong", {}, p.question)),
+    table(["", "original", "rephrase"], p.answers.map((a, i) => [
+      h("strong", {}, LETTER(i), orig[i]?.correct ? " ✓" : ""), orig[i]?.text ?? "", a])));
 }
 
 function entitiesView(e) {
@@ -445,21 +445,21 @@ function resolutionView(r, source) {
 
 function checkView(c) {
   return h("div", { class: "kv" }, "verdict", chip(c.verdict, c.verdict === "same" ? "ok" : c.verdict === "changed" ? "bad" : "warn"),
-    "picked", c.picked ?? "—", "picked on original", c.picked_original ?? "—", "prompt version", c.prompt_version ?? "");
+    "picked", c.picked ?? "—", "picked on original", c.picked_original ?? "—", "input key", c.input_key ?? "");
 }
 
 function renderResults(r, source, steps, planned) {
   const m = r.mermaid || {};
   $("results").replaceChildren(
     panel("steps", "Steps", source, steps.length || planned ? steps : null, (s) => stepsView(s, planned)),
-    panel("text", "Game text", source, r.prompt, gameTextView),
-    panel("answers", "Answers", source, r.prompt, answersView),
+    panel("parts", "Parts", source, r.parts?.length ? r.parts : null, partsView),
     panel("entities", "Actors / entities", source, r.entities, entitiesView),
     panel("icons", "Icons", source, r.entities, iconsView),
     panel("decomposition", "Decomposition", source, r.decomposition, decompositionView),
     panel("flow", "Flow (before answering)", source, r.flow, (f) => flowView(f, m.flow)),
     panel("resolution", "Resolution", source, r.resolution, (x) => resolutionView(x, m.resolution)),
-    panel("check", "Check", source, r.check, checkView),
+    panel("rephrase", "Rephrase", source, r.rephrase, rephraseView),
+    panel("check", "Check of the rephrase", source, r.check, checkView),
     h("details", { class: "panel" }, h("summary", {}, "Raw result"), h("div", { class: "body" }, jsonBlock("everything", r))),
   );
 }

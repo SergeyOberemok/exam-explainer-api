@@ -7,10 +7,10 @@ import copy
 import pytest
 from fastapi import HTTPException
 from test_jobs import (
-    SIMPLE,
     FakeMongo,
     ScriptedIca,
     _edge,
+    _fact,
     _node,
     client_for,
     decomposition_reply,
@@ -22,9 +22,8 @@ from test_jobs import (
     stored,
 )
 
-from claude_exam.api import batch, ica_json
-from claude_exam.api.decompose import PROMPT_VERSION as DECOMPOSE_VERSION
-from claude_exam.api.decompose import decomposition_errors, normalize, scenario_view
+from claude_exam.api import batch, decompose, ica_json
+from claude_exam.api.decompose import MAX_PARTS, decomposition_errors, normalize, parts_from, scenario_view
 from claude_exam.api.entities import derive_entities
 from claude_exam.api.flow import (
     flow_errors,
@@ -39,9 +38,9 @@ from claude_exam.api.ica_json import ask_json, strict_schema
 from claude_exam.api.schemas import (
     DecisionFlow,
     QuestionDecomposition,
-    SimplifiedPrompt,
+    Rephrase,
 )
-from claude_exam.api.simplify import joined, parts_errors, simplify_item
+from claude_exam.api.question_view import key_free
 
 pytestmark = pytest.mark.anyio
 MODEL = "claude-haiku-5-5"
@@ -289,7 +288,7 @@ def test_strict_schema_closes_every_object_and_requires_every_field():
     entity = schema["$defs"]["DecompEntity"]
     assert entity["additionalProperties"] is False
     assert set(entity["required"]) == set(entity["properties"])
-    assert "default" not in str(strict_schema(SimplifiedPrompt))
+    assert "default" not in str(strict_schema(Rephrase))
 
 
 async def test_ask_json_sends_the_schema_and_falls_back_when_it_is_refused():
@@ -317,33 +316,27 @@ async def test_ask_json_sends_the_schema_and_falls_back_when_it_is_refused():
 # --- semantic parts and derived entities ------------------------------------------------
 
 
-def parts_reply(*parts):
-    base = {k: v for k, v in SIMPLE.items() if k != "question"}
-    return {**base, "parts": [{"role": r, "text": t, "entity_ids": ids} for r, t, ids in parts]}
-
-
-def test_parts_need_one_final_ask_and_known_entities():
-    d = QuestionDecomposition.model_validate(decomposition_reply())
-    good = parts_reply(("problem", "Edits land unreviewed.", ["e1"]), ("ask", "Which mode?", []))
-    assert parts_errors(good, d) == []
-    assert joined(good)["question"] == "Edits land unreviewed. Which mode?"
-    late = parts_reply(("ask", "Which mode?", []), ("goal", "Review first.", ["e7"]))
-    errors = " | ".join(parts_errors(late, d))
-    assert "last one" in errors and "not listed: e7" in errors
-    assert parts_errors({"parts": []}, d)
-
-
-async def test_simplify_with_a_decomposition_writes_parts_and_repairs_bad_ones():
+def test_parts_are_built_in_code_from_what_may_be_shown_before_answering():
     q = question()
     d = QuestionDecomposition.model_validate(decomposition_reply())
-    text = "Which mode, plan mode or acceptEdits mode, reads but never edits?"
-    no_ask = reply(parts_reply(("problem", text, [])))
-    good = reply(parts_reply(("context", "You review agent work.", ["e1"]), ("ask", text, [])))
-    ica = ScriptedIca(simplify=[no_ask, good])
-    prompt, _meta = await simplify_item(ica, q, MODEL, decomposition=d)
-    assert ica.calls == ["simplify", "simplify"]
-    assert [p.role for p in prompt.parts] == ["context", "ask"]
-    assert prompt.question == f"You review agent work. {text}"
+    parts = parts_from(d, key_free(q))
+    assert [p.role for p in parts] == ["context", "current_state", "problem", "ask"]
+    assert parts[0].text == "A team works with an agent."
+    # The ask is the question's own, word for word, and it comes last.
+    assert parts[-1].text == "Which mode?"
+
+
+def test_parts_name_no_answer_only_entity_and_keep_the_ask_when_cut():
+    q = question()
+    d = decomposition_reply()
+    d["entities"].append(
+        {"id": "e3", "name": "plan mode", "type": "object", "aliases": [], "description": "", "source_status": "inferred", "evidence": ""}
+    )
+    d["problem"]["symptoms"] = [_fact(f"Symptom {i} with plan mode.") for i in range(9)]
+    parts = parts_from(QuestionDecomposition.model_validate(d), key_free(q))
+    assert len(parts) == MAX_PARTS and parts[-1].role == "ask"
+    # "plan mode" is what an answer proposes: no part points at it.
+    assert all("e3" not in p.entity_ids for p in parts)
 
 
 def test_derived_entities_keep_refs_drop_concepts_and_follow_the_answer_options():
@@ -355,13 +348,7 @@ def test_derived_entities_keep_refs_drop_concepts_and_follow_the_answer_options(
          "source_status": "inferred", "evidence": ""}
     )
     d["answer_options"][1]["entity_ids"] = ["e3"]
-    prompt = SimplifiedPrompt(
-        question="Your review agent posts findings. Which design routes such cases?",
-        answers=[a for a in q["prompt"]["answers"]],
-        feedbacks=["a", "b", "c", "d"],
-        explanation="x",
-    )
-    entities = derive_entities(QuestionDecomposition.model_validate(d), q, prompt)
+    entities = derive_entities(QuestionDecomposition.model_validate(d), key_free(q))
     assert [(e.name, e.ref) for e in entities.question] == [("Review Agent", "e1")]
     assert [e.name for e in entities.answers[1].entities] == ["Human Reviewer"]
     # The concept ("Ambiguity") is never drawn, and answers only get what they mention.
@@ -376,7 +363,7 @@ async def test_decompose_job_stores_flow_and_resolution_and_resumes():
     q = review_question()
     mongo, ica = FakeMongo([q]), ScriptedIca(flow=[HTTPException(status_code=400, detail="x")])
     job = await run_job(mongo, ica, [q["_id"]], "decompose")
-    assert ica.calls == ["decompose", "flow"] and job.stages_failed == {"flow": 1}
+    assert ica.calls == ["decompose", "icons", "flow"] and job.stages_failed == {"flow": 1}
     db = mongo.get_default_database()
     record = await db["question_decomposition"].find_one({"question_id": str(q["_id"])})
     assert record["semantic"]["question_intent"]["question_task"] and record["flow"] is None
@@ -397,48 +384,39 @@ async def test_decompose_job_stores_flow_and_resolution_and_resumes():
 
     class Spy(ScriptedIca):
         async def chat_model(self, model_id, prompt, system=None, **kwargs):
-            seen.setdefault("decompose" if "decomposition engine" in (system or "") else "flow" if "draw the flow" in (system or "") else "resolve", prompt)
+            system = system or ""
+            kind = "decompose" if "decomposition engine" in system else "flow" if "draw the flow" in system else "icons" if "icon catalog" in system else "resolve"
+            seen.setdefault(kind, prompt)
             return await super().chat_model(model_id, prompt, system=system, **kwargs)
 
     await run_job(FakeMongo([q]), Spy(), [q["_id"]], "decompose")
-    assert "[CORRECT]" not in seen["decompose"] + seen["flow"] and "Correct. b" not in seen["flow"]
+    pre_answer = seen["decompose"] + seen["flow"] + seen["icons"]
+    assert "[CORRECT]" not in pre_answer and "Correct. b" not in pre_answer
     assert "[CORRECT]" in seen["resolve"]
 
 
-async def test_a_new_decomposition_redoes_the_parts_and_clears_the_flow():
+async def test_a_new_decomposition_replaces_its_parts_and_clears_what_was_built_on_it(monkeypatch):
     q = question()
     mongo, ica = FakeMongo([q]), ScriptedIca()
     await run_job(mongo, ica, [q["_id"]], "full")
-    record = await stored(mongo, q)
-    assert record["decomposition_version"].startswith(f"{DECOMPOSE_VERSION}:") and record["prompt"]["parts"]
-    assert record["entities_source"] == "decomposition"
-
     db = mongo.get_default_database()
-    await db["question_decomposition"].update_one(
-        {"question_id": str(q["_id"])}, {"$set": {"semantic_version": "old"}}
-    )
-    # The same decomposition again changes nothing built on it...
-    ica.calls.clear()
-    await run_job(mongo, ica, [q["_id"]], "full", only_missing=True)
-    assert [c for c in ica.calls if c != "story"] == ["decompose", "flow", "resolve"]
+    record = await db["question_decomposition"].find_one({"question_id": str(q["_id"])})
+    assert record["parts"] and record["icons_ica"] and record["flow"] and record["resolution"]
 
-    # ...another one redoes the parts.
-    await db["question_decomposition"].update_one(
-        {"question_id": str(q["_id"])}, {"$set": {"semantic_version": "old"}}
-    )
+    # The decomposition prompt changed (nothing bumped): it is written again, with its
+    # parts and entities, and its rewrite clears the icons, flow and resolution. The
+    # rephrase does not read it, so it and its check are kept.
+    monkeypatch.setattr(decompose, "_SYSTEM_MESSAGE", decompose._SYSTEM_MESSAGE + "\nNew rule.")
     other = decomposition_reply()
-    other["question_summary"] = "Another reading."
+    other["context"]["description"] = "Another reading."
     ica.queues["decompose"].append(reply(other))
     ica.calls.clear()
     await run_job(mongo, ica, [q["_id"]], "full", only_missing=True)
-    record = await stored(mongo, q)
-    # Same text back, so the check is kept; the entities point into the decomposition,
-    # so they are derived again (no call) and get new icons. (The story step, which
-    # keeps failing for this question, is left out.)
-    assert [c for c in ica.calls if c != "story"] == [
-        "decompose", "simplify", "icons", "flow", "resolve"
-    ]
-    assert record["check"] is not None and record["entities_source"] == "decomposition"
+    # (The story step, which keeps failing for this question, is left out.)
+    assert [c for c in ica.calls if c != "story"] == ["decompose", "icons", "flow", "resolve"]
+    record = await db["question_decomposition"].find_one({"question_id": str(q["_id"])})
+    assert record["parts"][0]["text"] == "Another reading."
+    assert (await stored(mongo, q))["check"] is not None
 
 
 def test_single_question_routes():
@@ -525,16 +503,20 @@ async def test_the_repair_note_shows_the_reply_as_the_code_repaired_it():
     assert '"keep": 1' in prompts[1] and '"cut"' not in prompts[1]
 
 
-async def test_resolve_is_outdated_with_its_flow_and_an_old_record_shape_still_reads():
+async def test_resolve_is_outdated_with_its_flow_and_an_old_record_shape_still_reads(monkeypatch):
     q = review_question()
     mongo, ica = FakeMongo([q]), ScriptedIca()
     await run_job(mongo, ica, [q["_id"]], "decompose")
     store = mongo.get_default_database()["question_decomposition"]
     record = store.docs[0]
-    assert record["fingerprint"].startswith(f"{DECOMPOSE_VERSION}:")
+    assert record["parts"] and record["input_key"]
     stores = batch.Stores(None, None, None, None, store)
     assert await batch.is_current("resolve", stores, q)
-    record["flow_version"] = "an older flow"
+    # A changed flow prompt outdates the flow, and so the resolution that continues it.
+    from claude_exam.api import flow
+
+    monkeypatch.setattr(flow, "_FLOW_SYSTEM", flow._FLOW_SYSTEM + "\nNew rule.")
+    assert not await batch.is_current("flow", stores, q)
     assert not await batch.is_current("resolve", stores, q)
 
     # A flow of an older shape (edges once said from/to) reads as none, not as a 500.

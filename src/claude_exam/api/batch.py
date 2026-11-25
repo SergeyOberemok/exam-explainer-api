@@ -7,19 +7,17 @@ from bson import ObjectId
 from fastapi import HTTPException
 from pymongo import AsyncMongoClient
 
-from claude_exam.api import check, decompose, entities, flow, icons, pipeline_keys, simplify
+from claude_exam.api import pipeline_keys
 from claude_exam.api.check import check_and_store
-from claude_exam.api.decompose import decompose_and_store, read_decomposition
-from claude_exam.api.entities import derive_and_store, enrich_and_store
+from claude_exam.api.decompose import decompose_and_store
 from claude_exam.api.flow import flow_and_store, resolve_and_store
 from claude_exam.api.game.domain import difficulty_of, story_of
 from claude_exam.api.ica import IcaClient
 from claude_exam.api.icons import assign_and_store
-from claude_exam.api.objectives import current_query, tag_and_store
+from claude_exam.api.objectives import tag_and_store
 from claude_exam.api.pipeline_keys import Records
 from claude_exam.api.schemas import IcaModelId, JobMode, JobStage
-from claude_exam.api.simplify import simplify_and_store
-from claude_exam.api.story import current_query as current_story_query
+from claude_exam.api.rephrase import rephrase_and_store
 from claude_exam.api.story import story_and_store
 
 logger = logging.getLogger(__name__)
@@ -35,47 +33,43 @@ STALE_JOB_SECONDS = 15 * 60
 # (`PIPELINE_CONCURRENCY` in the settings). The steps of one question stay in order.
 DEFAULT_CONCURRENCY = 3
 # The steps each job mode runs for a question, in order. In "full" the objectives come
-# first because the story step orders a question by its difficulty, the story before
-# the game text because that text is set in the question's chapter and stage, and the
-# decomposition before the game text because that text is written as its semantic parts
-# and the entities are derived from it. The flow and its resolution need only the
-# decomposition; the check comes last.
+# first because the story step orders a question by its difficulty. The decomposition
+# (with its parts and entities, built in code) comes before what is built on it: the
+# icons of its entities, the pre-answer flow and the resolution that continues it. The
+# rephrase is optional and comes last, set in the question's chapter and stage; the
+# check tests it.
 STAGES: dict[JobMode, tuple[JobStage, ...]] = {
     "full": (
         "objectives",
         "story",
         "decompose",
-        "simplify",
-        "entities",
         "icons",
         "flow",
         "resolve",
+        "rephrase",
         "check",
     ),
-    "simplify": ("simplify", "entities", "icons"),
-    "simplify_only": ("simplify",),
-    "entities": ("entities", "icons"),
+    "decompose": ("decompose", "icons", "flow", "resolve"),
     "icons": ("icons",),
-    "objectives": ("objectives",),
-    "story": ("story",),
-    "check": ("check",),
-    "decompose": ("decompose", "flow", "resolve"),
     "flow": ("flow", "resolve"),
     "resolve": ("resolve",),
+    "rephrase": ("rephrase", "check"),
+    "check": ("check",),
+    "objectives": ("objectives",),
+    "story": ("story",),
 }
 # A step that needs what another step of the same job stores: when that one fails (or
 # could not run), this one is not tried. Steps not listed here run whatever happened
-# before them, so a question without objectives still gets its game text.
+# before them, so a question without objectives still gets its decomposition.
 _NEEDS: dict[JobStage, JobStage] = {
-    "entities": "simplify",
-    "icons": "entities",
-    "check": "simplify",
+    "icons": "decompose",
     "flow": "decompose",
     "resolve": "flow",
+    "check": "rephrase",
 }
-# Counters kept from before "full" existed: questions whose earlier steps were stored
-# but whose entity / icon step failed.
-_LEGACY_COUNTER = {"entities": "entities_failed", "icons": "icons_failed"}
+# A counter kept from before "full" existed: questions whose earlier steps were stored
+# but whose icon step failed.
+_LEGACY_COUNTER = {"icons": "icons_failed"}
 
 
 class Stores(NamedTuple):
@@ -146,17 +140,6 @@ async def _story(stores: Stores, doc: dict) -> dict:
     return story_of(doc, record)
 
 
-async def _decomposition_record(stores: Stores, doc: dict) -> dict | None:
-    if stores.decomposition is None:
-        return None
-    return await stores.decomposition.find_one({"question_id": str(doc["_id"])})
-
-
-async def _decomposition(stores: Stores, doc: dict):
-    """The question's current decomposition, or None."""
-    return read_decomposition(await _decomposition_record(stores, doc), doc)
-
-
 async def load_records(stores: Stores, doc: dict) -> Records:
     """The question's stored records, as `pipeline_keys` reads them."""
     query = {"question_id": str(doc["_id"])}
@@ -179,75 +162,6 @@ async def is_current(stage: JobStage, stores: Stores, doc: dict) -> bool:
     return pipeline_keys.is_current(stage, doc, await load_records(stores, doc))
 
 
-async def adopt_input_keys(stores: Stores, doc: dict, dry_run: bool = False) -> list[JobStage]:
-    """Stamp today's input key on every result of `doc` that the version fields call
-    current but that has no matching key yet, so the first backfill after the keys
-    came does not redo the whole bank. Returns the steps stamped (or, with `dry_run`,
-    that would be). `updated_at` is left alone: the conditional writes compare it."""
-    stamped: list[JobStage] = []
-    # Stamped in memory as well, so a later step whose key needs an earlier one's
-    # (the resolution needs a current flow) is counted in a dry run too.
-    records = await load_records(stores, doc)
-    for stage in STAGES["full"]:
-        if pipeline_keys.is_current(stage, doc, records):
-            continue
-        if not await legacy_is_current(stage, stores, doc):
-            continue
-        key = pipeline_keys.expected_key(stage, doc, records)
-        if key is None:
-            continue
-        stamped.append(stage)
-        record_name, field = pipeline_keys.KEY_FIELD[stage]
-        record = getattr(records, record_name)
-        *parents, last = field.split(".")
-        target = record
-        for name in parents:
-            target = target.setdefault(name, {})
-        target[last] = key
-        if not dry_run:
-            collection = getattr(stores, record_name)
-            await collection.update_one(
-                {"question_id": str(doc["_id"])}, {"$set": {field: key}}
-            )
-    return stamped
-
-
-async def legacy_is_current(stage: JobStage, stores: Stores, doc: dict) -> bool:
-    """The check by the per-step version fields that the input keys replace. Only
-    `scripts/adopt_input_keys.py` uses it, to stamp keys on the records it calls
-    current; it goes with those fields."""
-    question_id = str(doc["_id"])
-    if stage == "objectives":
-        found = await stores.objectives.find_one(current_query(question_id), {"_id": 1})
-        return found is not None
-    if stage == "story":
-        found = await stores.story.find_one(current_story_query(question_id), {"_id": 1})
-        return found is not None
-    if stage in ("decompose", "flow", "resolve"):
-        record = await _decomposition_record(stores, doc)
-        if not decompose.is_current(record, doc):
-            return False
-        if stage == "decompose":
-            return True
-        # A resolution continues its flow: with an outdated flow it is outdated too.
-        if not flow.flow_is_current(record):
-            return False
-        return stage == "flow" or flow.resolution_is_current(record)
-    record = await stores.simplified.find_one({"question_id": question_id})
-    if record is None:
-        return False
-    found = await _decomposition(stores, doc)
-    decomposed = found is not None
-    if stage == "simplify":
-        version = decompose.fingerprint(found) if decomposed else None
-        return simplify.is_current(record, doc, await _story(stores, doc), version)
-    if stage == "entities":
-        return entities.is_current(record, decomposed)
-    if stage == "icons":
-        return icons.is_current(record)
-    return check.is_current(record)
-
-
 async def missing_stages(mode: JobMode, stores: Stores, doc: dict) -> list[JobStage]:
     """The steps of `mode` a question still needs."""
     return [s for s in STAGES[mode] if not await is_current(s, stores, doc)]
@@ -268,24 +182,6 @@ def _step(stage: JobStage, ica: IcaClient, stores: Stores, doc: dict, model_id: 
     async def decomposed():
         await decompose_and_store(ica, stores.decomposition, doc, model_id)
 
-    async def game_text():
-        await simplify_and_store(
-            ica,
-            stores.simplified,
-            doc,
-            model_id,
-            with_entities=False,
-            story=await _story(stores, doc),
-            decomposition=await _decomposition(stores, doc),
-        )
-
-    async def entities():
-        found = await _decomposition(stores, doc)
-        if found is not None:
-            await derive_and_store(stores.simplified, doc, found, model_id)
-        else:
-            await enrich_and_store(ica, stores.simplified, doc, model_id)
-
     async def drawn():
         await flow_and_store(ica, stores.decomposition, doc, model_id)
 
@@ -293,7 +189,12 @@ def _step(stage: JobStage, ica: IcaClient, stores: Stores, doc: dict, model_id: 
         await resolve_and_store(ica, stores.decomposition, doc, model_id)
 
     async def icons():
-        await assign_and_store(ica, stores.simplified, str(doc["_id"]), model_id)
+        await assign_and_store(ica, stores.decomposition, doc, model_id)
+
+    async def rephrased():
+        await rephrase_and_store(
+            ica, stores.simplified, doc, model_id, place=await _story(stores, doc)
+        )
 
     async def checked():
         await check_and_store(
@@ -304,9 +205,8 @@ def _step(stage: JobStage, ica: IcaClient, stores: Stores, doc: dict, model_id: 
         "objectives": objectives,
         "story": story,
         "decompose": decomposed,
-        "simplify": game_text,
-        "entities": entities,
         "icons": icons,
+        "rephrase": rephrased,
         "check": checked,
         "flow": drawn,
         "resolve": resolved,
@@ -392,16 +292,15 @@ async def run_simplification_job(
     job_id: ObjectId,
     question_ids: list[ObjectId],
     model_id: IcaModelId,
-    mode: JobMode = "simplify",
+    mode: JobMode = "full",
     only_missing: bool = False,
     concurrency: int = 1,
     stages: tuple[JobStage, ...] | None = None,
 ) -> None:
     """
     Process the given examination questions (see `JobMode` and `STAGES`), `concurrency`
-    of them at a time; the steps of one question run in order. Writing the game text
-    replaces any stored simplified record; the other steps each update only their own
-    fields or their own collection.
+    of them at a time; the steps of one question run in order. Each step updates only
+    its own fields or its own collection.
 
     With `only_missing`, a step is skipped for a question that has its result by the
     time the job reaches it (`is_current`), and a question whose every step was skipped

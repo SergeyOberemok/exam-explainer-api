@@ -4,15 +4,12 @@ import pytest
 from bson import ObjectId
 from fastapi import HTTPException
 
-from claude_exam.api.entities import (
-    _build_system_message,
-    _build_user_message,
-    enrich_and_store,
-    extract_entities,
-    parse_entities,
-)
-from claude_exam.api.schemas import PromptEntities, SimplifiedPrompt
-from claude_exam.api.simplify import simplify_and_store
+"""The visual entities: parsing a catalog reply (grounding, stable actors, limits) and
+deriving them from a decomposition, with no model call."""
+
+from claude_exam.api.entities import derive_entities, parse_entities
+from claude_exam.api.question_view import key_free
+from claude_exam.api.schemas import PromptEntities, QuestionDecomposition
 
 pytestmark = pytest.mark.anyio
 
@@ -39,12 +36,8 @@ DOC = {
     },
 }
 
-SIMPLIFIED = SimplifiedPrompt(
-    question="Which mode lets Claude Code read but not edit?",
-    answers=["acceptEdits mode", "plan mode"],
-    feedbacks=["Incorrect. It edits.", "Correct. It blocks edits."],
-    explanation="Plan mode blocks edits.",
-)
+# The key-free view of DOC: what the icon and entity steps read.
+VIEW = key_free(DOC)
 
 GOOD_ENTITIES = {
     "entities": [
@@ -61,14 +54,6 @@ GOOD_ICONS = {
     "question": "mode",
     "answers": ["write", "plan"],
 }
-
-GOOD_SIMPLIFIED = {
-    "question": SIMPLIFIED.question,
-    "answers": SIMPLIFIED.answers,
-    "feedbacks": SIMPLIFIED.feedbacks,
-    "explanation": SIMPLIFIED.explanation,
-}
-
 
 def names(entities):
     return [e.name for e in entities]
@@ -311,175 +296,35 @@ def test_parse_without_texts_skips_grounding():
     assert names(parse_entities(GOOD_ENTITIES, 2).answers[0].entities) == ["acceptEdits"]
 
 
-def test_system_message_demands_grounded_references():
-    system = _build_system_message(2)
-    assert "only if its name or one of its aliases appears" in system
-    assert "BROAD LEVEL" in system and "Do NOT make an entity per tool" in system
-    assert "refund requests" in system  # negative alias example
-    assert "Never make an entity for a generic group" in system
-    assert "never a single generic word" in system
-    assert "Coverage check" in system
+# --- derived from the decomposition -------------------------------------------------
 
 
-# --- prompts --------------------------------------------------------------------
+def _decomposition(**entities_by_id):
+    from test_jobs import decomposition_reply
+
+    d = decomposition_reply(2)
+    d["entities"] = [
+        {"id": i, "name": name, "type": kind, "aliases": [], "description": "", "source_status": "inferred", "evidence": ""}
+        for i, (name, kind) in entities_by_id.items()
+    ]
+    d["answer_options"][0]["entity_ids"] = ["e2"]
+    d["answer_options"][1]["entity_ids"] = ["e3"]
+    return QuestionDecomposition.model_validate(d)
 
 
-def test_system_message_has_exact_answer_count_and_no_placeholders():
-    system = _build_system_message(3)
-    assert "{{" not in system
-    assert "exactly 3 lists" in system
-    assert system.count("<ids for answer") == 3
-
-
-def test_user_message_labels_both_sources_and_cleans_html():
-    message = _build_user_message(DOC, SIMPLIFIED)
-    assert "ORIGINAL QUESTION:" in message and "SIMPLIFIED QUESTION:" in message
-    assert "<p>" not in message
-
-
-def test_user_message_puts_original_first_and_keeps_both_wordings():
-    simplified = SimplifiedPrompt(
-        question="Which setting stops edits?",
-        answers=["The mode that auto-approves edits", "The read-only planning mode"],
-        feedbacks=["", ""],
-        explanation="",
+def test_derived_entities_keep_their_ids_and_follow_the_answer_options():
+    d = _decomposition(
+        e1=("mode", "concept"), e2=("acceptEdits mode", "object"), e3=("plan mode", "object")
     )
-    message = _build_user_message(DOC, simplified)
-    original, _, simple = message.partition("SIMPLIFIED QUESTION:")
-    assert message.index("ORIGINAL QUESTION:") < message.index("SIMPLIFIED QUESTION:")
-    assert "ORIGINAL ANSWERS:\n  A. acceptEdits mode\n  B. plan mode" in original
-    assert "Which mode?" in original and "Which setting stops edits?" in simple
-    assert "  B. The read-only planning mode" in simple
-    assert "acceptEdits" not in simple
+    result = derive_entities(d, VIEW)
+    # A concept is never drawn; each answer lists what its option relies on.
+    assert [(e.name, e.ref) for e in result.answers[0].entities] == [("acceptEdits mode", "e2")]
+    assert [(e.name, e.ref) for e in result.answers[1].entities] == [("plan mode", "e3")]
+    # Grounded in the original question's words: "Which mode?" names neither.
+    assert result.question == []
 
 
-def test_system_message_names_original_as_primary_and_refs_either_version():
-    system = _build_system_message(2)
-    assert "ORIGINAL text is the primary source" in system
-    assert "ORIGINAL or the SIMPLIFIED question" in system
-
-
-# --- extract_entities -----------------------------------------------------------
-
-
-async def test_extract_entities_parses_fenced_reply_and_returns_meta():
-    ica = FakeIca(reply("```json\n" + json.dumps(GOOD_ENTITIES) + "\n```"))
-    entities, meta = await extract_entities(ica, DOC, SIMPLIFIED, "claude-haiku-5-5")
-    assert [names(a.entities) for a in entities.answers] == [["acceptEdits"], ["plan mode"]]
-    assert meta.total_tokens == 42 and meta.model_id == "claude-haiku-5-5"
-
-
-async def test_extract_entities_rejects_truncated_reply():
-    ica = FakeIca(reply(GOOD_ENTITIES, finish_reason="length"))
-    with pytest.raises(HTTPException) as exc:
-        await extract_entities(ica, DOC, SIMPLIFIED, "claude-haiku-5-5")
-    assert exc.value.status_code == 502
-
-
-async def test_extract_entities_rejects_non_json():
-    ica = FakeIca(reply("no entities here"))
-    with pytest.raises(HTTPException) as exc:
-        await extract_entities(ica, DOC, SIMPLIFIED, "claude-haiku-5-5")
-    assert exc.value.status_code == 502
-
-
-# --- simplify_and_store ---------------------------------------------------------
-
-
-async def test_simplify_and_store_saves_entities():
-    ica = FakeIca(reply(GOOD_SIMPLIFIED), reply(GOOD_ENTITIES), reply(GOOD_ICONS))
-    simplified = FakeCollection()
-    stored = await simplify_and_store(ica, simplified, DOC, "claude-haiku-5-5")
-    assert len(ica.calls) == 3  # simplify, entities, icons
-    assert names(stored.entities.question) == ["Claude Code"]
-    assert stored.entities_ica.total_tokens == 42
-    assert stored.entities.question[0].icon == "terminal" and stored.icons_ica is not None
-
-
-async def test_icon_failure_keeps_the_entities():
-    ica = FakeIca(reply(GOOD_SIMPLIFIED), reply(GOOD_ENTITIES), reply("garbage"))
-    stored = await simplify_and_store(ica, FakeCollection(), DOC, "claude-haiku-5-5")
-    assert names(stored.entities.question) == ["Claude Code"]
-    assert stored.entities.question[0].icon is None and stored.icons_ica is None
-
-
-async def test_entity_failure_is_non_fatal():
-    ica = FakeIca(reply(GOOD_SIMPLIFIED), reply("garbage"))
-    simplified = FakeCollection()
-    stored = await simplify_and_store(ica, simplified, DOC, "claude-haiku-5-5")
-    assert stored.prompt.question == SIMPLIFIED.question
-    assert stored.entities.question == [] and stored.entities_ica is None
-
-
-async def test_simplify_and_store_can_skip_entities():
-    ica = FakeIca(reply(GOOD_SIMPLIFIED))
-    stored = await simplify_and_store(
-        ica, FakeCollection(), DOC, "claude-haiku-5-5", with_entities=False
-    )
-    assert len(ica.calls) == 1 and stored.entities.question == []
-
-
-# --- enrich_and_store (backfill) -------------------------------------------------
-
-
-async def test_backfill_updates_only_entity_fields():
-    ica = FakeIca(reply(GOOD_SIMPLIFIED), reply("garbage"), reply(GOOD_ENTITIES))
-    simplified = FakeCollection()
-    first = await simplify_and_store(ica, simplified, DOC, "claude-haiku-5-5")
-    assert first.entities.question == []
-
-    enriched = await enrich_and_store(ica, simplified, DOC, "claude-haiku-5-5")
-    assert [names(a.entities) for a in enriched.entities.answers] == [["acceptEdits"], ["plan mode"]]
-    assert enriched.prompt == first.prompt
-    assert enriched.created_at == first.created_at
-    assert enriched.ica == first.ica
-
-
-async def test_resimplify_failure_keeps_entities_only_if_text_unchanged():
-    simplified = FakeCollection()
-    ica = FakeIca(reply(GOOD_SIMPLIFIED), reply(GOOD_ENTITIES))
-    await simplify_and_store(ica, simplified, DOC, "claude-haiku-5-5")
-
-    same = FakeIca(reply(GOOD_SIMPLIFIED), reply("garbage"))
-    kept = await simplify_and_store(same, simplified, DOC, "claude-haiku-5-5")
-    assert names(kept.entities.question) == ["Claude Code"] and kept.entities_ica is not None
-
-    changed = {**GOOD_SIMPLIFIED, "question": "A different retelling."}
-    other = FakeIca(reply(changed), reply("garbage"))
-    wiped = await simplify_and_store(other, simplified, DOC, "claude-haiku-5-5")
-    assert wiped.entities.question == [] and wiped.entities_ica is None
-
-
-async def test_entity_failure_of_any_kind_is_non_fatal():
-    ica = FakeIca(reply(GOOD_SIMPLIFIED), RuntimeError("network"))
-    stored = await simplify_and_store(ica, FakeCollection(), DOC, "claude-haiku-5-5")
-    assert stored.entities.question == []
-
-
-async def test_backfill_conflicts_when_record_changed_meanwhile():
-    simplified = FakeCollection()
-    await simplify_and_store(
-        FakeIca(reply(GOOD_SIMPLIFIED), reply("garbage")), simplified, DOC, "claude-haiku-5-5"
-    )
-
-    class Racing(FakeIca):
-        async def chat_model(self, *args, **kwargs):
-            simplified.docs[0]["updated_at"] = "rewritten"  # re-simplified meanwhile
-            return await super().chat_model(*args, **kwargs)
-
-    with pytest.raises(HTTPException) as exc:
-        await enrich_and_store(Racing(reply(GOOD_ENTITIES)), simplified, DOC, "claude-haiku-5-5")
-    assert exc.value.status_code == 409
-
-
-async def test_backfill_errors_propagate():
-    simplified = FakeCollection()
-    with pytest.raises(HTTPException) as exc:
-        await enrich_and_store(FakeIca(), simplified, DOC, "claude-haiku-5-5")
-    assert exc.value.status_code == 404  # not simplified yet
-
-    ica = FakeIca(reply(GOOD_SIMPLIFIED), reply(GOOD_ENTITIES), reply(GOOD_ICONS), reply("garbage"))
-    await simplify_and_store(ica, simplified, DOC, "claude-haiku-5-5")
-    with pytest.raises(HTTPException) as exc:
-        await enrich_and_store(ica, simplified, DOC, "claude-haiku-5-5")
-    assert exc.value.status_code == 502
+def test_derived_entities_need_no_game_text_and_read_no_key():
+    d = _decomposition(e2=("acceptEdits mode", "object"), e3=("plan mode", "object"))
+    assert len(derive_entities(d, VIEW).answers) == len(DOC["prompt"]["answers"])
+    assert not hasattr(VIEW, "correct_response") and not hasattr(VIEW, "feedbacks")

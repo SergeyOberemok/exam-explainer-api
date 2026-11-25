@@ -6,8 +6,9 @@ one question by hand.
 - Default (a real run): starts a job for that one question exactly as
   `POST /examination/pipeline/backfill` would (`batch.run_simplification_job`, same code
   path, visible under `GET /examination/jobs/{job_id}`), so it UPDATES the question's
-  records in the database: its simplified record, decomposition, flow, resolution,
-  objectives and story, as far as the chosen steps go. Without `--force` a step whose
+  records in the database: its objectives, story, decomposition (with its parts,
+  entities and icons), flow, resolution, rephrase and check, as far as the chosen
+  steps go. Without `--force` a step whose
   result is current is skipped (`only_missing`).
 - `--dry-run`: calls the steps' compute functions only, feeding each step's result to the
   next in memory, and writes NOTHING. A step that is not run uses what is stored
@@ -16,14 +17,14 @@ one question by hand.
 
 Usage:
   uv run python scripts/run_pipeline.py QUESTION_ID [DATABASE_URL]
-      [--stages decompose,simplify,flow] [--mode full] [--model claude-haiku-5-5]
+      [--stages decompose,icons,flow] [--mode full] [--model claude-haiku-5-5]
       [--force] [--dry-run] [--show] [--mermaid] [--out FILE]
 
   --stages    comma-separated steps, run in the given order (default: those of --mode)
   --mode      a job mode (`batch.STAGES`), default "full"
   --force     a real run redoes every chosen step, current or not
-  --show      print the question next to its game text (parts with their roles), the
-              entities with their icons, the decomposition and the resolution
+  --show      print the question, its decomposition, parts (with their roles), entities
+              with their icons, the resolution and the rephrase
   --mermaid   print the flows as Mermaid `flowchart TD`, to paste into any Mermaid viewer
   --out FILE  write everything as JSON
 
@@ -179,15 +180,16 @@ def show(doc: dict, result: Result) -> None:
         for a in d.ambiguities_and_unknowns:
             print(f"  open: {a}")
 
-    if result.prompt is not None:
-        print("\nGAME TEXT")
-        if result.prompt.parts:
-            for part in result.prompt.parts:
-                ids = f"  [{', '.join(part.entity_ids)}]" if part.entity_ids else ""
-                print(f"  {part.role:<14}{part.text}{ids}")
-        else:
-            print(f"  {result.prompt.question}  (no parts)")
-        for i, answer in enumerate(result.prompt.answers):
+    if result.parts:
+        print("\nPARTS")
+        for part in result.parts:
+            ids = f"  [{', '.join(part.entity_ids)}]" if part.entity_ids else ""
+            print(f"  {part.role:<14}{part.text}{ids}")
+
+    if result.rephrase is not None:
+        print("\nREPHRASE")
+        print(f"  {result.rephrase.question}")
+        for i, answer in enumerate(result.rephrase.answers):
             print(f"  {'*' if i in correct else ' '}{chr(65 + i)}. {answer}")
 
     entities = result.entities

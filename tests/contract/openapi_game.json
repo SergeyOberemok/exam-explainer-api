@@ -597,7 +597,7 @@
     },
     "/v1/game/simplified-questions/{question_id}": {
       "get": {
-        "description": "Simplified version of one question; `question_id` is the id `/v1/game/questions` returned.",
+        "description": "The rephrase of one question; `question_id` is the id `/v1/game/questions` returned.",
         "operationId": "get_simplified_game_question_v1_game_simplified_questions__question_id__get",
         "parameters": [
           {
@@ -973,10 +973,6 @@
           "title": "Correct Index",
           "type": "integer"
         },
-        "has_simplified": {
-          "title": "Has Simplified",
-          "type": "boolean"
-        },
         "is_correct": {
           "title": "Is Correct",
           "type": "boolean"
@@ -1000,9 +996,6 @@
         },
         "resolution": {
           "$ref": "#/components/schemas/GameResolution"
-        },
-        "simplified": {
-          "$ref": "#/components/schemas/GameReview"
         }
       },
       "required": [
@@ -1010,9 +1003,7 @@
         "answer_index",
         "is_correct",
         "correct_index",
-        "original",
-        "has_simplified",
-        "simplified"
+        "original"
       ],
       "title": "GameAnswerResult",
       "type": "object"

@@ -186,14 +186,15 @@ class GameAnswer(BaseModel):
 class GameQuestion(BaseModel):
     # Always the examination question id, also for simplified questions.
     id: str
-    # True when text comes from `examination_simplified`.
+    # True for the question's rephrase (`examination_simplified`).
     simplified: bool = False
     section: str
     assessment_type: str
     question: str
     answers: list[GameAnswer]
-    # Visual entities of a simplified question (index-aligned with `answers`); empty
-    # lists for originals, search results and questions extracted before entities.
+    # Visual entities of the question (from its decomposition, index-aligned with
+    # `answers`; the same on its rephrase); empty lists without a decomposition and on
+    # search results.
     entities: PromptEntities = PromptEntities()
     # Learning-objective keys from `objective_catalog.OBJECTIVES`, the main one first;
     # empty until the question is tagged.
@@ -210,8 +211,9 @@ class GameQuestion(BaseModel):
     stem: str = ""
     # One line to show before the question; "" until the question has a story record.
     beat: str = ""
-    # The game text as semantic parts (simplified items of a decomposed question; [] on
-    # originals). A part's `entity_ids` match `entities[].ref`.
+    # The question as semantic parts, built from its decomposition (originals of a
+    # decomposed question; [] on rephrases). A part's `entity_ids` match `entities[].ref`
+    # and the flow's node `entity_ids`.
     parts: list["GamePart"] = []
     # The pre-answer flow of the question (key-free, `flow.py`); empty when it has none.
     flow: "GameFlow" = Field(default_factory=lambda: GameFlow())
@@ -244,7 +246,7 @@ class GameRound(BaseModel):
     round_id: str
     # The round's questions, in play order.
     items: list[GameQuestion]
-    # Simplified versions of the round's questions that have one, matched by `id`.
+    # Rephrases of the round's questions that have one, matched by `id`.
     simplified: list[GameQuestion]
     # Playable questions matching the filters.
     total: int
@@ -265,7 +267,7 @@ class GameRoundBatch(BaseModel):
 
     batch_index: int
     items: list[GameQuestion]
-    # Simplified versions of `items` that have one, matched by `id`.
+    # Rephrases of `items` that have one, matched by `id`.
     simplified: list[GameQuestion]
     # Playable questions matching the round's filters that are not in the round yet.
     remaining: int
@@ -290,9 +292,6 @@ class GameAnswerResult(BaseModel):
     is_correct: bool
     correct_index: int
     original: GameReview
-    has_simplified: bool
-    # Empty when `has_simplified` is false.
-    simplified: GameReview
     # What picking `answer_index` suggests the player got wrong; "" for the correct
     # answer and for a question that is not tagged.
     misconception: str = ""
@@ -422,7 +421,8 @@ PartRole = Literal[
 
 
 class SemanticPart(BaseModel):
-    """One sentence of the game text with what it does in the question, and the
+    """One sentence of the question (built from its decomposition) with what it does in
+    the question, and the
     decomposition entities (`QuestionDecomposition.entities` ids) it mentions."""
 
     role: PartRole
@@ -437,9 +437,14 @@ class SimplifiedPrompt(BaseModel):
     answers: list[str]
     feedbacks: list[str]
     explanation: str
-    # The question as semantic parts, in reading order (the last one is the ask);
-    # `question` is their texts joined. Empty when written without a decomposition.
-    parts: list[SemanticPart] = []
+
+
+class Rephrase(BaseModel):
+    """A question and its answers in other words (`rephrase.py`), index-aligned with
+    the original's answers. Written without the key, so it has no feedback."""
+
+    question: str
+    answers: list[str]
 
 
 class IcaMeta(BaseModel):
@@ -451,25 +456,25 @@ class IcaMeta(BaseModel):
 
 
 class SimplifiedCheck(BaseModel):
-    """What the check step found for a game text (`check.py`)."""
+    """What the check step found for a rephrase (`check.py`)."""
 
-    # "same": a model answering the game text without the key picked the right answer.
+    # "same": a model answering the rephrase without the key picked the right answer.
     # "changed": it picked another one there but the right one on the original, so the
     # rewrite is at fault and the game does not offer this text.
     # "hard": it missed both; the question is hard, the rewrite is not shown to be wrong.
     verdict: Literal["same", "changed", "hard"]
-    # Index of the answer picked on the game text, and on the original (None when the
+    # Index of the answer picked on the rephrase, and on the original (None when the
     # original was not asked: only a disagreement asks it).
     picked: int
     picked_original: int | None = None
-    prompt_version: str
     # `step_key.py`: what the check was asked from (None on older records).
     input_key: str | None = None
     ica: IcaMeta
 
 
 class SimplifiedQuestion(BaseModel):
-    """Record stored in `examination_simplified`, keyed by the examination `_id`."""
+    """Record stored in `examination_simplified`, keyed by the examination `_id`: the
+    question's rephrase (`rephrase.py`) and its check."""
 
     question_id: str
     section: str
@@ -477,50 +482,14 @@ class SimplifiedQuestion(BaseModel):
     source: str
     correct_response: list[str]
     related_lectures: list[Any]
-    prompt: SimplifiedPrompt
+    prompt: Rephrase
     ica: IcaMeta
-    # Absent on records simplified before entity extraction existed (and empty when
-    # extraction failed); `entities_ica` is the metadata of that second call.
-    entities: PromptEntities = PromptEntities()
-    entities_ica: IcaMeta | None = None
-    # Metadata of the icon call; None until icons were picked for the stored entities
-    # (the icons themselves are the `icon` fields inside `entities`).
-    icons_ica: IcaMeta | None = None
-    # The prompt versions the entities and icons were written with (`entities.py`,
-    # `icons.py` `PROMPT_VERSION`); None on records written before they existed.
-    entities_version: str | None = None
-    icons_version: str | None = None
-    # "decomposition" when the entities were derived from the question's decomposition,
-    # "ica" (or None, on older records) when the entity call extracted them.
-    entities_source: str | None = None
-    # `decompose.fingerprint` of the decomposition the game text was written with (None:
-    # without one).
-    decomposition_version: str | None = None
-    # What the text was written with (`simplify.PROMPT_VERSION`, and
-    # `scenario_catalog.frame_version` of the question's chapter); None on records
-    # written before the game text existed. A pipeline backfill redoes other versions.
-    prompt_version: str | None = None
-    frame_version: str | None = None
-    # `step_key.py` input keys of the game text, its entities and its icons (None on
-    # records written before they existed, or while that part is missing).
+    # `step_key.py`: what the rephrase was written from (None on older records).
     input_key: str | None = None
-    entities_input_key: str | None = None
-    icons_input_key: str | None = None
     # Result of the check step; None until it has run for this text.
     check: SimplifiedCheck | None = None
     created_at: datetime
     updated_at: datetime
-
-    @field_validator("entities", mode="wrap")
-    @classmethod
-    def _tolerate_malformed_entities(cls, value: Any, handler) -> PromptEntities:
-        """Entities are decoration: a malformed stored value reads as none instead of
-        failing every route that returns the record (re-extract to repair it)."""
-        try:
-            return handler(value if value is not None else {})
-        except ValidationError as exc:
-            logger.warning("ignoring malformed stored entities: %s", exc)
-            return PromptEntities()
 
 
 ObjectiveLevel = Literal["remember", "understand", "apply", "analyze"]
@@ -550,9 +519,6 @@ class QuestionObjectives(BaseModel):
     tempting: list[int] = []
     # One per answer, index-aligned with `prompt.answers`; None for a correct answer.
     distractors: list[Distractor | None]
-    # What the record was tagged with; a backfill redoes records of another version.
-    catalog_version: str
-    prompt_version: str
     # `step_key.py`: what the record was tagged from (None on older records).
     input_key: str | None = None
     ica: IcaMeta
@@ -578,8 +544,6 @@ class QuestionStory(BaseModel):
     win: str
     fail: str
     origin: Literal["seed", "ica"]
-    catalog_version: str
-    prompt_version: str
     # `step_key.py`: what a model-written record was written from (None for a seed).
     input_key: str | None = None
     # None for a seed record.
@@ -596,27 +560,19 @@ class EntitiesBackfill(BaseModel):
     total: int
 
 
-# The pipeline is import -> simplify -> extract entities -> pick icons; each step adds
-# to the simplified record the one before it stored.
-# "simplify": simplify each question, extract its entities, pick its icons.
-# "simplify_only": only simplify (entities and icons are left for a later job).
-# "entities": extract entities for already simplified questions, then pick icons.
-# "icons": only pick icons for already simplified questions.
-# "objectives": tag questions with learning objectives. It reads the original question
-# and writes `question_objectives`, so it needs no simplified record and is not part
-# of the import job: the objectives of a section must be in the catalog first.
-# "story": place questions in their chapter's stages and write their story lines. Like
-# "objectives" it reads the original question and writes its own collection
-# (`question_story`); the question's scenario must be in the scenario catalog first.
-# "check": test that the game text of already simplified questions keeps the right answer.
-# "full": everything for a question, in the order objectives -> story -> simplify ->
-# entities -> icons -> check. This is what an import starts. With `only_missing` each
-# step is skipped where its result is current, so the same job resumes a broken one.
+# Job modes (`batch.STAGES` lists the steps of each):
+# "full": everything for a question, in the order objectives -> story -> decompose
+# (with its parts and entities) -> icons -> flow -> resolve -> rephrase -> check. This
+# is what an import starts. With `only_missing` each step is skipped where its result is
+# current, so the same job resumes a broken one.
+# "decompose": the decomposition and what is built on it (icons, flow, resolution).
+# "icons", "flow", "resolve": one step of those (the flow also redoes its resolution).
+# "rephrase": write the rephrase and check it; "check": only check stored rephrases.
+# "objectives", "story": tag questions with learning objectives, or place them in their
+# chapter's stages; each writes its own collection and needs its catalog first.
 JobMode = Literal[
     "full",
-    "simplify",
-    "simplify_only",
-    "entities",
+    "rephrase",
     "icons",
     "objectives",
     "story",
@@ -627,14 +583,14 @@ JobMode = Literal[
 ]
 # Which step a per-question job error comes from.
 JobStage = Literal[
-    "simplify", "entities", "icons", "objectives", "story", "check", "decompose", "flow", "resolve"
+    "objectives", "story", "decompose", "icons", "flow", "resolve", "rephrase", "check"
 ]
 
 
 class SimplificationError(BaseModel):
     question_id: str
-    # Absent on errors recorded before stages existed.
-    stage: JobStage = "simplify"
+    # A `JobStage` (older jobs also name steps that no longer exist).
+    stage: str = "simplify"
     status_code: int
     detail: str
 
@@ -646,14 +602,15 @@ class SimplificationJob(BaseModel):
     source: str
     model_id: IcaModelId
     # Defaults cover jobs recorded before these fields existed.
-    mode: JobMode = "simplify"
+    # A `JobMode` (older jobs also name modes that no longer exist).
+    mode: str = "simplify"
     only_missing: bool = False
     status: Literal["queued", "running", "completed", "failed"]
     total: int
     processed: int
     succeeded: int
-    # Every question with an error; `entities_failed` of them still got their
-    # simplified text stored (only the entity step failed).
+    # Every question with an error. `entities_failed` is kept for jobs recorded before
+    # the entity step was built from the decomposition.
     failed: int
     entities_failed: int = 0
     # Questions whose earlier steps were stored but whose icon step failed.
@@ -909,25 +866,26 @@ class Resolution(BaseModel):
 
 
 class DecompositionRecord(BaseModel):
-    """A `question_decomposition` document. Each part keeps the prompt version it was
-    written with; writing a part clears the parts derived from it."""
+    """A `question_decomposition` document: the decomposition and everything built on
+    it, so all of it names the same entity ids. Writing the decomposition clears the
+    icons, flow and resolution; writing the flow clears the resolution."""
 
     question_id: str
     text_hash: str
     semantic: QuestionDecomposition
-    semantic_version: str
     semantic_ica: IcaMeta
-    # `decompose.fingerprint` of `semantic` (None on records written before it was
-    # stored); a game text's `decomposition_version` must equal it.
-    fingerprint: str | None = None
+    # Built from `semantic` in code when it is written (`decompose.parts_from`,
+    # `entities.derive_entities`); the icons are the `icon` fields inside `entities`.
+    parts: list[SemanticPart] = []
+    entities: PromptEntities = PromptEntities()
+    icons_ica: IcaMeta | None = None
+    icons_input_key: str | None = None
     # `step_key.py` input keys of the decomposition, the flow and the resolution.
     input_key: str | None = None
     flow: DecisionFlow | None = None
-    flow_version: str | None = None
     flow_ica: IcaMeta | None = None
     flow_input_key: str | None = None
     resolution: Resolution | None = None
-    resolution_version: str | None = None
     resolution_ica: IcaMeta | None = None
     resolution_input_key: str | None = None
     created_at: datetime

@@ -47,10 +47,10 @@ MAX_ROUND_QUESTIONS = 500
 # `$sample` runs on the pre-filter and `is_playable` has the last word, so ask for more
 # than needed and trim: a round then rarely comes back short.
 OVERSAMPLE_FACTOR = 2
-# Verdicts the check step stores on a simplified record (`check.verdict`): a model
-# answering the game text without the key picked the right answer ("same"); it picked
+# Verdicts the check step stores on a rephrase record (`check.verdict`): a model
+# answering the rephrase without the key picked the right answer ("same"); it picked
 # another one there but the right one on the original, so the rewrite is at fault
-# ("changed", and the game does not offer that text); or it missed both, which says
+# ("changed", and the game does not offer that rephrase); or it missed both, which says
 # the question is hard, not that the rewrite is wrong ("hard").
 CHECK_SAME, CHECK_CHANGED, CHECK_HARD = "same", "changed", "hard"
 
@@ -90,9 +90,9 @@ def is_playable(doc: dict) -> bool:
 
 
 def simplified_matches(original: dict, simplified: dict) -> bool:
-    """A simplified version is only usable if it keeps the answers and the correct one,
-    and the check step (`check.py`) has not found that its wording changed which answer
-    is right. A version that was never checked is usable."""
+    """A rephrase (`rephrase.py`) is only usable if it keeps the answers and the correct
+    one, and the check step (`check.py`) has not found that its wording changed which
+    answer is right. A rephrase that was never checked is usable."""
     if ((simplified.get("check") or {}).get("verdict")) == CHECK_CHANGED:
         return False
     return len(answers_of(simplified)) == len(answers_of(original)) and correct_indices(
@@ -101,22 +101,21 @@ def simplified_matches(original: dict, simplified: dict) -> bool:
 
 
 def usable_simplified(original: dict, simplified: dict | None) -> dict | None:
-    """`simplified` if the game can offer it for `original`, else None."""
+    """The rephrase `simplified` if the game can offer it for `original`, else None."""
     if simplified is not None and simplified_matches(original, simplified):
         return simplified
     return None
 
 
-def entities_of(doc: dict) -> PromptEntities:
-    """The stored visual entities and icons of a simplified doc, with one `answers` item
-    per answer (padded or trimmed). Entities are decoration: a malformed record gives none
-    instead of failing the round."""
+def entities_of(record: dict | None, count: int) -> PromptEntities:
+    """The visual entities and icons of a `question_decomposition` record, with one
+    `answers` item per answer (`count`, padded or trimmed). Entities are decoration: a
+    malformed record gives none instead of failing the round."""
     try:
-        entities = PromptEntities.model_validate(doc.get("entities") or {})
+        entities = PromptEntities.model_validate((record or {}).get("entities") or {})
     except (ValidationError, KeyError, TypeError) as e:
-        logger.warning("ignoring malformed entities of %s: %s", doc.get("question_id"), e)
+        logger.warning("ignoring malformed entities of %s: %s", (record or {}).get("question_id"), e)
         return PromptEntities()
-    count = len(answers_of(doc))
     answers = entities.answers[:count]
     answers += [AnswerEntities() for _ in range(count - len(answers))]
     # A stored key can outlive its catalog entry; the game then draws its default.
@@ -223,42 +222,27 @@ def game_flow(flow: dict | None) -> GameFlow:
 
 
 def _current_decomposition(original: dict, record: dict | None) -> dict | None:
-    return record if decompose.is_current(record, original) else None
+    """The question's `question_decomposition` record when it was written for the
+    question's text as it is (an edited question has none)."""
+    return record if decompose.matches(record, original) else None
 
 
-def _same_ids(original: dict, record: dict | None, simplified: dict | None) -> bool:
-    """Whether the game text (None: none offered) was written from this decomposition,
-    so its parts and entities name the same ids as the flow."""
-    return simplified is None or simplified.get(
-        "decomposition_version"
-    ) == decompose.current_fingerprint(record, original)
-
-
-def flow_of(original: dict, record: dict | None, simplified: dict | None = None) -> GameFlow:
-    """The pre-answer flow of a question from its `question_decomposition` record, when
-    it was written for today's text and versions. With `simplified` (the game text the
-    round offers) the flow is sent only when that text was written from the same
-    decomposition: its parts and entities (`ref`) name the decomposition's ids, and so
-    do the flow's nodes, but a rewritten decomposition may give an id to another thing,
-    and the game would draw a node with another entity's icon."""
+def flow_of(original: dict, record: dict | None) -> GameFlow:
+    """The pre-answer flow of a question from its `question_decomposition` record. The
+    flow, the parts and the entities are all on that record and a new decomposition
+    clears the flow, so they always name the same ids."""
     current = _current_decomposition(original, record)
-    if not (decompose.flow_is_current(current) and _same_ids(original, current, simplified)):
+    if not decompose.has_flow(current):
         return GameFlow()
     return game_flow(current["flow"])
 
 
-def resolution_of(
-    original: dict, record: dict | None, simplified: dict | None = None
-) -> dict | None:
+def resolution_of(original: dict, record: dict | None) -> dict | None:
     """The resolution to keep in a round entry (a `GameResolution` dump), None without
     one; sent exactly when `flow_of` sends the flow it continues. Part of the answer
     key."""
     record = _current_decomposition(original, record)
-    if not (
-        decompose.flow_is_current(record)
-        and decompose.resolution_is_current(record)
-        and _same_ids(original, record, simplified)
-    ):
+    if not (decompose.has_flow(record) and decompose.has_resolution(record)):
         return None
     try:
         resolution = Resolution.model_validate(record["resolution"])
@@ -273,10 +257,10 @@ def resolution_of(
     ).model_dump()
 
 
-def parts_of(doc: dict) -> list[GamePart]:
-    """The semantic parts of a simplified doc ([] when it has none or they are
-    malformed)."""
-    raw = (doc.get("prompt") or {}).get("parts")
+def parts_of(record: dict | None) -> list[GamePart]:
+    """The semantic parts of a `question_decomposition` record ([] when it has none or
+    they are malformed)."""
+    raw = (record or {}).get("parts")
     if not isinstance(raw, list):
         return []
     try:
@@ -289,14 +273,21 @@ def to_game_question(
     doc: dict,
     *,
     simplified: bool = False,
+    original: dict | None = None,
     tags: dict | None = None,
     story: dict | None = None,
-    flow: GameFlow | None = None,
+    decomposition: dict | None = None,
 ) -> GameQuestion:
-    """Map an `examination` doc, or an `examination_simplified` doc when `simplified`
-    (only those carry entities and parts). `tags` is the question's
-    `question_objectives` record, `story` what `story_of` returned for the original and
-    `flow` what `flow_of` returned for it."""
+    """Map an `examination` doc, or with `original` (its `examination` doc) a rephrase
+    from `examination_simplified`. `tags` is the question's `question_objectives`
+    record, `story` what `story_of` returned for the original and `decomposition` its
+    `question_decomposition` record: the entities, the parts and the flow come from it,
+    for both versions (the rephrase keeps the answers in order, so the entities still
+    fit; its sentences are not the parts, so it carries none). `simplified` without
+    `original` (browsing rephrases) gives one without entities and flow."""
+    simplified = simplified or original is not None
+    source = original if original is not None else doc
+    record = _current_decomposition(source, decomposition)
     prompt = doc.get("prompt") or {}
     story = story or {}
     return GameQuestion(
@@ -308,16 +299,16 @@ def to_game_question(
         answers=[
             GameAnswer(index=i, text=text or "") for i, text in enumerate(answers_of(doc))
         ],
-        entities=entities_of(doc) if simplified else PromptEntities(),
+        entities=entities_of(record, len(answers_of(doc))) if record else PromptEntities(),
         objectives=objectives_of(tags),
         difficulty=difficulty_of(tags),
         scenario=story.get("scenario", ""),
         stage=story.get("stage", ""),
-        # A simplified text has the scenario woven in, so it has no separate stem.
+        # A rephrase has the scenario woven in, so it has no separate stem.
         stem="" if simplified else story.get("stem", ""),
         beat=story.get("beat", ""),
-        parts=parts_of(doc) if simplified else [],
-        flow=flow or GameFlow(),
+        parts=[] if simplified else parts_of(record),
+        flow=flow_of(source, decomposition),
     )
 
 
@@ -336,24 +327,24 @@ def to_review(doc: dict) -> GameReview:
 
 def round_entry(
     doc: dict,
-    simplified: dict | None,
+    rephrased: bool,
     tags: dict | None = None,
     record: dict | None = None,
     decomposition: dict | None = None,
 ) -> dict:
-    """What a round document keeps for one playable question: its answer key and reviews
-    (`record` is its `question_story` record, `decomposition` its
-    `question_decomposition` record)."""
+    """What a round document keeps for one playable question: its answer key and review,
+    and whether the round offers its rephrase (`record` is its `question_story` record,
+    `decomposition` its `question_decomposition` record)."""
     correct = correct_indices(doc)[0]
     count = len(answers_of(doc))
     return {
         "correct": correct,
         "count": count,
         "original": to_review(doc).model_dump(),
-        "simplified": to_review(simplified).model_dump() if simplified else None,
+        "rephrased": rephrased,
         "misconceptions": misconceptions_of(tags, count, correct),
         "outcomes": outcomes_of(doc, record),
-        "resolution": resolution_of(doc, decomposition, simplified),
+        "resolution": resolution_of(doc, decomposition),
     }
 
 

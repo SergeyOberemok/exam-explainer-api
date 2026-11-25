@@ -81,13 +81,15 @@ AGENT = {"name": "Subagent", "kind": "actor", "aliases": ["helper"], "ref": "", 
 TOOL = {"name": "process_refund", "kind": "object"}
 
 
-def simple_q(**kw):
-    return to_game_question(doc(question_id="abc", **kw), simplified=True)
+def drawn_q(**record):
+    """A question served with a `question_decomposition` record holding `record`."""
+    d = doc()
+    return to_game_question(d, decomposition={"question_id": str(d["_id"]), "text_hash": text_hash(d), **record})
 
 
-def test_simplified_carries_entities_aligned_with_answers():
+def test_a_question_carries_the_entities_of_its_decomposition_aligned_with_answers():
     entities = {"question": [AGENT], "answers": [{"entities": [TOOL]}] * 5}
-    q = simple_q(entities=entities).model_dump()
+    q = drawn_q(entities=entities).model_dump()
     assert q["entities"]["question"] == [AGENT]
     assert len(q["entities"]["answers"]) == 4  # trimmed to the answers
     assert q["entities"]["answers"][0] == {
@@ -96,32 +98,36 @@ def test_simplified_carries_entities_aligned_with_answers():
     }
 
 
-def test_simplified_serves_only_icon_keys_the_catalog_has():
+def test_only_icon_keys_the_catalog_has_are_served():
     entities = {
         "question_icon": "gone",
         "question": [{**AGENT, "icon": "gone"}],
         "answers": [{"icon": "refund", "entities": [{**TOOL, "icon": "tool"}]}, {"icon": "gone"}],
     }
-    q = simple_q(entities=entities).entities
+    q = drawn_q(entities=entities).entities
     assert (q.question_icon, q.question[0].icon) == (None, None)
     assert [a.icon for a in q.answers] == ["refund", None, None, None]
     assert q.answers[0].entities[0].icon == "tool"
 
-    short = simple_q(entities={"answers": [{"entities": [TOOL]}]})
+    short = drawn_q(entities={"answers": [{"entities": [TOOL]}]})
     assert [len(a.entities) for a in short.entities.answers] == [1, 0, 0, 0]
 
 
-def test_entities_absent_malformed_or_original_give_none():
-    assert simple_q().entities.question == []
-    assert simple_q().entities.answers == [AnswerEntities()] * 4
-    assert simple_q(entities={"question": [{"name": "X", "kind": "planet"}]}).entities.question == []
-    original = to_game_question(doc(entities={"question": [AGENT]}))
-    assert original.entities.question == [] and original.entities.answers == []
+def test_entities_absent_malformed_or_without_a_decomposition_give_none():
+    assert drawn_q().entities.question == []
+    assert drawn_q().entities.answers == [AnswerEntities()] * 4
+    assert drawn_q(entities={"question": [{"name": "X", "kind": "planet"}]}).entities.question == []
+    plain = to_game_question(doc(entities={"question": [AGENT]}))
+    assert plain.entities.question == [] and plain.entities.answers == []
+    # A decomposition written for another text of the question is not served.
+    d = doc()
+    other = {"question_id": str(d["_id"]), "text_hash": "another text", "entities": {"question": [AGENT]}}
+    assert to_game_question(d, decomposition=other).entities.question == []
 
 
 def test_entities_read_the_catalog_shape():
     stored = {"entities": [{"id": "e1", **AGENT}], "question": ["e1"], "answers": [["e1"], [], [], []]}
-    q = simple_q(entities=stored)
+    q = drawn_q(entities=stored)
     assert q.entities.question[0].name == "Subagent"
     assert q.entities.answers[0].entities[0].name == "Subagent"
 
@@ -302,7 +308,8 @@ def test_answer_returns_result_and_reviews_once():
     result = r.json()
     assert result["is_correct"] is False and result["correct_index"] == 1
     assert result["original"] == {"explanation": "e", "feedbacks": ["fw", "fx", "fy", "fz"]}
-    assert result["has_simplified"] and result["simplified"]["explanation"] == "simple e"
+    # The rephrase has no feedback of its own: the review is the original's.
+    assert "simplified" not in result and "has_simplified" not in result
 
     retry = c.post(url, json={"question_id": qid, "answer_index": 0})
     assert retry.status_code == 200 and retry.json() == result
@@ -310,12 +317,11 @@ def test_answer_returns_result_and_reviews_once():
     assert other.status_code == 409 and other.json()["detail"] == "question already answered"
 
 
-def test_answer_without_simplified_has_empty_review():
+def test_answer_without_a_rephrase_has_the_same_review():
     a = doc()
     c, body = start_round([a])
     r = c.post(f"/v1/game/rounds/{body['round_id']}/answers", json={"question_id": str(a["_id"]), "answer_index": 1})
-    assert r.json()["is_correct"] and not r.json()["has_simplified"]
-    assert r.json()["simplified"] == {"explanation": "", "feedbacks": []}
+    assert r.json()["is_correct"] and r.json()["original"]["explanation"] == "e"
 
 
 def test_answer_errors():
@@ -389,7 +395,6 @@ def test_add_question_to_round_makes_it_answerable():
 
     answer = c.post(f"{base}/answers", json={"question_id": qid, "answer_index": 1})
     assert answer.status_code == 200 and answer.json()["is_correct"]
-    assert answer.json()["has_simplified"]
 
 
 def test_add_question_again_keeps_the_stored_entry():
@@ -397,7 +402,7 @@ def test_add_question_again_keeps_the_stored_entry():
     rounds = FakeRounds()
     _, body = start_round([a], rounds=rounds)
     qid = str(a["_id"])
-    # Simplified after the round started: the stored entry has no review for it.
+    # Rephrased after the round started: the round did not offer the rephrase.
     c = client_with(exam=[a], simple=[simplified_of(a)], rounds=rounds)
     url = f"/v1/game/rounds/{body['round_id']}/questions"
 
@@ -406,7 +411,7 @@ def test_add_question_again_keeps_the_stored_entry():
     c.post(f"/v1/game/rounds/{body['round_id']}/answers", json={"question_id": qid, "answer_index": 0})
     assert c.post(url, json={"question_id": qid}).json() == r.json()
     stored = next(iter(rounds.docs.values()))
-    assert stored["answers"] == {qid: 0} and stored["questions"][qid]["simplified"] is None
+    assert stored["answers"] == {qid: 0} and stored["questions"][qid]["rephrased"] is False
 
 
 def test_add_question_errors():
@@ -533,7 +538,7 @@ def test_batches_continue_the_round_without_repeats():
 
     # Batch questions can be answered in the round.
     answer = c.post(f"{base}/answers", json={"question_id": ids[4], "answer_index": 1})
-    assert answer.json()["is_correct"] and answer.json()["has_simplified"]
+    assert answer.json()["is_correct"]
 
     # A retry of batch 1 returns it again; batch 2 finds the pool used up.
     assert c.post(f"{base}/batches", json={"batch_index": 1, "count": 10}).json() == batch
@@ -750,20 +755,13 @@ def decomposition_of(original, **kw):
     resolution (the replies the job tests use)."""
     from test_jobs import decomposition_reply, flow_reply, resolution_reply
 
-    from claude_exam.api import decompose
-    from claude_exam.api.schemas import QuestionDecomposition
-
     semantic = decomposition_reply(4)
     return {
         "question_id": str(original["_id"]),
         "text_hash": text_hash(original),
         "semantic": semantic,
-        "semantic_version": decompose.PROMPT_VERSION,
-        "fingerprint": decompose.fingerprint(QuestionDecomposition.model_validate(semantic)),
         "flow": flow_reply(),
-        "flow_version": decompose.FLOW_VERSION,
         "resolution": resolution_reply(4, [1]),
-        "resolution_version": decompose.RESOLUTION_VERSION,
         **kw,
     }
 
@@ -773,10 +771,8 @@ def test_round_sends_parts_and_the_flow_but_keeps_the_resolution_for_the_answer(
 
     a, plain = doc(), doc()
     parts = [{"role": "problem", "text": "It breaks.", "entity_ids": ["e1"]}, {"role": "ask", "text": "Why?", "entity_ids": []}]
-    record = decomposition_of(a)
+    record = decomposition_of(a, parts=parts)
     simple = simplified_of(a)
-    simple["prompt"] = {**simple["prompt"], "parts": parts}
-    simple["decomposition_version"] = record["fingerprint"]
     stale = decomposition_of(plain, text_hash="written for another text")
     c = client_with(exam=[a, plain], simple=[simple])
     app.dependency_overrides[get_async_decomposition_collection] = lambda: FakeCollection(
@@ -787,11 +783,13 @@ def test_round_sends_parts_and_the_flow_but_keeps_the_resolution_for_the_answer(
     drawn, undrawn = body["items"]
     assert drawn["flow"]["primary"] == "process_flow"
     assert [n["id"] for n in drawn["flow"]["nodes"]] == ["n1", "n2", "n3"]
-    assert drawn["flow"]["nodes"][-1]["is_question"] is True and drawn["parts"] == []
+    assert drawn["flow"]["nodes"][-1]["is_question"] is True and drawn["parts"] == parts
     # A decomposition of another text is not served.
     assert undrawn["flow"] == {"primary": "", "secondary": [], "reason": "", "trigger": "", "nodes": [], "edges": []}
     simplified = body["simplified"][0]
-    assert simplified["parts"] == parts and simplified["flow"] == drawn["flow"]
+    # The rephrase gets the same flow and entities; its sentences are not the parts.
+    assert simplified["parts"] == [] and simplified["flow"] == drawn["flow"]
+    assert simplified["entities"] == drawn["entities"]
     # Nothing of the resolution goes out before answering.
     assert "Plan before editing" not in str(body) and "Plan first" not in str(body)
 
@@ -808,34 +806,15 @@ def test_round_sends_parts_and_the_flow_but_keeps_the_resolution_for_the_answer(
 EMPTY_FLOW = {"primary": "", "secondary": [], "reason": "", "trigger": "", "nodes": [], "edges": []}
 
 
-def test_no_flow_or_resolution_for_a_game_text_of_another_decomposition():
-    # Re-decomposing a question gives its ids to other things; the game text's parts
-    # and entities still name the old ones, so the new flow would get wrong icons.
-    from claude_exam.api.dependencies import get_async_decomposition_collection
-
-    a = doc()
-    simple = simplified_of(a)
-    simple["decomposition_version"] = "an older decomposition"
-    c = client_with(exam=[a], simple=[simple])
-    app.dependency_overrides[get_async_decomposition_collection] = lambda: FakeCollection(
-        [decomposition_of(a)]
-    )
-    body = c.post("/v1/game/rounds", json={"count": 10}).json()
-    assert body["items"][0]["flow"] == EMPTY_FLOW and body["simplified"][0]["flow"] == EMPTY_FLOW
-    url = f"/v1/game/rounds/{body['round_id']}/answers"
-    result = c.post(url, json={"question_id": str(a["_id"]), "answer_index": 1}).json()
-    assert result["resolution"]["rule"] == "" and result["resolution"]["options"] == []
-
-
-def test_no_resolution_without_a_current_flow():
-    # A resolution continues the flow the player saw; an outdated flow is not sent, so
-    # neither is its resolution.
+def test_no_resolution_without_a_flow():
+    # A resolution continues the flow the player saw; without a (readable) flow there
+    # is none to continue.
     from claude_exam.api.dependencies import get_async_decomposition_collection
 
     a = doc()
     c = client_with(exam=[a], simple=[])
     app.dependency_overrides[get_async_decomposition_collection] = lambda: FakeCollection(
-        [decomposition_of(a, flow_version="an older flow")]
+        [decomposition_of(a, flow=None)]
     )
     body = c.post("/v1/game/rounds", json={"count": 10}).json()
     assert body["items"][0]["flow"] == EMPTY_FLOW

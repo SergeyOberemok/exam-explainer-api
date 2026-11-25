@@ -22,9 +22,57 @@
         }
       ],
       "entities": {
-        "question_icon": null,
-        "question": [],
-        "answers": []
+        "question_icon": "credential",
+        "question": [
+          {
+            "name": "API Key",
+            "kind": "object",
+            "aliases": [
+              "key"
+            ],
+            "ref": "e1",
+            "icon": "credential"
+          },
+          {
+            "name": "Send Request",
+            "kind": "action",
+            "aliases": [],
+            "ref": "",
+            "icon": "send"
+          }
+        ],
+        "answers": [
+          {
+            "entities": [
+              {
+                "name": "Authorization",
+                "kind": "object",
+                "aliases": [
+                  "auth header"
+                ],
+                "ref": "",
+                "icon": null
+              }
+            ],
+            "icon": "permission"
+          },
+          {
+            "entities": [
+              {
+                "name": "x-api-key",
+                "kind": "object",
+                "aliases": [],
+                "ref": "",
+                "icon": null
+              }
+            ],
+            "icon": null
+          },
+          {
+            "entities": [],
+            "icon": "tags"
+          }
+        ]
       },
       "objectives": [
         "tools-mcp-config",
@@ -35,7 +83,22 @@
       "stage": "build",
       "stem": "Which header carries the API key?",
       "beat": "The first API call of the support agent is refused.",
-      "parts": [],
+      "parts": [
+        {
+          "role": "context",
+          "text": "A support agent calls the API.",
+          "entity_ids": [
+            "e1"
+          ]
+        },
+        {
+          "role": "ask",
+          "text": "Which header carries the API key?",
+          "entity_ids": [
+            "e1"
+          ]
+        }
+      ],
       "flow": {
         "primary": "",
         "secondary": [],
@@ -121,7 +184,7 @@
             "aliases": [
               "key"
             ],
-            "ref": "",
+            "ref": "e1",
             "icon": "credential"
           },
           {

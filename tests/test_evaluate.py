@@ -51,7 +51,7 @@ def test_the_view_shows_the_original_with_its_key_and_nothing_stored_yet():
     assert [a["correct"] for a in answers] == [False, True, False, False]
     assert answers[1]["feedback"] == "Correct. b"
     assert got["original"]["explanation"] == "Missing guidance needs human judgment."
-    assert got["stored"]["prompt"] is None and got["stored"]["decomposition"] is None
+    assert got["stored"]["rephrase"] is None and got["stored"]["decomposition"] is None
 
 
 def test_a_dry_run_streams_one_line_per_step_and_writes_nothing():
@@ -59,7 +59,7 @@ def test_a_dry_run_streams_one_line_per_step_and_writes_nothing():
     mongo, ica = FakeMongo([q]), ScriptedIca()
     client = client_for(mongo, ica)
     before = written(mongo)
-    stages = ["decompose", "simplify", "entities", "flow", "resolve", "objectives"]
+    stages = ["decompose", "icons", "flow", "resolve", "rephrase", "objectives"]
     response = client.post(f"/evaluate/questions/{q['_id']}/run", json={"stages": stages})
     assert response.status_code == 200
     events = lines(response)
@@ -67,8 +67,9 @@ def test_a_dry_run_streams_one_line_per_step_and_writes_nothing():
     assert [e["status"] for e in events[:5]] == ["ok"] * 5
     assert events[5]["status"].startswith("skipped")
     result = events[-1]["result"]
-    assert result["decomposition"] and result["prompt"]["parts"] and result["resolution"]["rule"]
-    assert result["entities"] is not None and result["mermaid"]["flow"].startswith("flowchart")
+    assert result["decomposition"] and result["parts"][-1]["role"] == "ask"
+    assert result["resolution"]["rule"] and result["rephrase"]["answers"]
+    assert result["entities"]["question_icon"] and result["mermaid"]["flow"].startswith("flowchart")
     assert written(mongo) == before
 
 
@@ -77,12 +78,12 @@ def test_a_failed_step_is_reported_and_the_run_goes_on():
     ica = ScriptedIca(decompose=[HTTPException(status_code=502, detail="bad reply")] * 5)
     client = client_for(FakeMongo([q]), ica)
     events = lines(
-        client.post(f"/evaluate/questions/{q['_id']}/run", json={"stages": ["decompose", "flow", "simplify"]})
+        client.post(f"/evaluate/questions/{q['_id']}/run", json={"stages": ["decompose", "flow", "rephrase"]})
     )
     by_stage = {e["stage"]: e for e in events}
     assert by_stage["decompose"]["status"] == "failed 502"
     assert by_stage["flow"]["status"] == "failed 409" and "decomposition" in by_stage["flow"]["detail"]
-    assert by_stage["simplify"]["status"] == "ok"
+    assert by_stage["rephrase"]["status"] == "ok"
     assert events[-1]["stage"] == "done"
 
 

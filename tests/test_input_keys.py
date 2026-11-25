@@ -1,7 +1,7 @@
 """Input keys (`step_key.py`, `pipeline_keys.py`): a step's stored result is current
 while the messages it would send today are the ones it was written from. A changed
 prompt, frame or upstream result makes exactly the steps that read it outdated, with
-nothing bumped by hand; retries do not change a key; old records are adopted."""
+nothing bumped by hand; retries do not change a key."""
 
 import pytest
 from test_jobs import (
@@ -15,7 +15,7 @@ from test_jobs import (
     run_job,
 )
 
-from claude_exam.api import batch, decompose, objectives, simplify, story
+from claude_exam.api import batch, decompose, objectives, rephrase, story
 from claude_exam.api.batch import STAGES, Stores
 
 pytestmark = pytest.mark.anyio
@@ -63,46 +63,40 @@ async def test_a_finished_question_is_current_in_every_step():
 
 async def test_a_changed_prompt_or_frame_outdates_only_the_steps_that_read_it(monkeypatch):
     q, mongo, _ = await done()
-    # The company's intro is in the story's and the game text's messages (and the
-    # check's background, which this module does not patch).
+    # The company's intro is in the story's and the rephrase's messages (and the check's
+    # background, which this module does not patch).
     monkeypatch.setattr(story, "COMPANY_INTRO", story.COMPANY_INTRO + " Now in Lisbon.")
     assert await outdated(mongo, q) == ["story"]
-    monkeypatch.setattr(simplify, "COMPANY_INTRO", simplify.COMPANY_INTRO + " Now in Lisbon.")
-    assert await outdated(mongo, q) == ["story", "simplify"]
+    monkeypatch.setattr(rephrase, "COMPANY_INTRO", rephrase.COMPANY_INTRO + " Now in Lisbon.")
+    assert await outdated(mongo, q) == ["story", "rephrase"]
 
 
 async def test_a_changed_upstream_result_outdates_what_was_built_from_it():
     q, mongo, _ = await done()
     db = mongo.get_default_database()
-    simplified = db["examination_simplified"]
-    question_id = str(q["_id"])
+    question_id = {"question_id": str(q["_id"])}
 
     # Other entities: the icons were picked for the old ones.
-    record = await simplified.find_one({"question_id": question_id})
+    record = await db["question_decomposition"].find_one(question_id)
     entities = record["entities"]
     entities["question"] = [{"name": "Another thing", "kind": "object", "aliases": []}]
-    await simplified.update_one({"question_id": question_id}, {"$set": {"entities": entities}})
+    await db["question_decomposition"].update_one(question_id, {"$set": {"entities": entities}})
     assert await outdated(mongo, q) == ["icons"]
 
-    # Another game text: what was built from it, not the text itself (its own inputs
-    # did not change).
-    await simplified.update_one(
-        {"question_id": question_id}, {"$set": {"prompt.question": "Which mode never edits?"}}
+    # Another rephrase: its check, not the rephrase itself (its own inputs did not change).
+    await db["examination_simplified"].update_one(
+        question_id, {"$set": {"prompt.question": "Which mode never edits?"}}
     )
-    assert await outdated(mongo, q) == ["entities", "icons", "check"]
+    assert await outdated(mongo, q) == ["icons", "check"]
 
 
-async def test_another_decomposition_outdates_the_text_entities_and_flow():
+async def test_another_decomposition_outdates_the_flow_and_its_resolution():
     q, mongo, _ = await done()
-    store = mongo.get_default_database()["question_decomposition"]
-    record = store.docs[0]
-    record["semantic"]["question_summary"] = "Another reading."
-    found = decompose.read_decomposition(record, q)
-    record["fingerprint"] = decompose.fingerprint(found)
-    # The flow's messages show the summary; the game text is paired with the
-    # decomposition by its fingerprint; derived entities carry it in their key. The
-    # decomposition itself was asked from the same messages, so it stays current.
-    assert await outdated(mongo, q) == ["simplify", "entities", "flow", "resolve"]
+    record = mongo.get_default_database()["question_decomposition"].docs[0]
+    record["semantic"]["context"]["description"] = "Another reading."
+    # The flow's messages show the decomposition; the icons read the stored entities and
+    # the decomposition was asked from the same messages, so both stay current.
+    assert await outdated(mongo, q) == ["flow", "resolve"]
 
 
 async def test_a_repaired_reply_keeps_the_key_of_the_first_messages():
@@ -114,35 +108,6 @@ async def test_a_repaired_reply_keeps_the_key_of_the_first_messages():
     assert ica.calls.count("decompose") == 2  # rejected once, then repaired
     record = mongo.get_default_database()["question_decomposition"].docs[0]
     assert record["input_key"] == decompose.input_key(q)
-
-
-async def test_old_records_are_adopted_once_and_a_dry_run_writes_nothing():
-    q, mongo, ica = await done()
-    db = mongo.get_default_database()
-    question_id = {"question_id": str(q["_id"])}
-    # Records as they were before the keys.
-    for name, fields in [
-        ("question_objectives", ["input_key"]),
-        ("question_story", ["input_key"]),
-        ("question_decomposition", ["input_key", "flow_input_key", "resolution_input_key"]),
-        ("examination_simplified", ["input_key", "entities_input_key", "icons_input_key", "check.input_key"]),
-    ]:
-        await db[name].update_one(question_id, {"$set": {f: None for f in fields}})
-    assert await outdated(mongo, q) == ALL
-
-    stores = stores_of(mongo)
-    stamped = await batch.adopt_input_keys(stores, q, dry_run=True)
-    assert stamped == ALL
-    assert await outdated(mongo, q) == ALL
-
-    assert await batch.adopt_input_keys(stores, q) == ALL
-    assert await outdated(mongo, q) == []
-    assert await batch.adopt_input_keys(stores, q) == []
-
-    # And a backfill then has nothing to do.
-    ica.calls.clear()
-    await run_job(mongo, ica, [q["_id"]], "full", only_missing=True)
-    assert ica.calls == []
 
 
 async def test_the_objectives_and_story_backfills_pick_what_the_keys_call_outdated(monkeypatch):

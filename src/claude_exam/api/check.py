@@ -1,10 +1,10 @@
-"""Does the game text of a question still have the same right answer? (an ICA call)
+"""Does the rephrase of a question still have the same right answer? (an ICA call)
 
-`simplify.py` lets a model rewrite a question and its answers. Its own checks cover
+`rephrase.py` lets a model rewrite a question and its answers. Its own checks cover
 names, numbers and length; they cannot tell whether the rewrite moved the right answer,
 by dropping the fact that decided it or by making a wrong option sound right. This step
-tests that the way a player would meet it: the model gets the game text and its answers
-WITHOUT the key and picks one.
+tests that the way a player would meet it: the model gets the rephrase and its answers
+WITHOUT the key and picks one (its messages are built from `KeyFreeQuestion`).
 
 - It picks the correct answer: verdict "same".
 - It picks another one: the ORIGINAL question is asked the same way. Right there means
@@ -12,7 +12,7 @@ WITHOUT the key and picks one.
   (`game.domain.simplified_matches`). Wrong there too means the question is hard for the
   model in any wording: "hard", which says nothing against the rewrite.
 
-The result is stored on the simplified record (`check`); `simplify_and_store` clears it
+The result is stored on the rephrase record (`check`); `rephrase_and_store` clears it
 when the text changes.
 """
 
@@ -35,15 +35,12 @@ from claude_exam.api.ica import IcaClient
 from claude_exam.api.ica_json import ask_json
 from claude_exam.api.scenario_catalog import BY_KEY, COMPANY_INTRO
 from claude_exam.api.schemas import IcaMeta, IcaModelId, SimplifiedQuestion
-from claude_exam.api.simplify import chapter_key
+from claude_exam.api.question_view import KeyFreeQuestion, key_free
+from claude_exam.api.rephrase import chapter_of
 from claude_exam.api.step_key import key_or_none, step_key
 
 logger = logging.getLogger(__name__)
 
-# Stored with each record (`check.prompt_version`); the job no longer decides by it: a step is
-# redone when its input key changes (`step_key.py`), so a prompt edit needs no bump.
-# To redo it without a prompt change, bump `CODE_VERSION`. Goes in iteration 1b.
-PROMPT_VERSION = "1"
 # Bump when the verdict logic changes (the prompt is in the input key, `step_key.py`).
 CODE_VERSION = "1"
 
@@ -104,34 +101,34 @@ async def _pick(
     return parse_pick(parsed, n_answers), meta
 
 
-def messages(doc: dict, simplified: dict, story: dict | None = None) -> tuple[str, str, str, str]:
-    """The messages of both checks: (system, user) of the game text, with the company
-    and chapter as background, then of the original (asked only when the first pick is
-    wrong; its messages don't depend on that reply). 422 when the text can't be checked."""
-    correct = correct_indices(doc)
+def messages(
+    q: KeyFreeQuestion, simplified: dict, story: dict | None = None
+) -> tuple[str, str, str, str]:
+    """The messages of both checks, key-free: (system, user) of the rephrase, with the
+    company and chapter as background, then of the original (asked only when the first
+    pick is wrong; its messages don't depend on that reply). 422 when the rephrase has
+    another number of answers."""
     answers = answers_of(simplified)
     # Not retried by a job (unlike 502): asking again cannot help.
-    if len(correct) != 1 or len(answers) != len(answers_of(doc)):
+    if len(answers) != len(q.answers):
         raise HTTPException(
-            status_code=422,
-            detail="the check needs exactly one correct answer and a text with the same answers",
+            status_code=422, detail="the check needs a rephrase with the same answers"
         )
-    chapter = BY_KEY.get(chapter_key(doc, story) or "")
+    chapter = BY_KEY.get(chapter_of(story) or "")
     background = f"{COMPANY_INTRO}\n{chapter.intro}" if chapter else COMPANY_INTRO
     prompt = simplified.get("prompt") or {}
-    original = doc.get("prompt") or {}
     system = _build_system_message(len(answers))
     return (
         system,
         _build_user_message(prompt.get("question") or "", answers, background),
         system,
-        _build_user_message(original.get("question") or "", answers_of(doc), ""),
+        _build_user_message(q.question, list(q.answers), ""),
     )
 
 
 def input_key(doc: dict, simplified: dict, story: dict | None = None) -> str | None:
-    """The input key of the check of a game text (`step_key.py`)."""
-    return key_or_none(lambda: step_key(CODE_VERSION, *messages(doc, simplified, story)))
+    """The input key of the check of a rephrase (`step_key.py`)."""
+    return key_or_none(lambda: step_key(CODE_VERSION, *messages(key_free(doc), simplified, story)))
 
 
 async def check_item(
@@ -142,11 +139,15 @@ async def check_item(
     max_tokens: int | None = None,
     story: dict | None = None,
 ) -> dict:
-    """Check the game text of `simplified` against its original `doc` and return the
+    """Check the rephrase in `simplified` against its original `doc` and return the
     `check` field to store. `story` is what `game.domain.story_of` returned for the
-    question (its chapter gives the background a player has read)."""
-    system, user, original_system, original_user = messages(doc, simplified, story)
+    question (its chapter gives the background a player has read). The models answer
+    without the key; only the verdict compares their picks with it."""
     correct = correct_indices(doc)
+    # Not retried by a job (unlike 502): asking again cannot help.
+    if len(correct) != 1:
+        raise HTTPException(status_code=422, detail="the check needs exactly one correct answer")
+    system, user, original_system, original_user = messages(key_free(doc), simplified, story)
     n_answers = len(answers_of(doc))
     picked, meta = await _pick(ica, model_id, system, user, n_answers, max_tokens)
     picked_original = None
@@ -159,7 +160,7 @@ async def check_item(
         meta.total_tokens += second.total_tokens
         verdict = CHECK_CHANGED if picked_original == correct[0] else CHECK_HARD
         logger.info(
-            "check of %s: picked %s on the game text and %s on the original (correct %s): %s",
+            "check of %s: picked %s on the rephrase and %s on the original (correct %s): %s",
             doc.get("_id"),
             chr(65 + picked),
             chr(65 + picked_original),
@@ -170,17 +171,11 @@ async def check_item(
         "verdict": verdict,
         "picked": picked,
         "picked_original": picked_original,
-        "prompt_version": PROMPT_VERSION,
         "input_key": step_key(
             CODE_VERSION, system, user, original_system, original_user
         ),
         "ica": meta.model_dump(),
     }
-
-
-def is_current(record: dict | None) -> bool:
-    """Whether a simplified record has a check of today's prompt for its text."""
-    return ((record or {}).get("check") or {}).get("prompt_version") == PROMPT_VERSION
 
 
 async def check_and_store(
@@ -191,12 +186,12 @@ async def check_and_store(
     max_tokens: int | None = None,
     story: dict | None = None,
 ) -> SimplifiedQuestion:
-    """Check the stored game text of one examination question and store the result on
-    its simplified record (only `check` and `updated_at` change). Errors propagate."""
+    """Check the stored rephrase of one examination question and store the result on
+    its record (only `check` and `updated_at` change). Errors propagate."""
     question_id = str(doc["_id"])
     existing = await simplified.find_one({"question_id": question_id})
     if existing is None:
-        raise HTTPException(status_code=404, detail="simplified question not found")
+        raise HTTPException(status_code=404, detail="question has no rephrase")
 
     result = await check_item(ica, doc, existing, model_id, max_tokens, story)
     # Conditional like the entity step: the verdict is about the text that was sent.
@@ -208,6 +203,6 @@ async def check_and_store(
     if stored is None:
         raise HTTPException(
             status_code=409,
-            detail="simplified question changed while it was checked; retry",
+            detail="rephrase changed while it was checked; retry",
         )
     return SimplifiedQuestion(**stored)

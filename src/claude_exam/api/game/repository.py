@@ -116,7 +116,7 @@ class QuestionRepository:
             return {}
         # The game reads the flow, the resolution and what tells whether they are
         # current (versions, `text_hash`, `fingerprint`), never `semantic`, the largest
-        # part. Every record of today's `decompose.PROMPT_VERSION` stores its fingerprint.
+        # part.
         cursor = self.decomposition.find(
             {"question_id": {"$in": list(question_ids)}},
             {"semantic": 0, "semantic_ica": 0, "flow_ica": 0, "resolution_ica": 0},

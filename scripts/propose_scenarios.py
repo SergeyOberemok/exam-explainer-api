@@ -8,7 +8,7 @@ questions, and a `ScenarioDef(...)` skeleton to fill in. It calls no model and c
 nothing: a chapter is what a person approves.
 
 After adding the chapter: `POST /examination/pipeline/backfill` writes the story and the
-game text of its questions (nothing is redone for the other chapters).
+rephrase of its questions (nothing is redone for the other chapters).
 
 Usage: uv run python scripts/propose_scenarios.py [DATABASE_URL] [--samples N]
 Without DATABASE_URL the one from the environment or `.env` is used. Exits with status

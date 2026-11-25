@@ -9,14 +9,12 @@ from test_entities import FakeIca, reply
 
 from claude_exam.api.objective_catalog import (
     BY_KEY,
-    CATALOG_VERSION,
     OBJECTIVES,
     for_section,
     known,
     normalize_section,
 )
 from claude_exam.api.objectives import (
-    PROMPT_VERSION,
     _build_system_message,
     _build_user_message,
     parse_objectives,
@@ -66,7 +64,6 @@ def test_catalog_is_consistent():
     assert all(o.title and o.statement and o.section for o in OBJECTIVES)
     assert known("tools-errors") == "tools-errors"
     assert known("nope") is None and known(None) is None
-    assert len(CATALOG_VERSION) == 12
 
 
 def test_sections_match_with_or_without_the_domain_prefix():
@@ -169,7 +166,6 @@ async def test_tag_question_returns_fields_and_meta():
     fields, meta = await tag_question(ica, DOC, "claude-haiku-5-5")
     assert fields["objectives"][0] == "claude-code-planning" and meta.total_tokens == 42
     assert "learning objective" in ica.calls[0]["system"]
-    assert PROMPT_VERSION
 
 
 async def test_tag_question_rejects_a_truncated_reply():

@@ -10,6 +10,7 @@ from test_jobs import (
     FakeMongo,
     ScriptedIca,
     client_for,
+    decomposed,
     in_chapter,
     outsider,
     question,
@@ -23,29 +24,28 @@ from test_jobs import (
 )
 
 from claude_exam.api import batch
-from claude_exam.api.check import PROMPT_VERSION as CHECK_VERSION
 from claude_exam.api.check import parse_pick
 from claude_exam.api.exam_terms import identifiers, lost_numbers, lost_terms
 from claude_exam.api.game.domain import simplified_matches, story_of
 from claude_exam.api.ingest import plan_import
 from claude_exam.api.normalization import normalize_result
 from claude_exam.api.objectives import difficulty_of
-from claude_exam.api.scenario_catalog import BY_KEY, chapter_version, frame_version
-from claude_exam.api.simplify import (
+from claude_exam.api.scenario_catalog import BY_KEY
+from claude_exam.api.question_view import key_free
+from claude_exam.api.rephrase import (
     MAX_ATTEMPTS,
-    PROMPT_VERSION,
     _build_system_message,
     _build_user_message,
     fidelity_errors,
     opening,
-    simplify_item,
+    rephrase_item,
 )
 from claude_exam.api.story import ICA_ORDER, _build_system_message as story_system
 
 pytestmark = pytest.mark.anyio
-# The ICA calls of a "full" job: the entities are derived from the decomposition, so
-# that step makes no call.
-FULL = ["objectives", "story", "decompose", "simplify", "icons", "flow", "resolve", "check"]
+# The ICA calls of a "full" job (the parts and entities are built from the
+# decomposition in code, so they make no call).
+FULL = ["objectives", "story", "decompose", "icons", "flow", "resolve", "rephrase", "check"]
 
 
 @pytest.fixture
@@ -66,7 +66,7 @@ def ready(**kw):
 # --- the full job --------------------------------------------------------------------
 
 
-async def test_full_job_runs_every_step_in_order_and_stores_the_versions():
+async def test_full_job_runs_every_step_in_order_and_stores_the_keys():
     q = ready()
     mongo, ica = FakeMongo([q]), ScriptedIca()
     job = await run_job(mongo, ica, [q["_id"]], "full")
@@ -74,11 +74,11 @@ async def test_full_job_runs_every_step_in_order_and_stores_the_versions():
     assert (job.mode, job.status, job.succeeded, job.failed) == ("full", "completed", 1, 0)
 
     record = await stored(mongo, q)
-    assert record["prompt_version"] == PROMPT_VERSION
-    assert record["frame_version"] == frame_version("pipeline")
+    assert record["input_key"]
     assert record["check"]["verdict"] == "same" and record["check"]["picked"] == 1
-    assert record["check"]["prompt_version"] == CHECK_VERSION
-    assert record["icons_ica"] is not None
+    assert record["check"]["input_key"]
+    record = await decomposed(mongo, q)
+    assert record["icons_ica"] is not None and record["parts"] and record["flow"]
     # The story is ordered after the seeded records, by the difficulty just tagged.
     assert (await story_record(mongo, q))["order"] == ICA_ORDER + (await tags(mongo, q))["difficulty"]
 
@@ -101,51 +101,47 @@ async def test_full_job_run_again_does_only_what_is_missing():
     assert ica.calls == [] and (done.status, done.skipped) == ("completed", 1)
 
 
-async def test_a_new_prompt_or_story_frame_redoes_the_text_and_what_hangs_on_it(monkeypatch):
-    from claude_exam.api import simplify
+async def test_a_new_prompt_or_story_frame_redoes_the_rephrase_and_what_hangs_on_it(monkeypatch):
+    from claude_exam.api import rephrase
 
     q = ready()
     mongo, ica = FakeMongo([q]), ScriptedIca()
     await run_job(mongo, ica, [q["_id"]], "full")
-    db = mongo.get_default_database()
-    # The company's intro changed (the frame the text is written in; nothing bumped).
-    monkeypatch.setattr(simplify, "COMPANY_INTRO", simplify.COMPANY_INTRO + " Now also in Lisbon.")
+    # The company's intro changed (the frame the rephrase is written in; nothing bumped).
+    monkeypatch.setattr(rephrase, "COMPANY_INTRO", rephrase.COMPANY_INTRO + " Now also in Lisbon.")
     ica.calls.clear()
-    # Same text comes back, so its entities and its check still fit and are kept.
+    # Same text comes back, so its check still fits and is kept.
     await run_job(mongo, ica, [q["_id"]], "full", only_missing=True)
-    assert ica.calls == ["simplify"]
+    assert ica.calls == ["rephrase"]
 
-    # The prompt changed.
-    monkeypatch.setattr(simplify, "_SYSTEM_MESSAGE", simplify._SYSTEM_MESSAGE + "\nNew rule.")
+    # The prompt changed, and another text comes back: it is checked again.
+    monkeypatch.setattr(rephrase, "_SYSTEM_MESSAGE", rephrase._SYSTEM_MESSAGE + "\nNew rule.")
     ica.calls.clear()
     text = "Which mode, plan mode or acceptEdits mode, never edits?"
-    other = {**{k: v for k, v in SIMPLE.items() if k != "question"}, "parts": [{"role": "ask", "text": text, "entity_ids": []}]}
-    ica.queues["simplify"].append(reply(other))
+    ica.queues["rephrase"].append(reply({**SIMPLE, "question": text}))
     await run_job(mongo, ica, [q["_id"]], "full", only_missing=True)
-    # The entities are derived again (no call); the icons and the check follow the text.
-    assert ica.calls == ["simplify", "icons", "check"]
+    assert ica.calls == ["rephrase", "check"]
     assert (await stored(mongo, q))["prompt"]["question"] == text
 
 
 async def test_a_failed_step_does_not_stop_the_steps_that_do_not_need_it():
     # No objectives for the section and no chapter for the paragraph: both are refused
-    # without a call, and the game text is still written, in the company only.
+    # without a call, and everything else is still done (the rephrase in the company only).
     q = outsider()
     mongo, ica = FakeMongo([q]), ScriptedIca()
     job = await run_job(mongo, ica, [q["_id"]], "full")
-    assert ica.calls == ["decompose", "simplify", "icons", "flow", "resolve", "check"]
+    assert ica.calls == ["decompose", "icons", "flow", "resolve", "rephrase", "check"]
     assert (job.status, job.failed) == ("completed", 1)
     assert job.stages_failed == {"objectives": 1, "story": 1}
     assert [e.status_code for e in job.errors] == [422, 422]
-    assert (await stored(mongo, q))["frame_version"] == frame_version(None)
 
-    # Without a game text there is nothing to extract from or to check.
+    # Without a decomposition there are no icons, flow or resolution; the rephrase does
+    # not need one.
     q2 = ready()
-    mongo, ica = FakeMongo([q2]), ScriptedIca(simplify=[HTTPException(status_code=400, detail="x")])
+    mongo, ica = FakeMongo([q2]), ScriptedIca(decompose=[HTTPException(status_code=400, detail="x")])
     job = await run_job(mongo, ica, [q2["_id"]], "full")
-    # The flow and its resolution need only the decomposition, so they still run.
-    assert ica.calls == ["objectives", "story", "decompose", "simplify", "flow", "resolve"]
-    assert job.stages_failed == {"simplify": 1} and job.status == "completed"
+    assert ica.calls == ["objectives", "story", "decompose", "rephrase", "check"]
+    assert job.stages_failed == {"decompose": 1} and job.status == "completed"
 
 
 async def test_questions_are_processed_side_by_side_and_all_counted():
@@ -239,17 +235,15 @@ async def test_the_model_picks_the_chapter_of_a_question_without_a_paragraph():
 
     record = await story_record(mongo, q)
     assert (record["scenario"], record["scenario_origin"]) == ("research", "model")
-    assert record["catalog_version"] == chapter_version("research")
-    # The game then serves that chapter, and the game text was set in it.
+    # The game then serves that chapter, and the rephrase was set in it.
     assert story_of(q, record)["scenario"] == "research" and story_of(q, record)["stem"] == ""
-    assert (await stored(mongo, q))["frame_version"] == frame_version("research")
     # A record for another text of the question says nothing about this one.
     assert story_of(q, {**record, "text_hash": "other"})["scenario"] == ""
     # And a paragraph no chapter claims is never overruled by a record.
     assert story_of(outsider(), {**record, "text_hash": "x"})["scenario"] == ""
 
 
-# --- the game text --------------------------------------------------------------------
+# --- the rephrase --------------------------------------------------------------------
 
 ITEM = {
     "correct_response": ["b"],
@@ -267,14 +261,13 @@ ITEM = {
         "explanation": "Hooks enforce.",
     },
 }
+# A rephrase reply: the question and the answers only.
 GOOD = {
     "question": "Mara shows you the logs. The PostToolUse hook fires on 12% of refunds above $500. What should change?",
     "answers": [
         "Set tool_choice to any in the subagent's system prompt.",
         "Put the limit in a PreToolUse hook that blocks process_refund.",
     ],
-    "feedbacks": ["Incorrect. A prompt cannot enforce.", "Correct. A hook can block."],
-    "explanation": "A hook enforces. Rule: enforce in code.",
 }
 
 
@@ -331,27 +324,29 @@ def test_a_faithful_rewrite_passes_and_each_loss_is_named():
 def test_messages_set_the_question_in_its_chapter():
     system = _build_system_message(2, "support")
     assert "{{" not in system and BY_KEY["support"].intro in system
-    assert "Mara (head of support)" in system and 'start each feedback with "Correct."'.lower() in system.lower()
-    assert "evaluator-optimizer" in system
+    assert "Mara (head of support)" in system and "feedback" not in system.lower()
     plain = _build_system_message(2)
     assert "{{" not in plain and "People of the chapter" not in plain and "THIS QUESTION'S CHAPTER" not in plain
 
-    user = _build_user_message(ITEM, {"stage": "incident", "beat": "Refunds over the limit slip through."})
+    place = {"scenario": "support", "stage": "incident", "beat": "Refunds over the limit slip through."}
+    user = _build_user_message(key_free(ITEM), place)
     assert "STAGE OF THE CHAPTER: Incident" in user
     assert "LINE SHOWN BEFORE THE QUESTION:\nRefunds over the limit slip through." in user
     assert "SCENARIO:\nYou are building a customer support resolution agent." in user
-    assert "QUESTION:\nThe `PostToolUse` hook fires" in user and "CORRECT ANSWER: B" in user
-    assert "STAGE OF THE CHAPTER" not in _build_user_message(ITEM)
+    assert "QUESTION:\nThe `PostToolUse` hook fires" in user
+    # Written without the key: no correct letter, feedback or explanation.
+    assert "CORRECT" not in user and "Hooks enforce." not in user and "FEEDBACK" not in user
+    assert "STAGE OF THE CHAPTER" not in _build_user_message(key_free(ITEM))
     # Who opens the question is decided here, not by the model, so the same few people
     # do not open every question of a chapter.
-    openings = {opening({"prompt": {"question": f"SCENARIO: a customer support resolution agent. QUESTION: q{i}"}}, "support") for i in range(40)}
+    openings = {opening(key_free({"prompt": {"question": f"SCENARIO: a customer support resolution agent. QUESTION: q{i}"}}), "support") for i in range(40)}
     assert openings == {
         "OPENING: no person. Start with the situation itself.",
         "OPENING: Mara (head of support) brings this to you.",
         "OPENING: Omar (engineer on the support agent) brings this to you.",
     }
-    assert opening(ITEM, None) == "OPENING: no person. Start with the situation itself."
-    assert opening(ITEM, "support") in user
+    assert opening(key_free(ITEM), None) == "OPENING: no person. Start with the situation itself."
+    assert opening(key_free(ITEM), "support") in user
 
 
 async def test_a_rejected_reply_is_sent_back_with_itself_and_what_was_wrong():
@@ -366,7 +361,7 @@ async def test_a_rejected_reply_is_sent_back_with_itself_and_what_was_wrong():
             return reply(self.replies.pop(0))
 
     ica = Ica(lossy, GOOD)
-    prompt, meta = await simplify_item(ica, ITEM, "claude-haiku-5-5")
+    prompt, meta = await rephrase_item(ica, ITEM, "claude-haiku-5-5")
     assert prompt.answers == GOOD["answers"] and meta.total_tokens == 14
     assert "YOUR PREVIOUS REPLY" not in ica.prompts[0]
     # The model gets its own text back, so it can change one place and keep the rest.
@@ -375,7 +370,7 @@ async def test_a_rejected_reply_is_sent_back_with_itself_and_what_was_wrong():
 
     stubborn = Ica(*[lossy] * MAX_ATTEMPTS)
     with pytest.raises(HTTPException) as exc:
-        await simplify_item(stubborn, ITEM, "claude-haiku-5-5")
+        await rephrase_item(stubborn, ITEM, "claude-haiku-5-5")
     assert exc.value.status_code == 502 and "tool_choice" in exc.value.detail
     assert len(stubborn.prompts) == MAX_ATTEMPTS
 
@@ -391,13 +386,13 @@ async def run_check(*answers):
     return q, ica, job, (await stored(mongo, q))
 
 
-async def test_check_asks_the_original_only_when_the_game_text_is_answered_wrongly():
+async def test_check_asks_the_original_only_when_the_rephrase_is_answered_wrongly():
     q, ica, job, record = await run_check("B")
     assert ica.calls.count("check") == 1
     assert (record["check"]["verdict"], record["check"]["picked_original"]) == ("same", None)
     assert simplified_matches(q, record)
 
-    # Wrong on the game text, right on the original: the rewrite moved the answer.
+    # Wrong on the rephrase, right on the original: the rewrite moved the answer.
     q, ica, job, record = await run_check("A", "B")
     assert ica.calls.count("check") == 2 and job.succeeded == 1
     assert (record["check"]["verdict"], record["check"]["picked"], record["check"]["picked_original"]) == ("changed", 0, 1)
@@ -408,16 +403,16 @@ async def test_check_asks_the_original_only_when_the_game_text_is_answered_wrong
     assert record["check"]["verdict"] == "hard" and simplified_matches(q, record)
 
 
-async def test_check_job_and_route_work_on_stored_texts():
+async def test_check_job_and_route_work_on_stored_rephrases():
     q = ready()
     mongo, ica = FakeMongo([q]), ScriptedIca()
-    await run_job(mongo, ica, [q["_id"]], "simplify_only")
+    client_for(mongo, ica).post(f"/questions/{q['_id']}/rephrase")
     assert (await stored(mongo, q))["check"] is None
 
     job = await run_job(mongo, ica, [q["_id"]], "check", only_missing=True)
     assert (job.mode, job.succeeded) == ("check", 1)
     again = await run_job(mongo, ica, [q["_id"]], "check", only_missing=True)
-    assert again.skipped == 1 and ica.calls == ["simplify", "check"]
+    assert again.skipped == 1 and ica.calls == ["rephrase", "check"]
 
     client = client_for(mongo, ica)
     one = client.post(f"/examination/{q['_id']}/check")

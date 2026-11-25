@@ -1,7 +1,7 @@
 """One ICA chat call that must answer with a JSON object.
 
-Every pipeline step (game text, entities, icons, objectives, story, check, decomposition,
-flow, resolution) sends a system message and one user message and reads one JSON object
+Every pipeline step (objectives, story, decomposition, icons, flow, resolution, rephrase,
+check) sends a system message and one user message and reads one JSON object
 back. This is that call: it rejects a reply the model did not finish and parses the rest,
 so a step only has to validate what the object says.
 

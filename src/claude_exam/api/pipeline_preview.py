@@ -4,7 +4,8 @@ chained in memory, each step's result feeding the next, and NOTHING is written.
 Used by `scripts/run_pipeline.py --dry-run` and the prompt evaluation page
 (`routers/evaluate.py`). A step that is not run uses what is stored (`stages=("flow",)`
 draws the flow of the stored decomposition). The objectives and story steps have no dry
-form: their stored records are used.
+form: their stored records are used. A dry decomposition also builds its parts and
+entities, as storing it would.
 """
 
 import time
@@ -13,30 +14,31 @@ from collections.abc import AsyncIterator, Sequence
 from fastapi import HTTPException
 
 from claude_exam.api.check import check_item
-from claude_exam.api.decompose import decompose_item, read_decomposition
-from claude_exam.api.entities import derive_entities, extract_entities
-from claude_exam.api.flow import (
-    flow_is_current,
-    flow_item,
-    leak_warning,
-    mermaid,
-    resolution_is_current,
-    resolve_item,
+from claude_exam.api.decompose import (
+    decompose_item,
+    has_flow,
+    has_resolution,
+    parts_from,
+    read_decomposition,
 )
+from claude_exam.api.entities import derive_entities
+from claude_exam.api.flow import flow_item, leak_warning, mermaid, resolve_item
 from claude_exam.api.game.domain import answers_of, correct_indices, story_of
 from claude_exam.api.ica import IcaClient
-from claude_exam.api.icons import pick_icons
+from claude_exam.api.icons import pick_icons, stored_entities
+from claude_exam.api.question_view import key_free
+from claude_exam.api.rephrase import quality_warnings, rephrase_item
 from claude_exam.api.scenario_catalog import scenario_of, split_scenario, stem_of
 from claude_exam.api.schemas import (
     DecisionFlow,
     PromptEntities,
+    Rephrase,
     Resolution,
-    SimplifiedPrompt,
+    SemanticPart,
 )
-from claude_exam.api.simplify import quality_warnings, simplify_item
 from claude_exam.html_clean import clean_plain, clean_question
 
-DRY_STAGES = ("decompose", "simplify", "entities", "icons", "flow", "resolve", "check")
+DRY_STAGES = ("decompose", "icons", "flow", "resolve", "rephrase", "check")
 
 
 class Result:
@@ -44,10 +46,11 @@ class Result:
 
     def __init__(self) -> None:
         self.decomposition = None
-        self.prompt: SimplifiedPrompt | None = None
+        self.parts: list[SemanticPart] = []
         self.entities: PromptEntities | None = None
         self.flow: DecisionFlow | None = None
         self.resolution: Resolution | None = None
+        self.rephrase: Rephrase | None = None
         self.check: dict | None = None
         self.steps: list[dict] = []
 
@@ -55,17 +58,22 @@ class Result:
     def from_records(cls, doc: dict, simplified: dict | None, decomposition: dict | None) -> "Result":
         result = cls()
         result.decomposition = read_decomposition(decomposition, doc)
-        if simplified:
-            result.prompt = SimplifiedPrompt(**simplified["prompt"])
+        if result.decomposition is not None:
             try:
-                result.entities = PromptEntities.model_validate(simplified.get("entities") or {})
+                result.parts = [SemanticPart.model_validate(p) for p in decomposition.get("parts") or []]
             except ValueError:
-                result.entities = None
+                result.parts = []
+            result.entities = stored_entities(decomposition)
+            if has_flow(decomposition):
+                result.flow = DecisionFlow.model_validate(decomposition["flow"])
+            if has_resolution(decomposition):
+                result.resolution = Resolution.model_validate(decomposition["resolution"])
+        if simplified:
+            try:
+                result.rephrase = Rephrase(**simplified["prompt"])
+            except (TypeError, ValueError):
+                result.rephrase = None
             result.check = simplified.get("check")
-        if result.decomposition is not None and flow_is_current(decomposition):
-            result.flow = DecisionFlow.model_validate(decomposition["flow"])
-        if result.decomposition is not None and resolution_is_current(decomposition):
-            result.resolution = Resolution.model_validate(decomposition["resolution"])
         return result
 
     def as_json(self, doc: dict | None = None) -> dict:
@@ -74,10 +82,11 @@ class Result:
         out = {
             "steps": self.steps,
             "decomposition": dump(self.decomposition),
-            "prompt": dump(self.prompt),
+            "parts": [p.model_dump(mode="json") for p in self.parts],
             "entities": dump(self.entities),
             "flow": dump(self.flow),
             "resolution": dump(self.resolution),
+            "rephrase": dump(self.rephrase),
             "check": _plain(self.check),
         }
         if doc is not None:
@@ -107,29 +116,19 @@ async def run_dry(
     "skipped ..."), `tokens`, `seconds`, `warnings` and, on a failure, `detail`. A failed
     step does not stop the run; the steps that need its result fail with 409."""
     story = story_of(doc, story_record)
+    q = key_free(doc)
 
     async def run(stage: str, warnings: list[str]):
         if stage == "decompose":
             result.decomposition, meta = await decompose_item(ica, doc, model)
+            result.parts = parts_from(result.decomposition, q)
+            result.entities = derive_entities(result.decomposition, q)
             result.flow = result.resolution = None
             return meta
-        if stage == "simplify":
-            result.prompt, meta = await simplify_item(
-                ica, doc, model, story=story, decomposition=result.decomposition
-            )
-            warnings.extend(quality_warnings(doc, result.prompt.model_dump()))
-            return meta
-        if stage == "entities":
-            need(result.prompt, "a game text")
-            if result.decomposition is not None:
-                result.entities = derive_entities(result.decomposition, doc, result.prompt)
-                return None
-            result.entities, meta = await extract_entities(ica, doc, result.prompt, model)
-            return meta
         if stage == "icons":
-            need(result.prompt, "a game text")
+            need(result.decomposition, "a decomposition")
             result.entities, meta = await pick_icons(
-                ica, doc.get("section", ""), result.prompt, result.entities or PromptEntities(), model
+                ica, q, result.entities or PromptEntities(), model
             )
             return meta
         if stage == "flow":
@@ -144,9 +143,16 @@ async def run_dry(
             need(result.flow, "a flow")
             result.resolution, meta = await resolve_item(ica, doc, result.decomposition, result.flow, model)
             return meta
+        if stage == "rephrase":
+            result.rephrase, meta = await rephrase_item(ica, doc, model, place=story)
+            result.check = None
+            warnings.extend(quality_warnings(q, result.rephrase.model_dump()))
+            return meta
         if stage == "check":
-            need(result.prompt, "a game text")
-            result.check = await check_item(ica, doc, {"prompt": result.prompt.model_dump()}, model, story=story)
+            need(result.rephrase, "a rephrase")
+            result.check = await check_item(
+                ica, doc, {"prompt": result.rephrase.model_dump()}, model, story=story
+            )
             return None
         raise HTTPException(status_code=400, detail="no dry run for this step: its stored record is used")
 

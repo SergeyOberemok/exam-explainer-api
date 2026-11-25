@@ -20,12 +20,12 @@ from pymongo import MongoClient
 
 from claude_exam.api.game.domain import chapter_of, is_playable, objectives_of, usable_story
 from claude_exam.api.scenario_catalog import (
-    CHAPTER_VERSIONS,
     SCENARIOS,
     STAGES,
     unknown_paragraph,
 )
-from claude_exam.api.story import PROMPT_VERSION
+from claude_exam.api import pipeline_keys
+from claude_exam.api.pipeline_keys import Records
 
 
 def database_url(args: list[str]) -> str:
@@ -75,14 +75,11 @@ def main() -> int:
         nodes[(chapter, record["stage"])] += 1
         origins[record.get("origin")] += 1
         picked += record.get("scenario_origin") == "model"
-        if record.get("origin") != "seed" and (
-            record.get("catalog_version") not in CHAPTER_VERSIONS
-            or record.get("prompt_version") != PROMPT_VERSION
-        ):
+        if not pipeline_keys.is_current("story", doc, Records(story=record)):
             outdated.append(question_id)
 
     print(
-        f"Story prompt {PROMPT_VERSION}: {len(questions)} playable "
+        f"{len(questions)} playable "
         f"questions, {sum(nodes.values())} with a story "
         f"({origins['seed']} seed, {origins['ica']} written by the model; "
         f"{picked} in a chapter the model picked)\n"

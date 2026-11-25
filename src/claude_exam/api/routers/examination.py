@@ -36,7 +36,6 @@ from claude_exam.api.dependencies import (
     SimplificationLockDep,
 )
 from claude_exam.api.decompose import decompose_and_store
-from claude_exam.api.entities import enrich_and_store
 from claude_exam.api.flow import flow_and_store, resolve_and_store
 from claude_exam.api.game.domain import story_of
 from claude_exam.api.icons import assign_and_store
@@ -136,14 +135,6 @@ async def import_practice_exam(
         bool, Query(description="Start the background pipeline job after import")
     ] = True,
     model_id: ModelIdQuery = "claude-haiku-5-5",
-    entities: Annotated[
-        bool,
-        Query(
-            description="false: only write the game text of each question (no "
-            "objectives, story, entities, icons or check; add them later with "
-            "POST /examination/pipeline/backfill)"
-        ),
-    ] = True,
     dry_run: Annotated[
         bool,
         Query(description="Store nothing and start no job: only report what an import would do"),
@@ -153,7 +144,8 @@ async def import_practice_exam(
     Import a practice-exam JSON file. A question the bank already holds (same question
     text and answers) is left out, so the same file can be uploaded again. Unless
     `simplify=false`, a background job then runs the whole pipeline for each new
-    question (job mode "full": objectives, story, game text, entities, icons, check);
+    question (job mode "full": objectives, story, decomposition with its parts and
+    entities, icons, flow, resolution, rephrase, check);
     track it via `GET /examination/jobs/{job_id}`.
 
     The result also says what the pipeline cannot do for the new questions until a
@@ -191,8 +183,7 @@ async def import_practice_exam(
 
     job_id: str | None = None
     if simplify:
-        mode: JobMode = "full" if entities else "simplify_only"
-        job_id = await starter.start(source, inserted_ids, model_id, mode)
+        job_id = await starter.start(source, inserted_ids, model_id, "full")
 
     return ImportResult(source=source, inserted=len(inserted_ids), job_id=job_id, **report)
 
@@ -239,97 +230,53 @@ async def backfill_pipeline(
     return EntitiesBackfill(job_id=job_id, total=len(question_ids))
 
 
-@router.post("/{question_id}/entities")
-async def extract_question_entities(
+@router.post("/{question_id}/icons")
+async def pick_question_icons(
     question_id: QuestionObjectIdDep,
     collection: AsyncCollectionDep,
-    simplified: AsyncSimplifiedCollectionDep,
+    decomposition: AsyncDecompositionCollectionDep,
     ica: IcaClientDep,
     lock: SimplificationLockDep,
     model_id: ModelIdQuery = "claude-haiku-5-5",
     max_tokens: MaxTokensQuery = None,
-) -> SimplifiedQuestion:
+) -> DecompositionRecord:
     """
-    (Re)extract the visual entities of one already simplified question through ICA
-    and store them on its simplified record; the simplified text is not touched.
-    The new entities have no icons: call `POST /examination/{id}/icons` afterwards.
-    Shares the job lock so it never adds ICA load on top of a running job: while a
-    job runs it answers 409 (retry once the job has finished) instead of waiting.
+    (Re)pick the icons of one decomposed question through ICA: one key from the icon
+    catalog for each of its entities, for the question and for each answer. Only the
+    icon fields change. 404 without a decomposition; answers 409 while a job runs.
     """
     doc = await collection.find_one({"_id": question_id})
     if doc is None:
         raise HTTPException(status_code=404, detail="question not found")
     _refuse_while_a_job_runs(lock)
     async with lock:
-        return await enrich_and_store(ica, simplified, doc, model_id, max_tokens)
-
-
-@router.post("/entities/backfill", status_code=202)
-async def backfill_entities(
-    simplified: AsyncSimplifiedCollectionDep,
-    starter: JobStarterDep,
-    model_id: ModelIdQuery = "claude-haiku-5-5",
-    only_missing: Annotated[
-        bool, Query(description="Skip records that already have entities")
-    ] = True,
-) -> EntitiesBackfill:
-    """
-    Start a background job that extracts entities for already simplified questions
-    (by default only those without any; the job checks again when it reaches each
-    question, so repeated or overlapping backfills skip what is already done);
-    track it via `GET /examination/jobs/{job_id}`.
-    """
-    # `entities_ica` is set only by a successful extraction, so a question that really
-    # has no entities is not picked again (None also matches a missing field).
-    query: dict = {"entities_ica": None} if only_missing else {}
-    question_ids = [
-        ObjectId(doc["question_id"])
-        async for doc in simplified.find(query, {"question_id": 1})
-        if ObjectId.is_valid(doc.get("question_id", ""))
-    ]
-    job_id = await starter.start("entities-backfill", question_ids, model_id, "entities", only_missing)
-    return EntitiesBackfill(job_id=job_id, total=len(question_ids))
-
-
-@router.post("/{question_id}/icons")
-async def pick_question_icons(
-    question_id: QuestionObjectIdDep,
-    simplified: AsyncSimplifiedCollectionDep,
-    ica: IcaClientDep,
-    lock: SimplificationLockDep,
-    model_id: ModelIdQuery = "claude-haiku-5-5",
-    max_tokens: MaxTokensQuery = None,
-) -> SimplifiedQuestion:
-    """
-    (Re)pick the icons of one already simplified question through ICA: one key from
-    the icon catalog for each of its entities, for the question and for each answer.
-    Only the icon fields change. Answers 409 while a job runs, like the entity route.
-    """
-    _refuse_while_a_job_runs(lock)
-    async with lock:
-        return await assign_and_store(ica, simplified, str(question_id), model_id, max_tokens)
+        return await assign_and_store(ica, decomposition, doc, model_id, max_tokens)
 
 
 @router.post("/icons/backfill", status_code=202)
 async def backfill_icons(
-    simplified: AsyncSimplifiedCollectionDep,
+    collection: AsyncCollectionDep,
+    decomposition: AsyncDecompositionCollectionDep,
     starter: JobStarterDep,
     model_id: ModelIdQuery = "claude-haiku-5-5",
     only_missing: Annotated[
-        bool, Query(description="Skip records that already have icons")
+        bool, Query(description="Skip questions whose icons are current")
     ] = True,
 ) -> EntitiesBackfill:
     """
-    Start a background job that picks icons for already simplified questions (by
-    default only those without any; pass `only_missing=false` after changing the icon
-    catalog to pick all again); track it via `GET /examination/jobs/{job_id}`.
+    Start a background job that picks icons for decomposed questions (by default only
+    those without current icons: none yet, or picked from another catalog, prompt or
+    set of entities); track it via `GET /examination/jobs/{job_id}`.
     """
-    query: dict = {"icons_ica": None} if only_missing else {}
-    question_ids = [
-        ObjectId(doc["question_id"])
-        async for doc in simplified.find(query, {"question_id": 1})
-        if ObjectId.is_valid(doc.get("question_id", ""))
-    ]
+    stores = Stores(collection, None, None, None, decomposition)
+    question_ids: list[ObjectId] = []
+    async for record in decomposition.find({}, {"question_id": 1}):
+        if not ObjectId.is_valid(record.get("question_id", "")):
+            continue
+        doc = await collection.find_one({"_id": ObjectId(record["question_id"])})
+        if doc is None or (only_missing and await is_current("icons", stores, doc)):
+            continue
+        question_ids.append(doc["_id"])
     job_id = await starter.start("icons-backfill", question_ids, model_id, "icons", only_missing)
     return EntitiesBackfill(job_id=job_id, total=len(question_ids))
 
@@ -346,10 +293,9 @@ async def check_question(
     max_tokens: MaxTokensQuery = None,
 ) -> SimplifiedQuestion:
     """
-    (Re)check the game text of one already simplified question: a model answers it
-    without the key, and the verdict is stored on the simplified record (`check`).
-    A text whose verdict is "changed" is not offered by the game. Answers 409 while a
-    job runs, like the entity route.
+    (Re)check the rephrase of one question: a model answers it without the key, and
+    the verdict is stored on the rephrase record (`check`). A rephrase whose verdict is
+    "changed" is not offered by the game. 404 without a rephrase; 409 while a job runs.
     """
     doc = await collection.find_one({"_id": question_id})
     if doc is None:
@@ -391,11 +337,9 @@ async def decompose_question(
     model_id: ModelIdQuery = "claude-haiku-5-5",
     max_tokens: MaxTokensQuery = None,
 ) -> DecompositionRecord:
-    """(Re)write the decomposition of one question (key-free, `decompose.py`). Its old
-    flow and resolution are cleared, and its game text (parts, derived entities) is
-    outdated: the game sends no flow until both are rewritten from this decomposition.
-    Run the pipeline backfill (or `/questions/{id}/simplify?force=true`, `/icons`,
-    `/flow`, `/resolve`) after it. 409 while a job runs."""
+    """(Re)write the decomposition of one question (key-free, `decompose.py`), with its
+    parts and entities. Its old icons, flow and resolution are cleared: run the pipeline
+    backfill (or `/icons`, `/flow`, `/resolve`) after it. 409 while a job runs."""
     _refuse_while_a_job_runs(lock)
     async with lock:
         return await decompose_and_store(ica, decomposition, doc, model_id, max_tokens)

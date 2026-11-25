@@ -2,7 +2,7 @@
 
 import pytest
 from fastapi import HTTPException
-from test_entities import GOOD_ICONS, SIMPLIFIED, FakeIca, reply
+from test_entities import DOC, GOOD_ICONS, VIEW, FakeIca, reply
 
 from claude_exam.api.icon_catalog import ICON_KEYS, ICONS, KIND_FALLBACK, known
 from claude_exam.api.icons import (
@@ -106,16 +106,16 @@ def test_system_message_lists_the_catalog_and_the_answer_count():
 
 
 def test_user_message_lists_each_entity_once_and_hides_the_answer_key():
-    message = _build_user_message("Domain 3", SIMPLIFIED, entities(answers=((CODE, EDITS), (PLAN,))))
+    message = _build_user_message(VIEW, entities(answers=((CODE, EDITS), (PLAN,))))
     assert message.count("- Claude Code (actor) - also: the CLI") == 1
     assert "- plan mode (object)\n" in message + "\n"
     assert "A. acceptEdits mode" in message and "B. plan mode" in message
-    assert SIMPLIFIED.feedbacks[1] not in message and SIMPLIFIED.explanation not in message
+    assert DOC["prompt"]["explanation"] not in message and "Section: Domain 3" in message
 
 
 async def test_pick_icons_returns_entities_with_icons_and_meta():
     ica = FakeIca(reply(GOOD_ICONS))
-    result, meta = await pick_icons(ica, "Domain 3", SIMPLIFIED, entities(), "claude-haiku-5-5")
+    result, meta = await pick_icons(ica, VIEW, entities(), "claude-haiku-5-5")
     assert result.answers[1].icon == "plan" and meta.total_tokens == 42
     assert "icon catalog" in ica.calls[0]["system"]
 
@@ -123,5 +123,5 @@ async def test_pick_icons_returns_entities_with_icons_and_meta():
 async def test_pick_icons_rejects_a_truncated_reply():
     ica = FakeIca(reply(GOOD_ICONS, finish_reason="length"))
     with pytest.raises(HTTPException) as exc:
-        await pick_icons(ica, "Domain 3", SIMPLIFIED, entities(), "claude-haiku-5-5")
+        await pick_icons(ica, VIEW, entities(), "claude-haiku-5-5")
     assert exc.value.status_code == 502

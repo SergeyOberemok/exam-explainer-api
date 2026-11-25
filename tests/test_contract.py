@@ -24,6 +24,7 @@ from fastapi.testclient import TestClient
 
 from claude_exam.api.dependencies import (
     get_async_collection,
+    get_async_decomposition_collection,
     get_async_objectives_collection,
     get_async_rounds_collection,
     get_async_simplified_collection,
@@ -72,18 +73,33 @@ EXAM = [
     question(Q2, "What caches prompts?", ["cache_control", "retries", "batches", "tools"], "a"),
     question(Q3, "Which <tag> is literal?", ["<example>", "<b>", "none"], "a"),
 ]
+# Q1 has a rephrase (question and answers only; the review stays the original's).
 SIMPLE = [
     {
         **EXAM[0],
         "_id": ObjectId("65f0000000000000000000b1"),
         "question_id": str(Q1),
-        "prompt": {**EXAM[0]["prompt"], "question": "Where does the key go?", "explanation": "Simply put: x-api-key."},
-        # The second answer and the last entity have no icon yet, and "retired-key" is
-        # no longer in the catalog: all three are served as null.
+        "prompt": {"question": "Where does the key go?", "answers": EXAM[0]["prompt"]["answers"]},
+    }
+]
+
+# Q1 is decomposed: its parts and entities (with icons) are served on the question and,
+# the entities, on its rephrase. The second answer and the last entity have no icon yet,
+# and "retired-key" is no longer in the catalog: all three are served as null. It has no
+# flow, so the flow is empty.
+DECOMPOSITION = [
+    {
+        "_id": ObjectId("65f0000000000000000000e1"),
+        "question_id": str(Q1),
+        "text_hash": text_hash(EXAM[0]),
+        "parts": [
+            {"role": "context", "text": "A support agent calls the API.", "entity_ids": ["e1"]},
+            {"role": "ask", "text": "Which header carries the API key?", "entity_ids": ["e1"]},
+        ],
         "entities": {
             "question_icon": "credential",
             "question": [
-                {"name": "API Key", "kind": "object", "aliases": ["key"], "icon": "credential"},
+                {"name": "API Key", "kind": "object", "aliases": ["key"], "ref": "e1", "icon": "credential"},
                 {"name": "Send Request", "kind": "action", "aliases": [], "icon": "send"},
             ],
             "answers": [
@@ -143,6 +159,7 @@ def client():
     app.dependency_overrides[get_async_objectives_collection] = lambda: FakeCollection(TAGS)
     app.dependency_overrides[get_async_collection] = lambda: FakeCollection(EXAM)
     app.dependency_overrides[get_async_simplified_collection] = lambda: FakeCollection(SIMPLE)
+    app.dependency_overrides[get_async_decomposition_collection] = lambda: FakeCollection(DECOMPOSITION)
     app.dependency_overrides[get_async_rounds_collection] = lambda: rounds
     return TestClient(app)
 

@@ -7,13 +7,14 @@ place where learning objectives are enforced: edit it by hand and review the cha
 `scripts/objective_coverage.py` shows how many questions each objective has.
 
 `statement` is what the model reads when it picks, and what a learner should be able to
-do. `title` is the short name a client shows. Changing a key, section or statement
-changes `CATALOG_VERSION`, and the next objectives backfill tags every question again;
+do. `title` is the short name a client shows. The section's objectives are in the
+tagging prompt, so changing a key, section or statement outdates the tags of the
+questions that read it (their input key changes) and the next backfill tags them again;
 changing only a title does not. Removing a key is safe: stored uses of it are dropped
 when served.
 """
 
-import hashlib
+
 import re
 from typing import NamedTuple
 
@@ -187,11 +188,6 @@ BY_KEY: dict[str, ObjectiveDef] = {o.key: o for o in OBJECTIVES}
 
 assert len(BY_KEY) == len(OBJECTIVES), "objective keys must be unique"
 assert all(KEY_PATTERN.match(o.key) for o in OBJECTIVES), "objective keys are kebab-case"
-
-CATALOG_VERSION: str = hashlib.sha1(
-    "\n".join(f"{o.key}|{o.section}|{o.statement}" for o in OBJECTIVES).encode()
-).hexdigest()[:12]
-
 
 def normalize_section(section: object) -> str:
     """A stored section name without its "Domain N: " prefix."""

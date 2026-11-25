@@ -11,9 +11,7 @@ from test_entities import FakeIca, reply
 
 from claude_exam.api.scenario_catalog import (
     BY_KEY,
-    CATALOG_VERSION,
     SCENARIOS,
-    chapter_version,
     STAGE_KEYS,
     scenario_of,
     split_scenario,
@@ -63,7 +61,6 @@ def test_catalog_is_consistent():
     assert len(BY_KEY) == len(SCENARIOS) >= 4 and len(STAGE_KEYS) == 5
     assert all(s.title and s.district and s.intro and s.outro for s in SCENARIOS)
     assert all(s.marker == s.marker.lower() for s in SCENARIOS)
-    assert len(CATALOG_VERSION) == 12
 
 
 def test_split_takes_the_scenario_paragraph_off_the_question():
@@ -140,11 +137,10 @@ def test_messages_carry_the_chapter_and_the_stem_only():
     assert "CORRECT ANSWER: B" in user and "  C. Lower the temperature" in user
 
 
-def test_record_fields_identify_the_question_and_the_versions():
+def test_record_fields_identify_the_question():
     fields = record_fields(DOC, GOOD, "seed", 3)
     assert (fields["scenario"], fields["order"], fields["origin"]) == ("support", 3, "seed")
     assert fields["text_hash"] == text_hash(DOC) and fields["scenario_origin"] == "text"
-    assert fields["catalog_version"] == chapter_version("support") != chapter_version("research")
     assert fields["beat"] == GOOD["beat"]
 
 

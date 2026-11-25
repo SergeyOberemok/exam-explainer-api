@@ -1,11 +1,9 @@
 import asyncio
-from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException
 
 from claude_exam.api.dependencies import (
     AsyncCollectionDep,
-    AsyncDecompositionCollectionDep,
     AsyncSimplifiedCollectionDep,
     AsyncStoryCollectionDep,
     IcaClientDep,
@@ -13,7 +11,6 @@ from claude_exam.api.dependencies import (
     QuestionFiltersDep,
     QuestionObjectIdDep,
 )
-from claude_exam.api.decompose import read_decomposition
 from claude_exam.api.game.domain import story_of
 from claude_exam.api.schemas import (
     Question,
@@ -23,7 +20,7 @@ from claude_exam.api.schemas import (
     SimplifyRequest,
 )
 from claude_exam.api.security import require_api_key
-from claude_exam.api.simplify import simplify_and_store
+from claude_exam.api.rephrase import rephrase_and_store
 
 # Returns the answer key and feedback, so it needs the API key when one is configured.
 router = APIRouter(
@@ -85,32 +82,23 @@ async def get_question(
     return to_question(doc)
 
 
-@router.post("/{question_id}/simplify")
-async def simplify_question(
+@router.post("/{question_id}/rephrase")
+async def rephrase_question(
     question_id: str,
     object_id: QuestionObjectIdDep,
     collection: AsyncCollectionDep,
     simplified: AsyncSimplifiedCollectionDep,
     story: AsyncStoryCollectionDep,
-    decomposition: AsyncDecompositionCollectionDep,
     ica: IcaClientDep,
     body: SimplifyRequest | None = None,
     force: bool = False,
-    entities: Annotated[
-        bool,
-        Query(
-            description="Also extract visual entities after simplifying (best effort; "
-            "false: simplify only, add them later via POST /examination/{id}/entities)"
-        ),
-    ] = True,
 ) -> SimplifiedQuestion:
     """
-    Simplify one stored question through ICA and upsert the result into
-    `examination_simplified`, keyed by `question_id` (the examination `_id`).
-    An already stored result is returned as-is (no ICA call) unless `force=true`,
-    which replaces it and keeps `created_at`. Unless `entities=false`, a second
-    call then extracts its visual entities onto the record. A question with a current
-    decomposition gets its text as semantic parts and its entities derived from it.
+    Rephrase one stored question through ICA (its question and answers in plain words,
+    written without the key) and upsert the result into `examination_simplified`, keyed
+    by `question_id` (the examination `_id`). An already stored rephrase is returned
+    as-is (no ICA call) unless `force=true`, which replaces it and keeps `created_at`.
+    Check it afterwards with `POST /examination/{id}/check`.
     """
     body = body or SimplifyRequest()
     doc = await collection.find_one({"_id": object_id})
@@ -124,16 +112,6 @@ async def simplify_question(
 
     # The text is set where the question stands in the game's story, when it has a place.
     record = await story.find_one({"question_id": question_id})
-    decomposed = read_decomposition(
-        await decomposition.find_one({"question_id": question_id}), doc
-    )
-    return await simplify_and_store(
-        ica,
-        simplified,
-        doc,
-        body.model_id,
-        body.max_tokens,
-        with_entities=entities,
-        story=story_of(doc, record),
-        decomposition=decomposed,
+    return await rephrase_and_store(
+        ica, simplified, doc, body.model_id, body.max_tokens, place=story_of(doc, record)
     )

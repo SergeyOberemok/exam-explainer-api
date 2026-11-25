@@ -7,8 +7,8 @@ anything left to do, and what kind of thing it is:
   `POST /examination/pipeline/backfill`;
 - a scenario paragraph no chapter claims, or a section without objectives: extend the
   catalog (`propose_scenarios.py`, `propose_objectives.py`), then run the backfill;
-- a game text the check found changed: read it (`--show`), then write it again with
-  `POST /questions/{id}/simplify?force=true` and check it with
+- a rephrase the check found changed: read it (`--show`), then write it again with
+  `POST /questions/{id}/rephrase?force=true` and check it with
   `POST /examination/{id}/check`. Until then the game serves the original only;
 - a pre-answer flow that may point at the correct answer (`flow.leak_warning`): look at
   it with `scripts/run_pipeline.py ID --stages flow --dry-run --mermaid` and redo it
@@ -16,7 +16,7 @@ anything left to do, and what kind of thing it is:
 
 Usage: uv run python scripts/pipeline_report.py [DATABASE_URL] [--source FILE] [--show] [--check]
   --source FILE  only questions imported from this file
-  --show         print the question and the game text of every flagged question
+  --show         print the question and the rephrase of every flagged question
   --check        exit with status 1 when something needs work
 Without DATABASE_URL the one from the environment or `.env` is used.
 """
@@ -42,7 +42,7 @@ from claude_exam.api.objective_catalog import for_section, normalize_section
 from claude_exam.api.scenario_catalog import unknown_paragraph
 from claude_exam.api.flow import leak_warning
 from claude_exam.api.schemas import DecisionFlow
-from claude_exam.api.simplify import quality_warnings
+from claude_exam.api.rephrase import quality_warnings
 
 
 def database_url(args: list[str]) -> str:
@@ -70,7 +70,7 @@ def stage_states(
 
 def show(doc: dict, simplified: dict) -> None:
     correct = correct_indices(doc)
-    for title, source in (("ORIGINAL", doc), ("GAME TEXT", simplified)):
+    for title, source in (("ORIGINAL", doc), ("REPHRASE", simplified)):
         print(f"      {title}: {' '.join((source['prompt'].get('question') or '').split())}")
         for i, answer in enumerate(answers_of(source)):
             mark = "*" if i in correct else " "
@@ -112,7 +112,7 @@ def main() -> int:
         )
         for stage, state in question_states.items():
             states[stage][state] += 1
-        if decompose.is_current(record, doc) and decompose.flow_is_current(record):
+        if decompose.matches(record, doc) and decompose.has_flow(record):
             try:
                 flow = DecisionFlow.model_validate(record["flow"])
             except ValueError:
@@ -139,7 +139,7 @@ def main() -> int:
             hard.append(question_id)
         if is_playable(doc) and not simplified_matches(doc, text) and verdict != CHECK_CHANGED:
             unusable.append(question_id)
-        if question_states["simplify"] == "current":
+        if question_states["rephrase"] == "current":
             hard_problems = [w for w in quality_warnings(doc, text["prompt"]) if "near copy" not in w]
             if hard_problems:
                 lossy.append((question_id, hard_problems))
@@ -163,15 +163,15 @@ def main() -> int:
         print(f"  section without objectives: {name!r} ({count} questions)")
     for name, count in paragraphs.most_common():
         print(f"  scenario no chapter claims: {name!r} ({count} questions)")
-    print(f"  game texts the check found changed (not served): {len(changed)}")
+    print(f"  rephrases the check found changed (not offered): {len(changed)}")
     for question_id in changed:
         print(f"    {question_id}")
         if "--show" in argv:
             show(next(d for d in docs if str(d["_id"]) == question_id), simplified[question_id])
-    print(f"  game texts with another answer count or key (not served): {len(unusable)}")
+    print(f"  rephrases with another answer count or key (not offered): {len(unusable)}")
     for question_id in unusable:
         print(f"    {question_id}")
-    print(f"  current game texts that break a fidelity rule: {len(lossy)}")
+    print(f"  current rephrases that break a fidelity rule: {len(lossy)}")
     for question_id, problems in lossy:
         print(f"    {question_id}: {'; '.join(problems)}")
 

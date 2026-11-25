@@ -1,6 +1,5 @@
-"""The import -> simplify -> extract entities -> pick icons pipeline: job modes, the
-routes that start them, and the standalone entity and icon steps updating an existing
-simplified record.
+"""The ingest jobs: job modes (decomposition with its parts and entities, icons,
+rephrase and check), the routes that start them, and the standalone steps.
 
 The last test runs the same pipeline against a real MongoDB (opt-in, like
 `tests/test_game_mongo.py`): TEST_MONGO_URL=mongodb://127.0.0.1:27017.
@@ -34,11 +33,9 @@ from claude_exam.api.dependencies import (
     get_ica_client,
     get_simplification_lock,
 )
-from claude_exam.api.entities import MAX_ENTITIES, MAX_PER_ANSWER, _build_system_message
 from claude_exam.api.main import app
-from claude_exam.api.objective_catalog import CATALOG_VERSION
 from claude_exam.api.scenario_catalog import text_hash
-from claude_exam.api.schemas import PromptEntities, SimplificationJob, SimplifiedQuestion
+from claude_exam.api.schemas import DecompositionRecord, PromptEntities, SimplificationJob
 from claude_exam.api.story import ICA_ORDER as STORY_ORDER
 
 pytestmark = pytest.mark.anyio
@@ -146,20 +143,11 @@ def reply(payload):
     }
 
 
+# The default rephrase reply (`rephrase.py`): the question and answers only.
 SIMPLE = {
     "question": "Which mode, plan mode or acceptEdits mode, reads but never edits?",
     "answers": ["acceptEdits mode", "plan mode"],
-    "feedbacks": ["Incorrect. It edits.", "Correct. It blocks edits."],
-    "explanation": "Plan mode blocks edits.",
 }
-
-
-def entities_reply(name="plan mode"):
-    return {
-        "entities": [{"id": "e1", "name": name, "kind": "object", "aliases": []}],
-        "question_entities": ["e1"],
-        "answers_entities": [[], ["e1"]],
-    }
 
 
 def icons_reply():
@@ -233,6 +221,17 @@ def decomposition_reply(n_answers=2):
     }
 
 
+def decomposition_with_plan_mode(n_answers=2):
+    """`decomposition_reply` plus an entity only answer B names, so the derived
+    entities have one to draw (the default ones are not in the question's words)."""
+    d = decomposition_reply(n_answers)
+    d["entities"].append(
+        {"id": "e3", "name": "plan mode", "type": "object", "aliases": [], "description": "A mode", "source_status": "inferred", "evidence": ""}
+    )
+    d["answer_options"][1]["entity_ids"] = ["e3"]
+    return d
+
+
 def _node(id, type, label, **kw):
     return {"id": id, "type": type, "label": label, "entity_ids": [], "condition_id": "", "source_status": "inferred", "is_question": False, "added": False, **kw}
 
@@ -285,8 +284,7 @@ class ScriptedIca:
     the call kinds."""
 
     DEFAULTS = {
-        "simplify": lambda: SIMPLE,
-        "entities": entities_reply,
+        "rephrase": lambda: SIMPLE,
         "icons": icons_reply,
         "objectives": objectives_reply,
         "story": lambda: story_reply(),
@@ -295,8 +293,7 @@ class ScriptedIca:
 
     def __init__(
         self,
-        simplify=(),
-        entities=(),
+        rephrase=(),
         icons=(),
         objectives=(),
         story=(),
@@ -306,8 +303,7 @@ class ScriptedIca:
         resolve=(),
     ):
         self.queues = {
-            "simplify": list(simplify),
-            "entities": list(entities),
+            "rephrase": list(rephrase),
             "icons": list(icons),
             "objectives": list(objectives),
             "story": list(story),
@@ -329,9 +325,9 @@ class ScriptedIca:
         if kind == "resolve":
             return resolution_reply(len(letters), correct)
         payload = copy.deepcopy(self.DEFAULTS[kind]())
-        if kind == "simplify" and "THE QUESTION AS PARTS" in system:
-            question = payload.pop("question")
-            payload = {"parts": [{"role": "ask", "text": question, "entity_ids": []}], **payload}
+        if kind == "icons" and letters:
+            # One answer icon per answer of the question asked about.
+            payload["answers"] = (payload["answers"] + ["mode"] * len(letters))[: len(letters)]
         return payload
 
     async def chat_model(
@@ -346,9 +342,8 @@ class ScriptedIca:
             else "icons" if "icon catalog" in system
             else "objectives" if "learning objective" in system
             else "story" if "story of a quiz game" in system
-            else "entities" if "visual entities" in system
             else "check" if "You answer one multiple-choice question" in system
-            else "simplify"
+            else "rephrase"
         )
         self.calls.append(kind)
         self.max_tokens.append(max_tokens)
@@ -387,157 +382,133 @@ async def run_job(mongo, ica, ids, mode, only_missing=False):
 
 
 async def stored(mongo, doc):
+    """The question's rephrase record."""
     db = mongo.get_default_database()
     return await db["examination_simplified"].find_one({"question_id": str(doc["_id"])})
+
+
+async def decomposed(mongo, doc):
+    """The question's decomposition record (with its parts, entities and icons)."""
+    db = mongo.get_default_database()
+    return await db["question_decomposition"].find_one({"question_id": str(doc["_id"])})
 
 
 # --- job modes ---------------------------------------------------------------------
 
 
-async def test_simplify_mode_simplifies_then_adds_entities():
+async def test_decompose_mode_stores_parts_entities_icons_flow_and_resolution():
     q = question()
-    mongo, ica = FakeMongo([q]), ScriptedIca()
-    job = await run_job(mongo, ica, [q["_id"]], "simplify")
-    assert ica.calls == ["simplify", "entities", "icons"]
-    assert (job.mode, job.status, job.succeeded, job.failed) == ("simplify", "completed", 1, 0)
-    record = await stored(mongo, q)
-    assert record["entities"]["answers"][1]["entities"][0]["name"] == "plan mode"
-    assert record["entities_ica"] is not None
+    mongo, ica = FakeMongo([q]), ScriptedIca(decompose=[reply(decomposition_with_plan_mode())])
+    job = await run_job(mongo, ica, [q["_id"]], "decompose")
+    assert ica.calls == ["decompose", "icons", "flow", "resolve"]
+    assert (job.mode, job.status, job.succeeded, job.failed) == ("decompose", "completed", 1, 0)
+    record = await decomposed(mongo, q)
+    # Parts and entities are built in code: no call of their own.
+    assert record["parts"][-1] == {"role": "ask", "text": "Which mode?", "entity_ids": []}
     assert record["entities"]["answers"][1] == {
-        "entities": [{"name": "plan mode", "kind": "object", "aliases": [], "ref": "", "icon": "plan"}],
+        "entities": [{"name": "plan mode", "kind": "object", "aliases": [], "ref": "e3", "icon": "plan"}],
         "icon": "plan",
     }
     assert record["entities"]["question_icon"] == "mode" and record["icons_ica"] is not None
+    assert record["flow"] and record["resolution"]
+    assert await stored(mongo, q) is None  # the rephrase is a step of its own
 
 
-async def test_icons_failure_after_entities_is_partial_not_a_failed_job():
+async def test_icons_failure_after_the_decomposition_is_partial_not_a_failed_job():
     q = question()
     mongo = FakeMongo([q])
     ica = ScriptedIca(icons=[HTTPException(status_code=400, detail="boom")])
-    job = await run_job(mongo, ica, [q["_id"]], "simplify")
-    assert (job.status, job.succeeded, job.failed) == ("completed", 0, 1)
-    assert (job.entities_failed, job.icons_failed) == (0, 1)
+    job = await run_job(mongo, ica, [q["_id"]], "decompose")
+    assert (job.status, job.succeeded, job.failed, job.icons_failed) == ("completed", 0, 1, 1)
     assert job.errors[0].stage == "icons"
-    record = await stored(mongo, q)
-    assert record["entities_ica"] is not None and record["icons_ica"] is None
+    record = await decomposed(mongo, q)
+    assert record["icons_ica"] is None and record["flow"]  # the flow does not need icons
 
 
 async def test_icons_job_picks_only_where_missing_and_keeps_the_rest():
     q = question()
-    mongo, ica = FakeMongo([q]), ScriptedIca(icons=[HTTPException(status_code=400, detail="x")])
-    await run_job(mongo, ica, [q["_id"]], "simplify")  # entities stored, icons failed
-    before = await stored(mongo, q)
+    mongo = FakeMongo([q])
+    ica = ScriptedIca(
+        decompose=[reply(decomposition_with_plan_mode())],
+        icons=[HTTPException(status_code=400, detail="x")],
+    )
+    await run_job(mongo, ica, [q["_id"]], "decompose")  # entities stored, icons failed
+    before = await decomposed(mongo, q)
     ica.calls.clear()
 
     job = await run_job(mongo, ica, [q["_id"]], "icons", only_missing=True)
-    after = await stored(mongo, q)
+    after = await decomposed(mongo, q)
     assert ica.calls == ["icons"]
     assert (job.mode, job.status, job.succeeded) == ("icons", "completed", 1)
-    assert after["entities"]["question"][0]["icon"] == "plan"
-    for unchanged in ("_id", "prompt", "ica", "entities_ica", "created_at"):
+    assert after["entities"]["answers"][1]["entities"][0]["icon"] == "plan"
+    for unchanged in ("_id", "semantic", "parts", "flow", "created_at"):
         assert after[unchanged] == before[unchanged]
 
     again = await run_job(mongo, ica, [q["_id"]], "icons", only_missing=True)
     assert ica.calls == ["icons"] and again.skipped == 1
 
 
-async def test_new_entities_drop_the_old_icons_and_get_new_ones():
+async def test_a_new_decomposition_drops_the_old_icons():
     q = question()
-    mongo, ica = FakeMongo([q]), ScriptedIca()
-    await run_job(mongo, ica, [q["_id"]], "simplify")
+    mongo, ica = FakeMongo([q]), ScriptedIca(decompose=[reply(decomposition_with_plan_mode())] * 2)
+    await run_job(mongo, ica, [q["_id"]], "decompose")
     ica.queues["icons"].append(HTTPException(status_code=400, detail="x"))
-    job = await run_job(mongo, ica, [q["_id"]], "entities")
-    record = await stored(mongo, q)
+    job = await run_job(mongo, ica, [q["_id"]], "decompose")
+    record = await decomposed(mongo, q)
     assert job.icons_failed == 1
-    assert record["icons_ica"] is None and record["entities"]["question"][0]["icon"] is None
+    assert record["icons_ica"] is None
+    assert record["entities"]["answers"][1]["entities"][0]["icon"] is None
 
 
-async def test_simplify_only_mode_leaves_entities_for_later():
+async def test_rephrase_mode_writes_the_rephrase_and_checks_it():
     q = question()
     mongo, ica = FakeMongo([q]), ScriptedIca()
-    job = await run_job(mongo, ica, [q["_id"]], "simplify_only")
-    assert ica.calls == ["simplify"]
+    job = await run_job(mongo, ica, [q["_id"]], "rephrase")
+    assert ica.calls == ["rephrase", "check"]
     assert (job.status, job.succeeded) == ("completed", 1)
     record = await stored(mongo, q)
-    assert record["prompt"]["question"] == SIMPLE["question"]
-    assert record["entities_ica"] is None and record["entities"]["question"] == []
+    assert record["prompt"] == SIMPLE and record["correct_response"] == ["b"]
+    assert record["check"]["verdict"] == "same" and record["input_key"]
 
 
-async def test_entities_failure_after_simplify_is_partial_not_a_failed_job():
+async def test_a_failed_rephrase_is_reported_with_its_stage_and_nothing_is_checked():
     q = question()
     mongo = FakeMongo([q])
-    ica = ScriptedIca(entities=[HTTPException(status_code=400, detail="boom")])
-    job = await run_job(mongo, ica, [q["_id"]], "simplify")
-    assert (job.status, job.succeeded, job.failed, job.entities_failed) == ("completed", 0, 1, 1)
-    assert job.errors[0].stage == "entities" and job.errors[0].detail == "boom"
-    assert (await stored(mongo, q))["prompt"]["question"] == SIMPLE["question"]
-
-
-async def test_simplify_failure_is_reported_with_its_stage_and_fails_the_job():
-    q = question()
-    mongo = FakeMongo([q])
-    ica = ScriptedIca(simplify=[HTTPException(status_code=400, detail="bad key")])
-    job = await run_job(mongo, ica, [q["_id"]], "simplify")
-    assert ica.calls == ["simplify"]  # no entity call without a simplified record
-    assert (job.status, job.failed, job.entities_failed) == ("failed", 1, 0)
-    assert job.errors[0].stage == "simplify"
+    ica = ScriptedIca(rephrase=[HTTPException(status_code=400, detail="bad key")])
+    job = await run_job(mongo, ica, [q["_id"]], "rephrase")
+    assert ica.calls == ["rephrase"]  # no check without a rephrase
+    assert (job.status, job.failed) == ("failed", 1)
+    assert job.errors[0].stage == "rephrase"
     assert await stored(mongo, q) is None
 
 
-async def test_entity_step_retries_transient_errors():
+async def test_a_step_retries_transient_errors():
     q = question()
     mongo = FakeMongo([q])
-    ica = ScriptedIca(entities=[HTTPException(status_code=429, detail="slow down")])
-    job = await run_job(mongo, ica, [q["_id"]], "simplify")
-    assert ica.calls == ["simplify", "entities", "entities", "icons"]
+    ica = ScriptedIca(rephrase=[HTTPException(status_code=429, detail="slow down")])
+    job = await run_job(mongo, ica, [q["_id"]], "rephrase")
+    assert ica.calls == ["rephrase", "rephrase", "check"]
     assert job.succeeded == 1
 
 
-async def test_entities_job_updates_existing_record_only():
-    q = question()
-    mongo, ica = FakeMongo([q]), ScriptedIca()
-    await run_job(mongo, ica, [q["_id"]], "simplify_only")
-    before = await stored(mongo, q)
-
-    job = await run_job(mongo, ica, [q["_id"]], "entities", only_missing=True)
-    after = await stored(mongo, q)
-    assert (job.mode, job.status, job.succeeded, job.skipped) == ("entities", "completed", 1, 0)
-    assert ica.calls == ["simplify", "entities", "icons"]
-    assert after["entities"]["question"][0]["name"] == "plan mode"
-    for unchanged in ("_id", "prompt", "ica", "created_at", "correct_response"):
-        assert after[unchanged] == before[unchanged]
-    assert after["updated_at"] >= before["updated_at"]
-    assert len(mongo.get_default_database()["examination_simplified"].docs) == 1
-
-
-async def test_entities_job_skips_records_that_got_entities_meanwhile():
+async def test_a_job_skips_what_another_job_did_meanwhile():
     """only_missing is checked when the job reaches a question, not when it was queued."""
     q = question()
     mongo, ica = FakeMongo([q]), ScriptedIca()
-    await run_job(mongo, ica, [q["_id"]], "simplify")  # e.g. the import job it waited for
+    await run_job(mongo, ica, [q["_id"]], "rephrase")  # e.g. the import job it waited for
     ica.calls.clear()
 
-    job = await run_job(mongo, ica, [q["_id"]], "entities", only_missing=True)
+    job = await run_job(mongo, ica, [q["_id"]], "rephrase", only_missing=True)
     assert ica.calls == []
     assert (job.status, job.succeeded, job.skipped, job.failed) == ("completed", 0, 1, 0)
 
 
-async def test_entities_job_without_only_missing_re_extracts():
-    q = question()
-    mongo = FakeMongo([q])
-    ica = ScriptedIca(entities=[reply(entities_reply("acceptEdits mode")), reply(entities_reply("plan mode"))])
-    await run_job(mongo, ica, [q["_id"]], "simplify")
-    job = await run_job(mongo, ica, [q["_id"]], "entities", only_missing=False)
-    assert job.succeeded == 1
-    assert (await stored(mongo, q))["entities"]["question"][0]["name"] == "plan mode"
-
-
-async def test_entities_job_reports_a_question_that_is_not_simplified():
+async def test_an_icons_job_reports_a_question_without_a_decomposition():
     q = question()
     mongo, ica = FakeMongo([q]), ScriptedIca()
-    job = await run_job(mongo, ica, [q["_id"]], "entities", only_missing=True)
+    job = await run_job(mongo, ica, [q["_id"]], "icons", only_missing=True)
     assert ica.calls == []
-    assert (job.status, job.errors[0].stage, job.errors[0].status_code) == ("failed", "entities", 404)
+    assert (job.status, job.errors[0].stage, job.errors[0].status_code) == ("failed", "icons", 404)
 
 
 # --- objectives --------------------------------------------------------------------
@@ -561,7 +532,7 @@ async def test_objectives_job_tags_without_a_simplified_record():
     assert record["objectives"] == ["claude-code-planning"] and record["section"] == TAGGABLE
     assert (record["level"], record["tempting"], record["difficulty"]) == ("apply", [], 1)
     assert record["distractors"][1] is None and record["distractors"][0]["misconception"]
-    assert record["catalog_version"] == CATALOG_VERSION and record["created_at"] == record["updated_at"]
+    assert record["input_key"] and record["created_at"] == record["updated_at"]
     assert await stored(mongo, q) is None
 
 
@@ -582,7 +553,7 @@ async def test_objectives_job_skips_current_records_and_redoes_outdated_ones(mon
     job = await run_job(mongo, ica, [q["_id"]], "objectives", only_missing=True)
     assert (job.skipped, job.succeeded) == (0, 1) and ica.calls == ["objectives"] * 2
     again = await tags(mongo, q)
-    assert again["catalog_version"] == CATALOG_VERSION and again["created_at"] == first["created_at"]
+    assert again["input_key"] != first["input_key"] and again["created_at"] == first["created_at"]
     assert len(db["question_objectives"].docs) == 1
 
 
@@ -730,42 +701,31 @@ def upload(client, item=None, **params):
 
 
 @pytest.mark.parametrize(
-    ("params", "mode", "calls"),
+    ("params", "calls"),
     [
-        ({}, "full", ["objectives", "story", "decompose", "simplify", "icons", "flow", "resolve", "check"]),
-        ({"entities": "false"}, "simplify_only", ["simplify"]),
+        ({}, ["objectives", "story", "decompose", "icons", "flow", "resolve", "rephrase", "check"]),
+        ({"simplify": "false"}, []),
     ],
 )
-def test_import_runs_the_whole_pipeline_unless_disabled(params, mode, calls):
+def test_import_runs_the_whole_pipeline_unless_disabled(params, calls):
     mongo, ica = FakeMongo(), ScriptedIca()
     client = client_for(mongo, ica)
     resp = upload(client, **params)
-    assert resp.status_code == 200
-    job = client.get(f"/examination/jobs/{resp.json()['job_id']}").json()
-    assert (job["mode"], job["status"], job["succeeded"]) == (mode, "completed", 1)
+    assert resp.status_code == 200 and resp.json()["inserted"] == 1
+    if calls:
+        job = client.get(f"/examination/jobs/{resp.json()['job_id']}").json()
+        assert (job["mode"], job["status"], job["succeeded"]) == ("full", "completed", 1)
+    else:
+        assert resp.json()["job_id"] is None
     assert ica.calls == calls
 
 
-def test_import_without_entities_then_backfill_adds_them():
-    mongo, ica = FakeMongo(), ScriptedIca()
-    client = client_for(mongo, ica)
-    upload(client, entities="false")
-    resp = client.post("/examination/entities/backfill")
-    assert resp.status_code == 202 and resp.json()["total"] == 1
-    job = client.get(f"/examination/jobs/{resp.json()['job_id']}").json()
-    assert (job["mode"], job["only_missing"], job["succeeded"]) == ("entities", True, 1)
-    record = mongo.get_default_database()["examination_simplified"].docs[0]
-    assert record["entities_ica"] is not None
-
-    # Nothing left: a second backfill starts no job.
-    assert client.post("/examination/entities/backfill").json() == {"job_id": None, "total": 0}
-
-
 def test_icons_backfill_and_single_question_route():
-    mongo, ica = FakeMongo(), ScriptedIca(icons=[HTTPException(status_code=400, detail="x")])
+    mongo = FakeMongo()
+    ica = ScriptedIca(icons=[HTTPException(status_code=400, detail="x")])
     client = client_for(mongo, ica)
     upload(client)  # the icon step of the import job fails
-    records = mongo.get_default_database()["examination_simplified"].docs
+    records = mongo.get_default_database()["question_decomposition"].docs
     assert records[0]["icons_ica"] is None
 
     resp = client.post("/examination/icons/backfill")
@@ -775,72 +735,45 @@ def test_icons_backfill_and_single_question_route():
     assert records[0]["entities"]["answers"][0]["icon"] == "write"
     assert client.post("/examination/icons/backfill").json() == {"job_id": None, "total": 0}
 
-    one = client.post(f"/examination/{records[0]['question_id']}/icons")
+    one = client.post(f"/examination/{records[0]['question_id']}/icons", params={"max_tokens": 900})
     assert one.status_code == 200 and one.json()["entities"]["question_icon"] == "mode"
+    assert ica.max_tokens[-1] == 900
     assert client.post(f"/examination/{ObjectId()}/icons").status_code == 404
-    # Forcing re-extraction picks it up again.
-    assert client.post("/examination/entities/backfill", params={"only_missing": "false"}).json()["total"] == 1
+    # Forcing picks them all again.
+    assert client.post("/examination/icons/backfill", params={"only_missing": "false"}).json()["total"] == 1
 
 
-def test_simplify_route_can_skip_entities():
-    q = question()
-    mongo, ica = FakeMongo([q]), ScriptedIca()
-    resp = client_for(mongo, ica).post(f"/questions/{q['_id']}/simplify", params={"entities": "false"})
-    assert resp.status_code == 200 and ica.calls == ["simplify"]
-    assert resp.json()["entities_ica"] is None
-
-
-def test_entities_route_updates_existing_record_and_passes_max_tokens():
+def test_rephrase_route_returns_a_stored_rephrase_unless_forced():
     q = question()
     mongo, ica = FakeMongo([q]), ScriptedIca()
     client = client_for(mongo, ica)
-    client.post(f"/questions/{q['_id']}/simplify", params={"entities": "false"})
-    resp = client.post(f"/examination/{q['_id']}/entities", params={"max_tokens": 900})
-    assert resp.status_code == 200
-    assert resp.json()["entities"]["question"][0]["name"] == "plan mode"
-    assert ica.max_tokens[-1] == 900
+    first = client.post(f"/questions/{q['_id']}/rephrase")
+    assert first.status_code == 200 and first.json()["prompt"] == SIMPLE and ica.calls == ["rephrase"]
+    assert client.post(f"/questions/{q['_id']}/rephrase").status_code == 200
+    assert ica.calls == ["rephrase"]
+    client.post(f"/questions/{q['_id']}/rephrase", params={"force": "true"})
+    assert ica.calls == ["rephrase", "rephrase"]
+    assert client.post(f"/questions/{ObjectId()}/rephrase").status_code == 404
 
 
-def test_entities_route_needs_a_simplified_record():
-    q = question()
-    resp = client_for(FakeMongo([q]), ScriptedIca()).post(f"/examination/{q['_id']}/entities")
-    assert resp.status_code == 404
-
-
-async def test_entities_route_refuses_while_a_job_holds_the_lock():
+async def test_the_icons_route_refuses_while_a_job_holds_the_lock():
     q = question()
     mongo, ica, lock = FakeMongo([q]), ScriptedIca(), asyncio.Semaphore(1)
     await lock.acquire()
-    resp = client_for(mongo, ica, lock).post(f"/examination/{q['_id']}/entities")
+    resp = client_for(mongo, ica, lock).post(f"/examination/{q['_id']}/icons")
     assert resp.status_code == 409 and ica.calls == []
 
 
-# --- stored shapes and prompt --------------------------------------------------------
+# --- stored shapes ----------------------------------------------------------------------
 
 
 def test_malformed_stored_entities_read_as_none():
-    record = {
-        "question_id": "x",
-        "section": "",
-        "assessment_type": "",
-        "source": "",
-        "correct_response": ["a"],
-        "related_lectures": [],
-        "prompt": SIMPLE,
-        "ica": {"model_id": MODEL, "finish_reason": "stop", "total_tokens": 1},
-        "created_at": "2026-11-06T00:00:00Z",
-        "updated_at": "2026-11-06T00:00:00Z",
-    }
+    from claude_exam.api.game.domain import entities_of
+
     for bad in ({"entities": [{"name": "no id"}]}, {"entities": [], "answers": "x"}, {"question": 5}):
-        assert SimplifiedQuestion(**record, entities=bad).entities == PromptEntities()
+        assert entities_of({"entities": bad}, 2) == PromptEntities()
     with pytest.raises(ValueError):
         PromptEntities.model_validate({"entities": [{"name": "no id"}]})
-
-
-def test_prompt_limits_come_from_the_constants():
-    message = _build_system_message(3)
-    assert f"at most {MAX_ENTITIES} entities, at most {MAX_PER_ANSWER} per answer" in message
-    assert "{{" not in message
 
 
 # --- real MongoDB --------------------------------------------------------------------
@@ -848,7 +781,7 @@ def test_prompt_limits_come_from_the_constants():
 
 @pytest.mark.skipif(not MONGO_URL, reason="set TEST_MONGO_URL to run against MongoDB")
 async def test_pipeline_against_mongodb():
-    """Simplify only, then the entity job updates the record in place; the conditional
+    """The decomposition, then the icon job updates its record in place; the conditional
     write matches the `updated_at` Mongo read back (stored to the millisecond)."""
     name = f"claude_exam_test_{secrets.token_hex(6)}"
     mongo = AsyncMongoClient(f"{MONGO_URL.rstrip('/')}/{name}", serverSelectionTimeoutMS=3000)
@@ -856,7 +789,10 @@ async def test_pipeline_against_mongodb():
         db = mongo.get_default_database()
         q = question()
         await db["examination"].insert_one(q)
-        ica = ScriptedIca()
+        ica = ScriptedIca(
+            decompose=[reply(decomposition_with_plan_mode())],
+            icons=[HTTPException(status_code=400, detail="x")],
+        )
         jobs = db["simplification_jobs"]
 
         async def job(mode, only_missing=False):
@@ -866,19 +802,18 @@ async def test_pipeline_against_mongodb():
             )
             return await jobs.find_one({"_id": j.inserted_id})
 
-        assert (await job("simplify_only"))["succeeded"] == 1
-        before = await db["examination_simplified"].find_one({"question_id": str(q["_id"])})
-        assert (await job("entities", True))["succeeded"] == 1
-        after = await db["examination_simplified"].find_one({"question_id": str(q["_id"])})
-        assert after["entities"]["question"][0]["name"] == "plan mode"
-        assert (after["prompt"], after["ica"], after["created_at"]) == (
-            before["prompt"],
-            before["ica"],
+        assert (await job("decompose"))["icons_failed"] == 1
+        before = await db["question_decomposition"].find_one({"question_id": str(q["_id"])})
+        assert (await job("icons", True))["succeeded"] == 1
+        after = await db["question_decomposition"].find_one({"question_id": str(q["_id"])})
+        assert after["entities"]["answers"][1]["entities"][0]["icon"] == "plan"
+        assert (after["semantic"], after["flow"], after["created_at"]) == (
+            before["semantic"],
+            before["flow"],
             before["created_at"],
         )
-        assert (await job("entities", True))["skipped"] == 1
-        assert await db["examination_simplified"].count_documents({}) == 1
-        assert ica.calls == ["simplify", "entities"]
+        assert (await job("icons", True))["skipped"] == 1
+        assert DecompositionRecord(**after).icons_ica is not None
     finally:
         await mongo.drop_database(name)
         await mongo.close()

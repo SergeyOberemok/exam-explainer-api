@@ -32,11 +32,8 @@ from pymongo import ReturnDocument
 from pymongo.asynchronous.collection import AsyncCollection
 
 from claude_exam.api.decompose import (
-    FLOW_VERSION,
-    RESOLUTION_VERSION,
     answer_only_entities,
-    flow_is_current,
-    resolution_is_current,
+    has_flow,
     invented_numbers,
     names_entity,
     read_decomposition,
@@ -46,6 +43,7 @@ from claude_exam.api.decompose import (
 from claude_exam.api.game.domain import correct_indices
 from claude_exam.api.ica import IcaClient
 from claude_exam.api.ica_json import ask_validated, schema_skeleton
+from claude_exam.api.question_view import KeyFreeQuestion, key_free, the_ask
 from claude_exam.api.schemas import (
     DecisionFlow,
     DecompositionRecord,
@@ -180,23 +178,29 @@ def _compact(model) -> str:
     return json.dumps(model.model_dump(), ensure_ascii=False, separators=(",", ":"))
 
 
-def _question_block(doc: dict, with_key: bool) -> str:
-    paragraph, stem, answers = source_parts(doc)
+def _question_block(q: KeyFreeQuestion) -> str:
+    """The scenario and the question, as the flow's model reads them: no answers, no key."""
     parts = []
-    if paragraph:
-        parts.append(f"SCENARIO (background):\n{paragraph}")
-    parts.append(f"QUESTION:\n{stem}")
-    if with_key:
-        correct = set(correct_indices(doc))
-        feedbacks = [clean_plain(f) for f in (doc.get("prompt") or {}).get("feedbacks", [])]
-        lines = "\n".join(
-            f"  {chr(65 + i)}. {a}{'  [CORRECT]' if i in correct else ''}"
-            + (f"\n     feedback: {feedbacks[i]}" if i < len(feedbacks) else "")
-            for i, a in enumerate(answers)
-        )
-        explanation = clean_plain((doc.get("prompt") or {}).get("explanation", ""))
-        parts += [f"ANSWERS:\n{lines}", f"OFFICIAL EXPLANATION:\n{explanation}"]
+    if q.paragraph:
+        parts.append(f"SCENARIO (background):\n{q.paragraph}")
+    parts.append(f"QUESTION:\n{q.stem}")
     return "\n\n".join(parts)
+
+
+def _key_block(doc: dict) -> str:
+    """The question with its answers, key, feedback and explanation: the resolution's."""
+    _paragraph, _stem, answers = source_parts(doc)
+    correct = set(correct_indices(doc))
+    feedbacks = [clean_plain(f) for f in (doc.get("prompt") or {}).get("feedbacks", [])]
+    lines = "\n".join(
+        f"  {chr(65 + i)}. {a}{'  [CORRECT]' if i in correct else ''}"
+        + (f"\n     feedback: {feedbacks[i]}" if i < len(feedbacks) else "")
+        for i, a in enumerate(answers)
+    )
+    explanation = clean_plain((doc.get("prompt") or {}).get("explanation", ""))
+    return "\n\n".join(
+        [_question_block(key_free(doc)), f"ANSWERS:\n{lines}", f"OFFICIAL EXPLANATION:\n{explanation}"]
+    )
 
 
 def graph_errors(
@@ -491,17 +495,6 @@ def prune_after_question(parsed: dict) -> dict:
 
 # A sentence ends at ".", "?" or "!" followed by space and a capital (or a quote), so a
 # file name such as ".claude/rules/" inside a sentence does not end it.
-_SENTENCE_END = re.compile(r"(?<=[.?!])\s+(?=[A-Z\"'`(])")
-
-
-def the_ask(doc: dict) -> str:
-    """The question's own ask: the last sentence of the stem that ends with "?"
-    ("" when it has none)."""
-    sentences = _SENTENCE_END.split(" ".join(source_parts(doc)[1].split()))
-    asks = [s for s in sentences if s.endswith("?")]
-    return asks[-1] if asks else ""
-
-
 def with_question_label(flow: DecisionFlow, doc: dict) -> DecisionFlow:
     """The flow with its question node labelled with the question's own ask, word for
     word. The model's label for it tends to be a hypothesis ("Is the failure caused by
@@ -520,18 +513,18 @@ FLOW_CODE_VERSION = "1"
 RESOLVE_CODE_VERSION = "1"
 
 
-def flow_messages(doc: dict, decomposition: QuestionDecomposition) -> tuple[str, str]:
-    """The (system, user) messages that draw the pre-answer flow of `doc`."""
+def flow_messages(q: KeyFreeQuestion, decomposition: QuestionDecomposition) -> tuple[str, str]:
+    """The (system, user) messages that draw the pre-answer flow of a question."""
     user = (
-        f"{_question_block(doc, with_key=False)}\n\n"
-        f"DECOMPOSITION:\n{_compact(scenario_view(decomposition, doc))}"
+        f"{_question_block(q)}\n\n"
+        f"DECOMPOSITION:\n{_compact(scenario_view(decomposition, q))}"
     )
     return _system(_FLOW_SYSTEM, DecisionFlow), user
 
 
 def flow_input_key(doc: dict, decomposition: QuestionDecomposition) -> str:
     """The input key of the pre-answer flow drawn from `decomposition` (`step_key.py`)."""
-    return step_key(FLOW_CODE_VERSION, *flow_messages(doc, decomposition))
+    return step_key(FLOW_CODE_VERSION, *flow_messages(key_free(doc), decomposition))
 
 
 def resolve_messages(
@@ -547,7 +540,7 @@ def resolve_messages(
     before.edges = [e for e in before.edges if e.target not in questions and e.source not in questions]
     chose_after = [e.source for e in flow.edges if e.target in questions]
     user = (
-        f"{_question_block(doc, with_key=True)}\n\n"
+        f"{_key_block(doc)}\n\n"
         f"DECOMPOSITION:\n{_compact(decomposition)}\n\n"
         f"FLOW BEFORE ANSWERING (without the question node):\n{_compact(before)}\n\n"
         f"THE LEARNER CHOSE AN ANSWER AFTER: {', '.join(chose_after) or '(the start)'}"
@@ -574,7 +567,7 @@ async def flow_item(
     """The pre-answer flow of one question. The model reads the scenario and the stem
     and the decomposition's `scenario_view`: never the key, the answers, or what only
     they mention."""
-    system, user = flow_messages(doc, decomposition)
+    system, user = flow_messages(key_free(doc), decomposition)
     parsed, meta = await ask_validated(
         ica,
         model_id,
@@ -660,11 +653,9 @@ async def flow_and_store(
         record,
         {
             "flow": flow.model_dump(),
-            "flow_version": FLOW_VERSION,
             "flow_ica": meta.model_dump(),
             "flow_input_key": flow_input_key(doc, decomposition),
             "resolution": None,
-            "resolution_version": None,
             "resolution_ica": None,
             "resolution_input_key": None,
         },
@@ -680,7 +671,7 @@ async def resolve_and_store(
 ) -> DecompositionRecord:
     """Write the resolution of a question that has a current flow (404 otherwise)."""
     record, decomposition = await _record(store, doc)
-    if not flow_is_current(record):
+    if not has_flow(record):
         raise HTTPException(status_code=404, detail="question has no current flow")
     flow = DecisionFlow.model_validate(record["flow"])
     resolution, meta = await resolve_item(ica, doc, decomposition, flow, model_id, max_tokens)
@@ -689,7 +680,6 @@ async def resolve_and_store(
         record,
         {
             "resolution": resolution.model_dump(),
-            "resolution_version": RESOLUTION_VERSION,
             "resolution_ica": meta.model_dump(),
             "resolution_input_key": resolve_input_key(doc, decomposition, flow),
         },

@@ -23,7 +23,6 @@ from claude_exam.api.game.domain import answers_of, correct_indices, letter_to_i
 from claude_exam.api.ica import IcaClient
 from claude_exam.api.ica_json import ask_json
 from claude_exam.api.objective_catalog import (
-    CATALOG_VERSION,
     OBJECTIVES,
     for_section,
     known,
@@ -34,10 +33,6 @@ from claude_exam.api.step_key import key_or_none, step_key
 
 logger = logging.getLogger(__name__)
 
-# Stored with each record (read by `scripts/objective_coverage.py`); the job no longer decides by it: a step is
-# redone when its input key changes (`step_key.py`), so a prompt edit needs no bump.
-# To redo it without a prompt change, bump `CODE_VERSION`. Goes in iteration 1b.
-PROMPT_VERSION = "4"
 # Bump when `parse_objectives` changes what is stored from the same reply (the prompt
 # itself is in the input key, `step_key.py`).
 CODE_VERSION = "1"
@@ -281,15 +276,6 @@ async def tag_question(
     return parse_objectives(parsed, section, len(answers_of(doc)), correct_indices(doc)), meta
 
 
-def current_query(question_id: str) -> dict:
-    """Matches the question's record if it was tagged with today's catalog and prompt."""
-    return {
-        "question_id": question_id,
-        "catalog_version": CATALOG_VERSION,
-        "prompt_version": PROMPT_VERSION,
-    }
-
-
 async def tag_and_store(
     ica: IcaClient,
     objectives: AsyncCollection,
@@ -307,8 +293,6 @@ async def tag_and_store(
             "$set": {
                 **fields,
                 "section": doc.get("section") or "",
-                "catalog_version": CATALOG_VERSION,
-                "prompt_version": PROMPT_VERSION,
                 "input_key": input_key(doc),
                 "ica": meta.model_dump(),
                 "updated_at": now,

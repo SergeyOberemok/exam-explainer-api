@@ -141,7 +141,7 @@ async def list_simplified_game_questions(
 async def get_simplified_game_question(
     question_id: SimplifiedQuestionIdDep, service: GameServiceDep
 ) -> GameQuestion:
-    """Simplified version of one question; `question_id` is the id `/v1/game/questions` returned."""
+    """The rephrase of one question; `question_id` is the id `/v1/game/questions` returned."""
     return await service.get_simplified(question_id)
 
 

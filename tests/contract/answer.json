@@ -11,15 +11,6 @@
       "Feedback for X-Key."
     ]
   },
-  "has_simplified": true,
-  "simplified": {
-    "explanation": "Simply put: x-api-key.",
-    "feedbacks": [
-      "Feedback for Authorization.",
-      "Feedback for x-api-key.",
-      "Feedback for X-Key."
-    ]
-  },
   "misconception": "",
   "outcome": "The agent reaches the API.",
   "resolution": {

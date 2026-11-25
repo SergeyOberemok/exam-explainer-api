@@ -13,13 +13,9 @@ Edit this file by hand and review the change. A paragraph no chapter claims leav
 questions without a chapter; the import's dry run and `scripts/propose_scenarios.py`
 list them.
 
-Two versions decide what a backfill redoes, both per chapter, so adding a chapter costs
-nothing for the others:
-- `chapter_version(key)`: the chapter's key and marker and the stage keys. Story records
-  written by the model carry it (seed records are redone by loading the seed again).
-- `frame_version(key)`: the company, the chapter's intro and its cast, which is what the
-  game text of a question is written from (`simplify.py`).
-Titles, districts and outros can change freely.
+A chapter's intro and people are in the prompts written from it, so changing them
+outdates (by input key, `step_key.py`) only that chapter's questions; adding a chapter
+costs nothing for the others. Titles, districts and outros can change freely.
 """
 
 import hashlib
@@ -134,35 +130,6 @@ STAGE_KEYS: tuple[str, ...] = tuple(s.key for s in STAGES)
 
 assert len(BY_KEY) == len(SCENARIOS), "scenario keys must be unique"
 assert all(KEY_PATTERN.match(k) for k in (*BY_KEY, *STAGE_KEYS)), "keys are kebab-case"
-
-CATALOG_VERSION: str = hashlib.sha1(
-    "\n".join([*(f"{s.key}|{s.marker}" for s in SCENARIOS), *STAGE_KEYS]).encode()
-).hexdigest()[:12]
-
-
-
-def chapter_version(key: str) -> str:
-    """Version of what places a question inside this chapter: its key and marker, and
-    the stage keys. Stored on story records the model wrote."""
-    scenario = BY_KEY[key]
-    return hashlib.sha1(
-        "\n".join([f"{scenario.key}|{scenario.marker}", *STAGE_KEYS]).encode()
-    ).hexdigest()[:12]
-
-
-# A story record written by the model is current while it carries one of these.
-CHAPTER_VERSIONS: frozenset[str] = frozenset(chapter_version(key) for key in BY_KEY)
-
-
-def frame_version(key: str | None) -> str:
-    """Version of the story a question's game text is written from: the company and,
-    for a question with a chapter, the chapter's intro and cast."""
-    parts = [COMPANY, COMPANY_INTRO]
-    if key in BY_KEY:
-        scenario = BY_KEY[key]
-        parts += [scenario.key, scenario.intro, *(f"{n}|{r}" for n, r in scenario.cast)]
-    return hashlib.sha1("\n".join(parts).encode()).hexdigest()[:12]
-
 
 _SPLIT = re.compile(r"^\s*SCENARIO:\s*(.*?)\s*QUESTION:\s*(.*?)\s*$", re.DOTALL)
 

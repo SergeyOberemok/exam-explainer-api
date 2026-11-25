@@ -1,11 +1,11 @@
 """Exact terms of the exam that a rewrite must keep.
 
-The game text of a question is written by a model in plain words. Plain words are the
+The rephrase of a question is written by a model in plain words. Plain words are the
 point, except for the names the exam tests: a learner who never sees `dontAsk`,
 `PreToolUse` or `.mcp.json` in the game cannot recognise them in the exam. This module
-finds those names in a text, so `simplify.py` can reject a rewrite that lost one.
+finds those names in a text, so `rephrase.py` can reject a rewrite that lost one.
 
-Two kinds are found, and `simplify.fidelity_errors` holds them to different rules. An
+Two kinds are found, and `rephrase.fidelity_errors` holds them to different rules. An
 identifier must stay in the very answer it came from: it is what tells that option from
 the others. A named concept must stay somewhere in the question and its answers: a
 rewrite may drop a clause that repeats "the subagent", but may not turn every subagent

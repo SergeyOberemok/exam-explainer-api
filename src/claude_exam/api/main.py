@@ -2,6 +2,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from fastapi import FastAPI
 from pymongo import AsyncMongoClient
@@ -11,6 +12,7 @@ from claude_exam.api.config import get_settings
 from claude_exam.api.errors import install_error_handlers
 from claude_exam.api.ica import IcaClient
 from claude_exam.api.indexes import ensure_indexes
+from claude_exam.api.routers.evaluate import router as evaluate_router
 from claude_exam.api.routers.examination import router as examination_router
 from claude_exam.api.routers.game import router as game_router
 from claude_exam.api.routers.ica import router as ica_router
@@ -58,5 +60,9 @@ install_error_handlers(app)
 app.include_router(game_router, prefix=API_VERSION_PREFIX)
 app.include_router(search_router, prefix=API_VERSION_PREFIX)
 app.include_router(examination_router)
+app.include_router(evaluate_router)
 app.include_router(ica_router)
 app.include_router(questions_router)
+
+# The prompt evaluation page: one static file over the /evaluate routes.
+app.frontend("/evaluate/ui", directory=Path(__file__).parent / "static" / "evaluate")

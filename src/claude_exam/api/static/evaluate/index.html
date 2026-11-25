@@ -1,0 +1,471 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prompt Evaluation</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --ink: #1d2430; --muted: #667085; --line: #e3e6eb;
+    --accent: #3b5bdb; --accent-ink: #ffffff; --ok: #2b8a3e; --bad: #c92a2a; --warn: #b26b00;
+    --chip: #eef1f6; --code: #f3f4f7;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b; --panel: #1a1e26; --ink: #e5e8ee; --muted: #98a1b3; --line: #2b313d;
+      --accent: #748ffc; --accent-ink: #0f1320; --ok: #69db7c; --bad: #ff8787; --warn: #ffc078;
+      --chip: #252a35; --code: #151922;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { padding: 12px 16px; border-bottom: 1px solid var(--line); display: flex; gap: 12px;
+           align-items: center; flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0; }
+  header .hint { color: var(--muted); font-size: 12px; }
+  header .key { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+  main { display: grid; grid-template-columns: minmax(320px, 2fr) 3fr; gap: 16px; padding: 16px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  section.col { min-width: 0; display: flex; flex-direction: column; gap: 12px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted);
+             margin: 0 0 8px; }
+  input, select, button { font: inherit; color: inherit; }
+  input[type=text], input[type=password], select {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; }
+  textarea#qid { flex: 1; min-width: 0; resize: vertical; background: var(--panel); border: 1px solid var(--line);
+                 border-radius: 6px; padding: 6px 8px; font: inherit; color: inherit; }
+  ul.hits { list-style: none; margin: 8px 0 0; padding: 0; max-height: 360px; overflow-y: auto; }
+  ul.hits li { padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; margin: 4px 0; cursor: pointer; }
+  ul.hits li:hover { border-color: var(--accent); }
+  ul.hits .meta { color: var(--muted); font-size: 12px; }
+  button { background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 6px;
+           padding: 6px 14px; cursor: pointer; font-weight: 600; }
+  button.ghost { background: var(--chip); color: var(--ink); font-weight: 500; padding: 2px 8px; font-size: 12px; }
+  button:disabled { opacity: .5; cursor: progress; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .muted { color: var(--muted); }
+  .error { color: var(--bad); white-space: pre-wrap; }
+  .chip { display: inline-block; background: var(--chip); border-radius: 999px; padding: 1px 8px;
+          font-size: 12px; margin: 1px 2px; }
+  .chip.ok { color: var(--ok); } .chip.bad { color: var(--bad); } .chip.warn { color: var(--warn); }
+  ol.answers { margin: 6px 0; padding-left: 0; list-style: none; }
+  ol.answers li { padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line); margin: 4px 0; }
+  ol.answers li.correct { border-color: var(--ok); }
+  ol.answers .letter { font-weight: 700; margin-right: 6px; }
+  ol.answers .fb { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .stages label { display: inline-flex; gap: 4px; align-items: center; margin: 2px 10px 2px 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  details.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+  details.panel > summary { padding: 10px 12px; cursor: pointer; font-weight: 600; display: flex;
+                            gap: 8px; align-items: center; }
+  details.panel > .body { padding: 0 12px 12px; overflow-x: auto; }
+  details.json { margin-top: 8px; }
+  details.json > summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+  pre { background: var(--code); border: 1px solid var(--line); border-radius: 6px; padding: 8px;
+        overflow: auto; max-height: 420px; font: 12px/1.4 ui-monospace, Consolas, monospace; margin: 6px 0 0; }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 10px; }
+  .kv > :nth-child(odd) { color: var(--muted); }
+  h3 { font-size: 13px; margin: 10px 0 4px; }
+  .mermaid-box { background: #fff; border-radius: 6px; padding: 8px; overflow-x: auto; }
+  .empty { color: var(--muted); font-style: italic; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Prompt evaluation</h1>
+  <span class="hint">Dry run: steps are computed in memory, nothing is written.</span>
+  <span class="key"><label for="apikey" class="muted">X-API-Key</label>
+    <input id="apikey" type="password" placeholder="only if API_KEY is set" size="18"></span>
+</header>
+<main>
+  <section class="col">
+    <div class="card">
+      <h2>Find question</h2>
+      <form id="find" class="row">
+        <textarea id="qid" rows="2" placeholder="question id (24 hex chars) or question text to search" autocomplete="off"></textarea>
+        <button type="submit" id="load">Find</button>
+      </form>
+      <div id="find-error" class="error"></div>
+      <ul id="hits" class="hits"></ul>
+    </div>
+    <div class="card" id="original"><h2>Original question</h2><div class="empty">Find a question by id or by its text.</div></div>
+    <div class="card">
+      <h2>Run pipeline</h2>
+      <div class="stages" id="stages"></div>
+      <div class="row" style="margin-top:8px">
+        <select id="model"></select>
+        <button id="run" disabled>Run pipeline</button>
+        <span id="run-state" class="muted"></span>
+      </div>
+    </div>
+  </section>
+  <section class="col" id="results">
+    <div class="empty card">Results appear here: first what is stored, then the dry run as each step finishes.</div>
+  </section>
+</main>
+
+<script type="module">
+// Mermaid is loaded on first use, so the page still works when the CDN can't be reached.
+let mermaidLib = null;
+function loadMermaid() {
+  mermaidLib ??= import("https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.esm.min.mjs").then(({ default: m }) => {
+    m.initialize({ startOnLoad: false, theme: "default", securityLevel: "strict" });
+    return m;
+  });
+  mermaidLib.catch(() => { mermaidLib = null; }); // retried on the next diagram
+  return mermaidLib;
+}
+
+const API = "/evaluate";
+const $ = (id) => document.getElementById(id);
+const LETTER = (i) => String.fromCharCode(65 + i);
+
+// DOM helper: text is always set as textContent, never parsed as HTML.
+function h(tag, attrs = {}, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === false || v == null) continue;
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const kid of kids.flat(Infinity)) {
+    if (kid == null || kid === false) continue;
+    el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  }
+  return el;
+}
+const chip = (text, cls = "") => h("span", { class: `chip ${cls}` }, text);
+const empty = (text = "none") => h("div", { class: "empty" }, text);
+
+// --- API key, kept for this browser only ----------------------------------------------
+try { $("apikey").value = localStorage.getItem("evaluate.apikey") || ""; } catch {}
+$("apikey").addEventListener("change", () => {
+  try { localStorage.setItem("evaluate.apikey", $("apikey").value); } catch {}
+  if (!options.stages.length) loadOptions(); // they failed without the key
+});
+function headers(json = false) {
+  const out = {};
+  if ($("apikey").value) out["X-API-Key"] = $("apikey").value;
+  if (json) out["Content-Type"] = "application/json";
+  return out;
+}
+async function failure(res) {
+  try { const body = await res.json(); return `${res.status}: ${typeof body.detail === "string" ? body.detail : JSON.stringify(body)}`; }
+  catch { return `${res.status} ${res.statusText}`; }
+}
+
+// --- options --------------------------------------------------------------------------
+let options = { stages: [], dry_stages: [], models: [], default_model: "" };
+async function loadOptions() {
+  const res = await fetch(`${API}/options`, { headers: headers() });
+  if (!res.ok) { $("find-error").textContent = `options: ${await failure(res)}`; return; }
+  options = await res.json();
+  $("find-error").textContent = "";
+  $("stages").replaceChildren(...options.stages.map((s) => {
+    const dry = options.dry_stages.includes(s);
+    return h("label", { title: dry ? "" : "no dry form: its stored record is used" },
+      h("input", { type: "checkbox", value: s, checked: dry, disabled: !dry }), s);
+  }));
+  $("model").replaceChildren(...options.models.map((m) =>
+    h("option", { value: m, selected: m === options.default_model }, m)));
+}
+
+// --- state ----------------------------------------------------------------------------
+let current = null; // { original, stored }
+let question = null;
+let loading = 0;    // the latest load; a response to an older one is dropped
+let running = null; // the AbortController of the run in progress
+
+const IS_ID = /^[0-9a-fA-F]{24}$/;
+
+$("find").addEventListener("submit", async (ev) => {
+  ev.preventDefault();
+  const text = $("qid").value.trim();
+  $("find-error").textContent = "";
+  if (IS_ID.test(text)) { await loadQuestion(text); return; }
+  if (text.length < 2) { $("find-error").textContent = "Type a question id or at least 2 characters of its text."; return; }
+  await searchQuestions(text);
+});
+// Enter finds, Shift+Enter makes a new line.
+$("qid").addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter" && !ev.shiftKey) { ev.preventDefault(); $("find").requestSubmit(); }
+});
+
+// Text search over the question bank (`POST /v1/search/questions`, a $text query; the body
+// form takes a whole pasted question). A hit is loaded by its id.
+async function searchQuestions(q) {
+  $("load").disabled = true;
+  try {
+    const res = await fetch("/v1/search/questions", {
+      method: "POST", headers: headers(true), body: JSON.stringify({ q: q.slice(0, 2000), limit: 20 }),
+    });
+    if (!res.ok) { $("find-error").textContent = `search: ${await failure(res)}`; return; }
+    const { items, total } = await res.json();
+    if (!items.length) { $("hits").replaceChildren(h("li", { class: "empty" }, "No question matches.")); return; }
+    $("hits").replaceChildren(
+      h("li", { class: "meta", style: "border:0;cursor:default" }, `${items.length} of ${total} matches — click one to load it`),
+      ...items.map((hit) => {
+        const text = hit.question.replace(/^SCENARIO:.*?QUESTION:\s*/s, "");
+        const li = h("li", { title: hit.question },
+          h("div", { class: "meta" }, `${hit.section || "no section"} · score ${hit.score.toFixed(2)} · ${hit.id}`),
+          text.length > 220 ? text.slice(0, 220) + "…" : text);
+        li.addEventListener("click", () => loadQuestion(hit.id));
+        return li;
+      }));
+    if (items.length === 1) await loadQuestion(items[0].id);
+  } finally { $("load").disabled = false; }
+}
+
+async function loadQuestion(id) {
+  const mine = ++loading;
+  $("find-error").textContent = "";
+  $("load").disabled = true;
+  try {
+    const res = await fetch(`${API}/questions/${id}`, { headers: headers() });
+    if (mine !== loading) return;
+    if (!res.ok) { $("find-error").textContent = await failure(res); return; }
+    const view = await res.json();
+    if (mine !== loading) return;
+    running?.abort(); // a run of the previous question must not draw over this one
+    current = view;
+    question = id;
+    history.replaceState(null, "", `#${id}`);
+    // Found: the search box and its hits are done with.
+    $("qid").value = "";
+    $("hits").replaceChildren();
+    $("run-state").textContent = "";
+    renderOriginal(current.original);
+    renderResults(current.stored, "stored", []);
+    $("run").disabled = false;
+  } finally { if (mine === loading) $("load").disabled = false; }
+}
+
+$("run").addEventListener("click", async () => {
+  const stages = [...$("stages").querySelectorAll("input:checked")].map((i) => i.value);
+  if (!question || !stages.length) return;
+  $("run").disabled = true;
+  const controller = (running = new AbortController());
+  const started = Date.now();
+  const tick = setInterval(() => { $("run-state").textContent = `running… ${Math.round((Date.now() - started) / 1000)}s`; }, 500);
+  const steps = [];
+  renderResults(current.stored, "stored", steps, stages);
+  try {
+    const res = await fetch(`${API}/questions/${question}/run`, {
+      method: "POST", headers: headers(true), body: JSON.stringify({ stages, model: $("model").value }),
+      signal: controller.signal,
+    });
+    if (!res.ok) { $("run-state").textContent = await failure(res); return; }
+    let finished = false;
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, nl).trim();
+        buffer = buffer.slice(nl + 1);
+        if (!line) continue;
+        const event = JSON.parse(line);
+        if (event.stage === "done") finished = true; else steps.push(event);
+        renderResults(event.result, "dry run", steps, stages);
+      }
+    }
+    const failed = steps.filter((s) => s.status.startsWith("failed")).length;
+    $("run-state").textContent = (finished ? "done" : "stream ended early") +
+      ` in ${Math.round((Date.now() - started) / 1000)}s` + (failed ? `, ${failed} failed` : "");
+  } catch (err) {
+    if (!controller.signal.aborted) $("run-state").textContent = `stream broke: ${err}`;
+  } finally {
+    clearInterval(tick);
+    if (running === controller) { running = null; $("run").disabled = false; }
+  }
+});
+
+// --- left: the original ---------------------------------------------------------------
+function answerList(answers, correctOf, feedbackOf) {
+  return h("ol", { class: "answers" }, answers.map((text, i) => h("li", { class: correctOf(i) ? "correct" : "" },
+    h("span", { class: "letter" }, LETTER(i)), text, correctOf(i) ? " " : "", correctOf(i) ? chip("correct", "ok") : "",
+    feedbackOf && feedbackOf(i) ? h("div", { class: "fb" }, feedbackOf(i)) : "")));
+}
+
+function renderOriginal(o) {
+  const story = o.story || {};
+  $("original").replaceChildren(
+    h("h2", {}, "Original question"),
+    h("div", { class: "row" }, chip(o.section || "no section"), o.assessment_type ? chip(o.assessment_type) : "",
+      o.chapter ? chip(`chapter: ${o.chapter}`) : chip("no chapter", "warn"), story.stage ? chip(`stage: ${story.stage}`) : ""),
+    o.scenario ? h("details", {}, h("summary", { class: "muted" }, "Scenario paragraph"), h("p", {}, o.scenario)) : "",
+    h("p", {}, h("strong", {}, o.stem || o.question)),
+    answerList(o.answers.map((a) => a.text), (i) => o.answers[i].correct, (i) => o.answers[i].feedback),
+    h("h3", {}, "Explanation"), h("p", {}, o.explanation || "—"),
+    story.beat ? h("div", { class: "kv" }, "beat", story.beat, "win", story.win || "", "fail", story.fail || "") : "",
+    o.objectives ? h("div", { class: "row", style: "margin-top:6px" }, "objectives:",
+      (o.objectives.objectives || []).map((k) => chip(k)), chip(`level ${o.objectives.level}`), chip(`difficulty ${o.objectives.difficulty}`)) : "",
+    jsonBlock("original JSON", o),
+  );
+}
+
+// --- right: the result, in pieces -----------------------------------------------------
+function jsonBlock(label, value) {
+  const text = JSON.stringify(value, null, 2);
+  return h("details", { class: "json" }, h("summary", {}, label, " ",
+    h("button", { class: "ghost", type: "button", onclick: (e) => { e.preventDefault(); navigator.clipboard?.writeText(text); } }, "copy")),
+    h("pre", {}, text));
+}
+
+const openState = {};
+function panel(key, title, source, value, view) {
+  const el = h("details", { class: "panel", open: openState[key] ?? true },
+    h("summary", {}, title, chip(source, source === "dry run" ? "ok" : ""), value == null ? chip("empty", "warn") : ""),
+    h("div", { class: "body" }, value == null ? empty() : view(value), value == null ? "" : jsonBlock("JSON", value)));
+  el.addEventListener("toggle", () => { openState[key] = el.open; });
+  return el;
+}
+
+function table(headers, rows) {
+  if (!rows.length) return empty();
+  return h("table", {}, h("thead", {}, h("tr", {}, headers.map((t) => h("th", {}, t)))),
+    h("tbody", {}, rows.map((r) => h("tr", {}, r.map((c) => h("td", {}, c))))));
+}
+const status = (s) => chip(s, s === "explicit" ? "ok" : s === "inferred" ? "warn" : "");
+const facts = (list) => table(["text", "source", "evidence"], (list || []).map((f) => [f.text, status(f.source_status), f.evidence]));
+
+function stepsView(steps, planned) {
+  const done = new Set(steps.map((s) => s.stage));
+  const rows = steps.map((s) => [s.stage,
+    chip(s.status, s.status === "ok" ? "ok" : s.status.startsWith("failed") ? "bad" : "warn"),
+    s.tokens || "", s.seconds ?? "",
+    h("div", {}, s.detail ? h("div", { class: "error" }, s.detail) : "", (s.warnings || []).map((w) => h("div", { class: "chip warn" }, w)))]);
+  for (const p of planned || []) if (!done.has(p)) rows.push([p, chip(steps.length ? "waiting" : "queued"), "", "", ""]);
+  return table(["step", "status", "tokens", "s", "detail / warnings"], rows);
+}
+
+function gameTextView(p) {
+  return h("div", {},
+    h("p", {}, h("strong", {}, p.question)),
+    p.parts?.length
+      ? table(["role", "text", "entities"], p.parts.map((x) => [chip(x.role), x.text, x.entity_ids.join(", ")]))
+      : empty("no semantic parts (written without a decomposition)"));
+}
+
+function answersView(p) {
+  const orig = current.original.answers;
+  return table(["", "original", "game text", "feedback"], p.answers.map((a, i) => [
+    h("strong", {}, LETTER(i), orig[i]?.correct ? " ✓" : ""), orig[i]?.text ?? "", a, p.feedbacks?.[i] ?? ""]));
+}
+
+function entitiesView(e) {
+  const row = (x) => [x.name, chip(x.kind), x.ref, x.icon ?? "", (x.aliases || []).join(", ")];
+  const hdr = ["name", "kind", "ref", "icon", "aliases"];
+  return h("div", {},
+    h("h3", {}, "Question"), table(hdr, (e.question || []).map(row)),
+    (e.answers || []).map((a, i) => [h("h3", {}, `Answer ${LETTER(i)}`), table(hdr, (a.entities || []).map(row))]));
+}
+
+function iconsView(e) {
+  return h("div", { class: "kv" }, "question", e.question_icon ?? "—",
+    (e.answers || []).flatMap((a, i) => [`answer ${LETTER(i)}`, a.icon ?? "—"]),
+    (e.question || []).flatMap((x) => [`· ${x.name}`, x.icon ?? "—"]));
+}
+
+function decompositionView(d) {
+  const sub = (title, body) => h("details", { open: true }, h("summary", {}, h("strong", {}, title)), body);
+  const g = d.goals_and_requirements || {};
+  return h("div", {},
+    h("p", {}, d.question_summary),
+    sub("Intent", h("div", { class: "kv" }, "primary", d.question_intent.primary, "secondary", d.question_intent.secondary.join(", ") || "—",
+      "task", d.question_intent.question_task, "target", d.question_intent.target_of_question,
+      "success", d.question_intent.success_criteria.join("; ") || "—")),
+    sub("Context", h("div", {}, h("p", {}, d.context.description), h("h3", {}, "Current state"), facts(d.context.current_state),
+      h("h3", {}, "Desired state"), facts(d.context.desired_state))),
+    sub(`Entities (${d.entities.length})`, table(["id", "name", "type", "source", "description / evidence"],
+      d.entities.map((x) => [x.id, x.name, chip(x.type), status(x.source_status), h("div", {}, x.description, x.evidence ? h("div", { class: "muted" }, `“${x.evidence}”`) : "")]))),
+    sub(`Events (${d.events.length})`, table(["id", "name", "actor → target", "seq", "source"],
+      d.events.map((x) => [x.id, x.name, `${x.actor_id ?? "—"} → ${x.target_id ?? "—"}`, x.sequence ?? "", status(x.source_status)]))),
+    sub(`Relationships (${d.relationships.length})`, table(["source", "type", "target", "status"],
+      d.relationships.map((x) => [x.source_id, x.type, x.target_id, status(x.source_status)]))),
+    sub("Problem", h("div", {}, h("h3", {}, "Symptoms"), facts(d.problem.symptoms), h("h3", {}, "Root causes"), facts(d.problem.root_causes),
+      h("h3", {}, "Consequences"), facts(d.problem.consequences), h("div", { class: "muted" }, "affected: ", d.problem.affected_entities.join(", ") || "—"))),
+    sub(`Conditions (${d.conditions.length})`, table(["id", "description", "type", "evaluation", "source"],
+      d.conditions.map((x) => [x.id, x.description, x.condition_type, x.evaluation, status(x.source_status)]))),
+    sub("Goals & requirements", h("div", {}, Object.entries(g).map(([k, v]) => [h("h3", {}, k.replaceAll("_", " ")), facts(v)]))),
+    sub("Answer options", table(["", "mechanism", "entities"], d.answer_options.map((o) => [LETTER(o.index), o.mechanism, o.entity_ids.join(", ")]))),
+    sub("Ambiguities & unknowns", d.ambiguities_and_unknowns.length ? h("ul", {}, d.ambiguities_and_unknowns.map((a) => h("li", {}, a))) : empty()),
+  );
+}
+
+// The panels are redrawn on every streamed step, so each source is drawn once and reused,
+// one at a time (mermaid.render is not safe to run concurrently).
+const drawn = new Map(); // mermaid source -> Promise<svg>
+let drawQueue = Promise.resolve();
+function diagram(source) {
+  if (!source) return empty("no diagram");
+  const box = h("div", { class: "mermaid-box" }, h("span", { class: "muted" }, "drawing…"));
+  if (!drawn.has(source)) {
+    const id = `m${Math.random().toString(36).slice(2)}`;
+    const svg = drawQueue.then(loadMermaid).then((m) => m.render(id, source)).then((r) => r.svg);
+    drawQueue = svg.catch(() => {});
+    drawn.set(source, svg);
+    svg.catch(() => drawn.delete(source)); // drawn again next time
+  }
+  drawn.get(source).then((svg) => { box.innerHTML = svg; }) // mermaid's own sanitized SVG (securityLevel strict)
+    .catch((err) => { box.replaceChildren(h("div", { class: "error" }, `mermaid: ${err.message || err}`), h("pre", {}, source)); });
+  return box;
+}
+
+function flowView(f, source) {
+  const v = f.visualization;
+  return h("div", {},
+    h("div", { class: "kv" }, "view", `${v.primary}${v.secondary.length ? " (+" + v.secondary.join(", ") + ")" : ""}`, "reason", v.reason, "trigger", f.trigger ?? ""),
+    diagram(source),
+    h("h3", {}, `Nodes (${f.nodes.length})`),
+    table(["id", "type", "label", "entities", "flags"], f.nodes.map((n) => [n.id, chip(n.type), n.label, n.entity_ids.join(", "),
+      [n.is_question ? chip("question", "ok") : "", n.added ? chip("added", "warn") : "", n.condition_id ? chip(n.condition_id) : ""]])),
+    h("h3", {}, `Edges (${f.edges.length})`),
+    table(["source → target", "type", "label"], f.edges.map((e) => [`${e.source} → ${e.target}`, e.type, e.label])));
+}
+
+function resolutionView(r, source) {
+  return h("div", {},
+    h("p", {}, h("strong", {}, "Rule: "), r.rule),
+    h("h3", {}, "Answer requirements"), h("ul", {}, r.answer_requirements.map((x) => h("li", {}, x))),
+    h("h3", {}, "Options"),
+    table(["", "verdict", "supports", "gaps", "reason"], r.options.map((o) => [LETTER(o.index),
+      chip(o.verdict, o.verdict === "correct" ? "ok" : "bad"), (o.supported_requirements || []).join("; "), (o.gaps || []).join("; "), o.reason])),
+    h("h3", {}, "Resolved flow"), diagram(source));
+}
+
+function checkView(c) {
+  return h("div", { class: "kv" }, "verdict", chip(c.verdict, c.verdict === "same" ? "ok" : c.verdict === "changed" ? "bad" : "warn"),
+    "picked", c.picked ?? "—", "picked on original", c.picked_original ?? "—", "prompt version", c.prompt_version ?? "");
+}
+
+function renderResults(r, source, steps, planned) {
+  const m = r.mermaid || {};
+  $("results").replaceChildren(
+    panel("steps", "Steps", source, steps.length || planned ? steps : null, (s) => stepsView(s, planned)),
+    panel("text", "Game text", source, r.prompt, gameTextView),
+    panel("answers", "Answers", source, r.prompt, answersView),
+    panel("entities", "Actors / entities", source, r.entities, entitiesView),
+    panel("icons", "Icons", source, r.entities, iconsView),
+    panel("decomposition", "Decomposition", source, r.decomposition, decompositionView),
+    panel("flow", "Flow (before answering)", source, r.flow, (f) => flowView(f, m.flow)),
+    panel("resolution", "Resolution", source, r.resolution, (x) => resolutionView(x, m.resolution)),
+    panel("check", "Check", source, r.check, checkView),
+    h("details", { class: "panel" }, h("summary", {}, "Raw result"), h("div", { class: "body" }, jsonBlock("everything", r))),
+  );
+}
+
+await loadOptions();
+if (IS_ID.test(location.hash.slice(1))) loadQuestion(location.hash.slice(1));
+</script>
+</body>
+</html>

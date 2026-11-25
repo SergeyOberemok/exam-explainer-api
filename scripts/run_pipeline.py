@@ -37,44 +37,20 @@ import asyncio
 import json
 import logging
 import sys
-import time
 from typing import get_args
 
 from bson import ObjectId
 from bson.errors import InvalidId
-from fastapi import HTTPException
 from pymongo import AsyncMongoClient
 
 from claude_exam.api import batch
-from claude_exam.api.check import check_item
 from claude_exam.api.config import get_settings
-from claude_exam.api.decompose import decompose_item, read_decomposition
-from claude_exam.api.entities import derive_entities, extract_entities
-from claude_exam.api.flow import (
-    flow_is_current,
-    flow_item,
-    leak_warning,
-    mermaid,
-    resolution_is_current,
-    resolve_item,
-)
-from claude_exam.api.game.domain import answers_of, correct_indices, story_of
+from claude_exam.api.flow import mermaid
+from claude_exam.api.game.domain import answers_of, correct_indices
 from claude_exam.api.ica import IcaClient
-from claude_exam.api.icons import pick_icons
-from claude_exam.api.schemas import (
-    DecisionFlow,
-    IcaModelId,
-    JobMode,
-    JobStage,
-    PromptEntities,
-    Resolution,
-    SimplificationJob,
-    SimplifiedPrompt,
-)
-from claude_exam.api.simplify import quality_warnings, simplify_item
+from claude_exam.api.pipeline_preview import Result, run_dry
+from claude_exam.api.schemas import IcaModelId, JobMode, JobStage, SimplificationJob
 from claude_exam.html_clean import clean_plain, clean_question
-
-DRY_STAGES = ("decompose", "simplify", "entities", "icons", "flow", "resolve", "check")
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -102,49 +78,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
-# --- what a question has, read from the database or built in a dry run -----------------
-
-
-class Result:
-    """The pieces the steps make, whichever way they were made."""
-
-    def __init__(self) -> None:
-        self.decomposition = None
-        self.prompt: SimplifiedPrompt | None = None
-        self.entities: PromptEntities | None = None
-        self.flow: DecisionFlow | None = None
-        self.resolution: Resolution | None = None
-        self.check: dict | None = None
-        self.steps: list[dict] = []
-
-    @classmethod
-    def from_records(cls, doc: dict, simplified: dict | None, decomposition: dict | None) -> "Result":
-        result = cls()
-        result.decomposition = read_decomposition(decomposition, doc)
-        if simplified:
-            result.prompt = SimplifiedPrompt(**simplified["prompt"])
-            try:
-                result.entities = PromptEntities.model_validate(simplified.get("entities") or {})
-            except ValueError:
-                result.entities = None
-            result.check = simplified.get("check")
-        if result.decomposition is not None and flow_is_current(decomposition):
-            result.flow = DecisionFlow.model_validate(decomposition["flow"])
-        if result.decomposition is not None and resolution_is_current(decomposition):
-            result.resolution = Resolution.model_validate(decomposition["resolution"])
-        return result
-
-    def as_json(self) -> dict:
-        dump = lambda m: m.model_dump() if m is not None else None  # noqa: E731
-        return {
-            "steps": self.steps,
-            "decomposition": dump(self.decomposition),
-            "prompt": dump(self.prompt),
-            "entities": dump(self.entities),
-            "flow": dump(self.flow),
-            "resolution": dump(self.resolution),
-            "check": self.check,
-        }
+# --- a dry run (claude_exam.api.pipeline_preview) or a real job ----------------------
 
 
 async def dry_run(args, ica: IcaClient, db, doc: dict) -> Result:
@@ -154,73 +88,10 @@ async def dry_run(args, ica: IcaClient, db, doc: dict) -> Result:
         await db["examination_simplified"].find_one({"question_id": question_id}),
         await db["question_decomposition"].find_one({"question_id": question_id}),
     )
-    story = story_of(doc, await db["question_story"].find_one({"question_id": question_id}))
-    model = args.model
-
-    async def run(stage: str) -> None:
-        if stage == "decompose":
-            result.decomposition, meta = await decompose_item(ica, doc, model)
-            result.flow = result.resolution = None
-            return meta
-        if stage == "simplify":
-            result.prompt, meta = await simplify_item(
-                ica, doc, model, story=story, decomposition=result.decomposition
-            )
-            for warning in quality_warnings(doc, result.prompt.model_dump()):
-                print(f"      warning: {warning}")
-            return meta
-        if stage == "entities":
-            need(result.prompt, "a game text")
-            if result.decomposition is not None:
-                result.entities = derive_entities(result.decomposition, doc, result.prompt)
-                return None
-            result.entities, meta = await extract_entities(ica, doc, result.prompt, model)
-            return meta
-        if stage == "icons":
-            need(result.prompt, "a game text")
-            result.entities, meta = await pick_icons(
-                ica, doc.get("section", ""), result.prompt, result.entities or PromptEntities(), model
-            )
-            return meta
-        if stage == "flow":
-            need(result.decomposition, "a decomposition")
-            result.flow, meta = await flow_item(ica, doc, result.decomposition, model)
-            result.resolution = None
-            warning = leak_warning(doc, result.flow)
-            if warning:
-                print(f"      warning: {warning}")
-            return meta
-        if stage == "resolve":
-            need(result.flow, "a flow")
-            result.resolution, meta = await resolve_item(ica, doc, result.decomposition, result.flow, model)
-            return meta
-        if stage == "check":
-            need(result.prompt, "a game text")
-            result.check = await check_item(ica, doc, {"prompt": result.prompt.model_dump()}, model, story=story)
-            return None
-        raise HTTPException(status_code=400, detail="no dry run for this step: its stored record is used")
-
-    for stage in args.stage_list:
-        if stage not in DRY_STAGES:
-            step = {"stage": stage, "status": "skipped (no dry form; the stored record is used)"}
-            result.steps.append(step)
-            print_step(step)
-            continue
-        started = time.monotonic()
-        try:
-            meta = await run(stage)
-            step = {"stage": stage, "status": "ok", "tokens": meta.total_tokens if meta else 0}
-        except HTTPException as exc:
-            step = {"stage": stage, "status": f"failed {exc.status_code}", "detail": str(exc.detail)}
-        step["seconds"] = round(time.monotonic() - started, 1)
-        result.steps.append(step)
+    story = await db["question_story"].find_one({"question_id": question_id})
+    async for step in run_dry(ica, doc, result, story, args.stage_list, args.model):
         print_step(step)
     return result
-
-
-def need(value, what: str) -> None:
-    if value is None:
-        raise HTTPException(status_code=409, detail=f"needs {what}: run that step first (or store one)")
 
 
 async def real_run(args, ica: IcaClient, mongo: AsyncMongoClient, db, doc: dict) -> Result:
@@ -272,6 +143,8 @@ def print_step(step: dict) -> None:
     if "tokens" in step:
         extra = f"  {step['tokens']} tokens  {step['seconds']}s"
     print(f"  {step['stage']:<11}{step['status']}{extra}")
+    for warning in step.get("warnings") or ():
+        print(f"      warning: {warning}")
     if step.get("detail"):
         print(f"      {step['detail'][:600]}")
 

@@ -35,8 +35,9 @@ from claude_exam.api.scenario_catalog import BY_KEY, STAGE_KEYS
 
 class QuestionRepository:
     """Reads `examination`, `examination_simplified`, `question_objectives` (the
-    learning-objective tags) and `question_story` (chapter stage and story lines).
-    Without one of the last two, every question reads as untagged or without a story."""
+    learning-objective tags), `question_story` (chapter stage and story lines) and
+    `question_decomposition` (flow and resolution). Without one of the last three, every
+    question reads as untagged, without a story or without a flow."""
 
     def __init__(
         self,
@@ -44,11 +45,13 @@ class QuestionRepository:
         simplified: AsyncCollection,
         objectives: AsyncCollection | None = None,
         story: AsyncCollection | None = None,
+        decomposition: AsyncCollection | None = None,
     ) -> None:
         self.examination = examination
         self.simplified = simplified
         self.objectives = objectives
         self.story = story
+        self.decomposition = decomposition
 
     @staticmethod
     async def _fetch(
@@ -105,6 +108,19 @@ class QuestionRepository:
         if self.objectives is None or not question_ids:
             return {}
         cursor = self.objectives.find({"question_id": {"$in": list(question_ids)}})
+        return {str(d["question_id"]): d for d in await cursor.to_list()}
+
+    async def get_decomposition_many(self, question_ids: list[str]) -> dict[str, dict]:
+        """The `question_decomposition` records of the given questions, by question id."""
+        if self.decomposition is None or not question_ids:
+            return {}
+        # The game reads the flow, the resolution and what tells whether they are
+        # current (versions, `text_hash`, `fingerprint`), never `semantic`, the largest
+        # part. Every record of today's `decompose.PROMPT_VERSION` stores its fingerprint.
+        cursor = self.decomposition.find(
+            {"question_id": {"$in": list(question_ids)}},
+            {"semantic": 0, "semantic_ica": 0, "flow_ica": 0, "resolution_ica": 0},
+        )
         return {str(d["question_id"]): d for d in await cursor.to_list()}
 
     async def ids_with_objective(self, key: str) -> list[str]:

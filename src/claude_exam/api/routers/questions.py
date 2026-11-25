@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from claude_exam.api.dependencies import (
     AsyncCollectionDep,
+    AsyncDecompositionCollectionDep,
     AsyncSimplifiedCollectionDep,
     AsyncStoryCollectionDep,
     IcaClientDep,
@@ -12,6 +13,7 @@ from claude_exam.api.dependencies import (
     QuestionFiltersDep,
     QuestionObjectIdDep,
 )
+from claude_exam.api.decompose import read_decomposition
 from claude_exam.api.game.domain import story_of
 from claude_exam.api.schemas import (
     Question,
@@ -90,6 +92,7 @@ async def simplify_question(
     collection: AsyncCollectionDep,
     simplified: AsyncSimplifiedCollectionDep,
     story: AsyncStoryCollectionDep,
+    decomposition: AsyncDecompositionCollectionDep,
     ica: IcaClientDep,
     body: SimplifyRequest | None = None,
     force: bool = False,
@@ -106,7 +109,8 @@ async def simplify_question(
     `examination_simplified`, keyed by `question_id` (the examination `_id`).
     An already stored result is returned as-is (no ICA call) unless `force=true`,
     which replaces it and keeps `created_at`. Unless `entities=false`, a second
-    call then extracts its visual entities onto the record.
+    call then extracts its visual entities onto the record. A question with a current
+    decomposition gets its text as semantic parts and its entities derived from it.
     """
     body = body or SimplifyRequest()
     doc = await collection.find_one({"_id": object_id})
@@ -120,6 +124,9 @@ async def simplify_question(
 
     # The text is set where the question stands in the game's story, when it has a place.
     record = await story.find_one({"question_id": question_id})
+    decomposed = read_decomposition(
+        await decomposition.find_one({"question_id": question_id}), doc
+    )
     return await simplify_and_store(
         ica,
         simplified,
@@ -128,4 +135,5 @@ async def simplify_question(
         body.max_tokens,
         with_entities=entities,
         story=story_of(doc, record),
+        decomposition=decomposed,
     )

@@ -21,5 +21,18 @@
     ]
   },
   "misconception": "",
-  "outcome": "The agent reaches the API."
+  "outcome": "The agent reaches the API.",
+  "resolution": {
+    "answer_requirements": [],
+    "flow": {
+      "primary": "",
+      "secondary": [],
+      "reason": "",
+      "trigger": "",
+      "nodes": [],
+      "edges": []
+    },
+    "options": [],
+    "rule": ""
+  }
 }

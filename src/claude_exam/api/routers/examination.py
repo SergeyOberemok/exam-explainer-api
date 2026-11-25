@@ -11,6 +11,7 @@ from fastapi import (
     Query,
     UploadFile,
 )
+from pydantic import ValidationError
 
 from claude_exam.api.batch import (
     Stores,
@@ -21,6 +22,8 @@ from claude_exam.api.batch import (
 from claude_exam.api.check import check_and_store
 from claude_exam.api.dependencies import (
     AsyncCollectionDep,
+    AsyncDecompositionCollectionDep,
+    ExaminationDocDep,
     AsyncJobsCollectionDep,
     AsyncMongoClientDep,
     AsyncObjectivesCollectionDep,
@@ -31,13 +34,16 @@ from claude_exam.api.dependencies import (
     QuestionObjectIdDep,
     SimplificationLockDep,
 )
+from claude_exam.api.decompose import decompose_and_store
 from claude_exam.api.entities import enrich_and_store
+from claude_exam.api.flow import flow_and_store, resolve_and_store
 from claude_exam.api.game.domain import story_of
 from claude_exam.api.icons import assign_and_store
 from claude_exam.api.ingest import plan_import
 from claude_exam.api.normalization import normalize_result
 from claude_exam.api.objectives import current_query, tag_and_store
 from claude_exam.api.schemas import (
+    DecompositionRecord,
     EntitiesBackfill,
     IcaModelId,
     ImportResult,
@@ -197,6 +203,7 @@ async def backfill_pipeline(
     simplified: AsyncSimplifiedCollectionDep,
     objectives: AsyncObjectivesCollectionDep,
     story: AsyncStoryCollectionDep,
+    decomposition: AsyncDecompositionCollectionDep,
     starter: JobStarterDep,
     model_id: ModelIdQuery = "claude-haiku-5-5",
     only_missing: Annotated[
@@ -220,7 +227,7 @@ async def backfill_pipeline(
     applied; `only_missing=false` redoes everything. Track it via
     `GET /examination/jobs/{job_id}`.
     """
-    stores = Stores(collection, simplified, objectives, story)
+    stores = Stores(collection, simplified, objectives, story, decomposition)
     question_ids: list[ObjectId] = []
     async for doc in collection.find({"source": source} if source else {}):
         if only_missing and not await missing_stages("full", stores, doc):
@@ -353,6 +360,78 @@ async def check_question(
         return await check_and_store(
             ica, simplified, doc, model_id, max_tokens, story=story_of(doc, record)
         )
+
+
+@router.get("/{question_id}/decomposition")
+async def get_question_decomposition(
+    question_id: QuestionObjectIdDep,
+    decomposition: AsyncDecompositionCollectionDep,
+) -> DecompositionRecord:
+    """The stored decomposition, pre-answer flow and resolution of one question (404
+    when it has none). Includes the answer key (the resolution)."""
+    record = await decomposition.find_one({"question_id": str(question_id)})
+    if record is None:
+        raise HTTPException(status_code=404, detail="question has no decomposition")
+    try:
+        return DecompositionRecord(**record)
+    except ValidationError as exc:
+        # A decomposition of an older shape: what it holds is outdated anyway.
+        raise HTTPException(
+            status_code=404,
+            detail="the stored decomposition is outdated or malformed; decompose it again",
+        ) from exc
+
+
+@router.post("/{question_id}/decompose")
+async def decompose_question(
+    doc: ExaminationDocDep,
+    decomposition: AsyncDecompositionCollectionDep,
+    ica: IcaClientDep,
+    lock: SimplificationLockDep,
+    model_id: ModelIdQuery = "claude-haiku-5-5",
+    max_tokens: MaxTokensQuery = None,
+) -> DecompositionRecord:
+    """(Re)write the decomposition of one question (key-free, `decompose.py`). Its old
+    flow and resolution are cleared, and its game text (parts, derived entities) is
+    outdated: the game sends no flow until both are rewritten from this decomposition.
+    Run the pipeline backfill (or `/questions/{id}/simplify?force=true`, `/icons`,
+    `/flow`, `/resolve`) after it. 409 while a job runs."""
+    _refuse_while_a_job_runs(lock)
+    async with lock:
+        return await decompose_and_store(ica, decomposition, doc, model_id, max_tokens)
+
+
+@router.post("/{question_id}/flow")
+async def draw_question_flow(
+    doc: ExaminationDocDep,
+    decomposition: AsyncDecompositionCollectionDep,
+    ica: IcaClientDep,
+    lock: SimplificationLockDep,
+    model_id: ModelIdQuery = "claude-haiku-5-5",
+    max_tokens: MaxTokensQuery = None,
+) -> DecompositionRecord:
+    """(Re)write the pre-answer flow of a decomposed question (key-free, `flow.py`);
+    its resolution is cleared. 404 without a current decomposition, 409 while a job
+    runs."""
+    _refuse_while_a_job_runs(lock)
+    async with lock:
+        return await flow_and_store(ica, decomposition, doc, model_id, max_tokens)
+
+
+@router.post("/{question_id}/resolve")
+async def resolve_question(
+    doc: ExaminationDocDep,
+    decomposition: AsyncDecompositionCollectionDep,
+    ica: IcaClientDep,
+    lock: SimplificationLockDep,
+    model_id: ModelIdQuery = "claude-haiku-5-5",
+    max_tokens: MaxTokensQuery = None,
+) -> DecompositionRecord:
+    """(Re)write the resolution of a question with a current flow (sees the key,
+    `flow.py`). 404 without a flow, 409 while a job runs."""
+    _refuse_while_a_job_runs(lock)
+    async with lock:
+        return await resolve_and_store(ica, decomposition, doc, model_id, max_tokens)
 
 
 @router.post("/{question_id}/objectives")

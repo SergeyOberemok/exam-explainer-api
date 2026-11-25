@@ -43,7 +43,9 @@ from claude_exam.api.simplify import (
 from claude_exam.api.story import ICA_ORDER, _build_system_message as story_system
 
 pytestmark = pytest.mark.anyio
-FULL = ["objectives", "story", "simplify", "entities", "icons", "check"]
+# The ICA calls of a "full" job: the entities are derived from the decomposition, so
+# that step makes no call.
+FULL = ["objectives", "story", "decompose", "simplify", "icons", "flow", "resolve", "check"]
 
 
 @pytest.fixture
@@ -116,10 +118,13 @@ async def test_a_new_prompt_or_story_frame_redoes_the_text_and_what_hangs_on_it(
         {"question_id": str(q["_id"])}, {"$set": {"prompt_version": "older"}}
     )
     ica.calls.clear()
-    other = {**SIMPLE, "question": "Which mode, plan mode or acceptEdits mode, never edits?"}
+    text = "Which mode, plan mode or acceptEdits mode, never edits?"
+    other = {**{k: v for k, v in SIMPLE.items() if k != "question"}, "parts": [{"role": "ask", "text": text, "entity_ids": []}]}
     ica.queues["simplify"].append(reply(other))
     await run_job(mongo, ica, [q["_id"]], "full", only_missing=True)
-    assert ica.calls == ["simplify", "entities", "icons", "check"]
+    # The entities are derived again (no call); the icons and the check follow the text.
+    assert ica.calls == ["simplify", "icons", "check"]
+    assert (await stored(mongo, q))["prompt"]["question"] == text
 
 
 async def test_a_failed_step_does_not_stop_the_steps_that_do_not_need_it():
@@ -128,7 +133,7 @@ async def test_a_failed_step_does_not_stop_the_steps_that_do_not_need_it():
     q = outsider()
     mongo, ica = FakeMongo([q]), ScriptedIca()
     job = await run_job(mongo, ica, [q["_id"]], "full")
-    assert ica.calls == ["simplify", "entities", "icons", "check"]
+    assert ica.calls == ["decompose", "simplify", "icons", "flow", "resolve", "check"]
     assert (job.status, job.failed) == ("completed", 1)
     assert job.stages_failed == {"objectives": 1, "story": 1}
     assert [e.status_code for e in job.errors] == [422, 422]
@@ -138,7 +143,8 @@ async def test_a_failed_step_does_not_stop_the_steps_that_do_not_need_it():
     q2 = ready()
     mongo, ica = FakeMongo([q2]), ScriptedIca(simplify=[HTTPException(status_code=400, detail="x")])
     job = await run_job(mongo, ica, [q2["_id"]], "full")
-    assert ica.calls == ["objectives", "story", "simplify"]
+    # The flow and its resolution need only the decomposition, so they still run.
+    assert ica.calls == ["objectives", "story", "decompose", "simplify", "flow", "resolve"]
     assert job.stages_failed == {"simplify": 1} and job.status == "completed"
 
 

@@ -58,8 +58,8 @@ curl -s -X POST "http://127.0.0.1:8000/examination/import" -F "file=@<path to fi
 ```
 
 It returns `job_id`. Poll `GET /examination/jobs/<job_id>` until `status` is `completed`
-or `failed` (about 20 seconds per question with the default three at a time; six model
-calls each). In the job: `succeeded`, `failed`, `stages_failed` (failures per step) and
+or `failed` (about 30 seconds per question with the default three at a time; eight
+model calls each, more when a gate asks for a repair). In the job: `succeeded`, `failed`, `stages_failed` (failures per step) and
 `errors` (question, step, status, detail).
 
 - 422 errors are the catalog gaps of steps 2 and 3. Fix the catalog, then step 5.
@@ -99,8 +99,17 @@ Exit status 0 means done. Otherwise it names what is left:
   `simplify.py` instead.
 - **current game texts that break a fidelity rule**: should be 0; anything listed means
   a rule changed since the text was written. Bump `simplify.PROMPT_VERSION` and run step 5.
+- **pre-answer flows that may point at the correct answer**: the flow shown before
+  answering shares clearly more words with the correct answer than with the others.
+  Look at one with `uv run python scripts/run_pipeline.py <id> --stages flow --dry-run --mermaid`;
+  redo it with `POST /examination/<id>/flow` (then `/resolve`), or, when it repeats,
+  tighten the flow prompt in `flow.py` and bump `decompose.FLOW_VERSION`.
 - **hard** (for information): the model missed the question in both wordings. Nothing
   is wrong with the text; these are the bank's hardest questions.
+
+To look at or redo one question step by step, use
+`uv run python scripts/run_pipeline.py <id> --show --mermaid` (add `--dry-run` to write
+nothing, `--stages a,b` for some steps, `--force` to redo current ones).
 
 Then `uv run python scripts/story_coverage.py` and `uv run python scripts/objective_coverage.py`
 show how the new questions spread over chapters, stages and objectives.

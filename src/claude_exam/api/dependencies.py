@@ -5,7 +5,7 @@ from typing import Annotated
 
 from bson import ObjectId
 from bson.errors import InvalidId
-from fastapi import Depends, Query, Request
+from fastapi import Depends, HTTPException, Query, Request
 from pymongo import AsyncMongoClient
 from pymongo.asynchronous.collection import AsyncCollection
 
@@ -66,6 +66,17 @@ def get_async_story_collection(request: Request) -> AsyncCollection:
 AsyncStoryCollectionDep = Annotated[AsyncCollection, Depends(get_async_story_collection)]
 
 
+def get_async_decomposition_collection(request: Request) -> AsyncCollection:
+    """Question decompositions, flows and resolutions, one record per question."""
+    client: AsyncMongoClient = request.app.state.async_mongo_client
+    return client.get_default_database()["question_decomposition"]
+
+
+AsyncDecompositionCollectionDep = Annotated[
+    AsyncCollection, Depends(get_async_decomposition_collection)
+]
+
+
 def get_async_rounds_collection(request: Request) -> AsyncCollection:
     """Game rounds: which questions a round holds and what has been answered."""
     client: AsyncMongoClient = request.app.state.async_mongo_client
@@ -120,6 +131,19 @@ def get_question_object_id(question_id: str) -> ObjectId:
 QuestionObjectIdDep = Annotated[ObjectId, Depends(get_question_object_id)]
 
 
+async def get_examination_doc(
+    question_id: QuestionObjectIdDep, collection: AsyncCollectionDep
+) -> dict:
+    """The `examination` document of the path's `question_id` (404 when there is none)."""
+    doc = await collection.find_one({"_id": question_id})
+    if doc is None:
+        raise HTTPException(status_code=404, detail="question not found")
+    return doc
+
+
+ExaminationDocDep = Annotated[dict, Depends(get_examination_doc)]
+
+
 def get_round_object_id(round_id: str) -> ObjectId:
     """Path `round_id` as an ObjectId; a malformed id is a 404, like an expired round."""
     try:
@@ -137,9 +161,11 @@ def get_game_service(
     rounds: AsyncRoundsCollectionDep,
     objectives: AsyncObjectivesCollectionDep,
     story: AsyncStoryCollectionDep,
+    decomposition: AsyncDecompositionCollectionDep,
 ) -> GameService:
     return GameService(
-        QuestionRepository(examination, simplified, objectives, story), RoundRepository(rounds)
+        QuestionRepository(examination, simplified, objectives, story, decomposition),
+        RoundRepository(rounds),
     )
 
 

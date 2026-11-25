@@ -9,6 +9,7 @@ The last test runs the same pipeline against a real MongoDB (opt-in, like
 import asyncio
 import copy
 import json
+import re
 import os
 import secrets
 from types import SimpleNamespace
@@ -24,6 +25,7 @@ from claude_exam.api import batch
 from claude_exam.api.batch import new_job, run_simplification_job
 from claude_exam.api.dependencies import (
     get_async_collection,
+    get_async_decomposition_collection,
     get_async_jobs_collection,
     get_async_mongo_client,
     get_async_objectives_collection,
@@ -129,6 +131,7 @@ class FakeMongo:
             "examination_simplified": Coll(),
             "question_objectives": Coll(),
             "question_story": Coll(),
+            "question_decomposition": Coll(),
             "simplification_jobs": Coll(),
         }
 
@@ -182,6 +185,100 @@ def story_reply():
     }
 
 
+_LETTER_LINE = re.compile(r"^  ([A-Z])\. (.*)$", re.M)
+
+
+def answer_letters(prompt):
+    """The answer letters of the first answer list in a user message, and which of them
+    is marked [CORRECT] (the resolution step's input)."""
+    block = prompt.split("ANSWER", 1)[-1]
+    lines = _LETTER_LINE.findall(block)
+    letters = list(dict.fromkeys(letter for letter, _ in lines))
+    correct = [ord(l) - 65 for l, text in lines if "[CORRECT]" in text]
+    return letters, correct
+
+
+def _fact(text):
+    return {"text": text, "source_status": "inferred", "evidence": ""}
+
+
+def decomposition_reply(n_answers=2):
+    """A minimal decomposition that passes `decomposition_errors` for any question:
+    every item is inferred, so no evidence has to be quoted."""
+    return {
+        "question_summary": "A team must choose a working mode.",
+        "question_intent": {
+            "primary": "comparison",
+            "secondary": [],
+            "question_task": "choose the mode",
+            "target_of_question": "working mode",
+            "success_criteria": [],
+        },
+        "context": {
+            "description": "A team works with an agent.",
+            "current_state": [_fact("Edits land unreviewed.")],
+            "desired_state": [],
+        },
+        "entities": [
+            {"id": "e1", "name": "Agent", "type": "actor", "aliases": [], "description": "Does the work", "source_status": "inferred", "evidence": ""},
+            {"id": "e2", "name": "Ambiguity", "type": "concept", "aliases": [], "description": "Unclear rules", "source_status": "inferred", "evidence": ""},
+        ],
+        "events": [],
+        "relationships": [],
+        "problem": {"symptoms": [_fact("Edits land unreviewed.")], "root_causes": [], "consequences": [], "affected_entities": ["e1"]},
+        "conditions": [],
+        "goals_and_requirements": {"business_goals": [], "behavioral_requirements": [], "quality_requirements": [], "constraints": []},
+        "answer_options": [{"index": i, "mechanism": "a proposal", "entity_ids": []} for i in range(n_answers)],
+        "ambiguities_and_unknowns": [],
+    }
+
+
+def _node(id, type, label, **kw):
+    return {"id": id, "type": type, "label": label, "entity_ids": [], "condition_id": "", "source_status": "inferred", "is_question": False, "added": False, **kw}
+
+
+def _edge(source, target, **kw):
+    return {"source": source, "target": target, "type": "next", "label": "", "source_status": "inferred", "added": False, **kw}
+
+
+VIEW = {"primary": "process_flow", "secondary": [], "reason": "No branching."}
+
+
+def flow_reply():
+    return {
+        "visualization": VIEW,
+        "trigger": "Work starts",
+        "nodes": [
+            _node("n1", "start", "Work starts"),
+            _node("n2", "process", "Edits happen"),
+            _node("n3", "decision", "Which mode?", is_question=True),
+        ],
+        "edges": [_edge("n1", "n2"), _edge("n2", "n3")],
+    }
+
+
+def resolution_reply(n_answers=2, correct=(1,)):
+    return {
+        "answer_requirements": ["No edit before review"],
+        "flow": {
+            "visualization": VIEW,
+            "trigger": "Work starts",
+            "nodes": [
+                _node("n1", "start", "Work starts"),
+                _node("n2", "process", "Edits happen"),
+                _node("n4", "process", "Plan before editing", added=True),
+                _node("n5", "end", "Reviewed changes", added=True),
+            ],
+            "edges": [_edge("n1", "n2"), _edge("n2", "n4", added=True), _edge("n4", "n5", added=True)],
+        },
+        "options": [
+            {"index": i, "verdict": "correct" if i in correct else "incorrect", "supported_requirements": [], "gaps": [], "reason": "Because."}
+            for i in range(n_answers)
+        ],
+        "rule": "Plan first when edits need review.",
+    }
+
+
 class ScriptedIca:
     """Answers the calls of each pipeline step from separate queues (an
     Exception item is raised); defaults to good replies once a queue is empty. Records
@@ -196,7 +293,18 @@ class ScriptedIca:
         "check": lambda: {"reason": "It blocks edits.", "answer": "B"},
     }
 
-    def __init__(self, simplify=(), entities=(), icons=(), objectives=(), story=(), check=()):
+    def __init__(
+        self,
+        simplify=(),
+        entities=(),
+        icons=(),
+        objectives=(),
+        story=(),
+        check=(),
+        decompose=(),
+        flow=(),
+        resolve=(),
+    ):
         self.queues = {
             "simplify": list(simplify),
             "entities": list(entities),
@@ -204,14 +312,38 @@ class ScriptedIca:
             "objectives": list(objectives),
             "story": list(story),
             "check": list(check),
+            "decompose": list(decompose),
+            "flow": list(flow),
+            "resolve": list(resolve),
         }
         self.calls = []
         self.max_tokens = []
+        self.formats = []
 
-    async def chat_model(self, model_id, prompt, system=None, max_tokens=None, json_object=False):
+    def default(self, kind, prompt, system):
+        letters, correct = answer_letters(prompt)
+        if kind == "decompose":
+            return decomposition_reply(len(letters))
+        if kind == "flow":
+            return flow_reply()
+        if kind == "resolve":
+            return resolution_reply(len(letters), correct)
+        payload = copy.deepcopy(self.DEFAULTS[kind]())
+        if kind == "simplify" and "THE QUESTION AS PARTS" in system:
+            question = payload.pop("question")
+            payload = {"parts": [{"role": "ask", "text": question, "entity_ids": []}], **payload}
+        return payload
+
+    async def chat_model(
+        self, model_id, prompt, system=None, max_tokens=None, json_object=False, response_format=None
+    ):
         system = system or ""
+        self.formats.append((response_format or {}).get("type") or ("json_object" if json_object else None))
         kind = (
-            "icons" if "icon catalog" in system
+            "decompose" if "question decomposition engine" in system
+            else "flow" if "You draw the flow" in system
+            else "resolve" if "You explain the resolution" in system
+            else "icons" if "icon catalog" in system
             else "objectives" if "learning objective" in system
             else "story" if "story of a quiz game" in system
             else "entities" if "visual entities" in system
@@ -223,7 +355,7 @@ class ScriptedIca:
         item = self.queues[kind].pop(0) if self.queues[kind] else None
         if isinstance(item, Exception):
             raise item
-        return item or reply(self.DEFAULTS[kind]())
+        return item or reply(self.default(kind, prompt, system))
 
 
 def question(**kw):
@@ -272,7 +404,7 @@ async def test_simplify_mode_simplifies_then_adds_entities():
     assert record["entities"]["answers"][1]["entities"][0]["name"] == "plan mode"
     assert record["entities_ica"] is not None
     assert record["entities"]["answers"][1] == {
-        "entities": [{"name": "plan mode", "kind": "object", "aliases": [], "icon": "plan"}],
+        "entities": [{"name": "plan mode", "kind": "object", "aliases": [], "ref": "", "icon": "plan"}],
         "icon": "plan",
     }
     assert record["entities"]["question_icon"] == "mode" and record["icons_ica"] is not None
@@ -578,6 +710,7 @@ def client_for(mongo, ica, lock=None):
     app.dependency_overrides[get_async_simplified_collection] = lambda: db["examination_simplified"]
     app.dependency_overrides[get_async_objectives_collection] = lambda: db["question_objectives"]
     app.dependency_overrides[get_async_story_collection] = lambda: db["question_story"]
+    app.dependency_overrides[get_async_decomposition_collection] = lambda: db["question_decomposition"]
     app.dependency_overrides[get_async_jobs_collection] = lambda: db["simplification_jobs"]
     app.dependency_overrides[get_async_mongo_client] = lambda: mongo
     app.dependency_overrides[get_ica_client] = lambda: ica
@@ -596,7 +729,7 @@ def upload(client, item=None, **params):
 @pytest.mark.parametrize(
     ("params", "mode", "calls"),
     [
-        ({}, "full", ["objectives", "story", "simplify", "entities", "icons", "check"]),
+        ({}, "full", ["objectives", "story", "decompose", "simplify", "icons", "flow", "resolve", "check"]),
         ({"entities": "false"}, "simplify_only", ["simplify"]),
     ],
 )

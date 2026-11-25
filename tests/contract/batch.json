@@ -31,7 +31,16 @@
       "scenario": "",
       "stage": "",
       "stem": "",
-      "beat": ""
+      "beat": "",
+      "parts": [],
+      "flow": {
+        "primary": "",
+        "secondary": [],
+        "reason": "",
+        "trigger": "",
+        "nodes": [],
+        "edges": []
+      }
     }
   ],
   "simplified": [],

@@ -17,11 +17,13 @@ from pymongo.asynchronous.collection import AsyncCollection
 from claude_exam.api.ica import IcaClient
 from claude_exam.api.ica_json import ask_json
 from claude_exam.api.scenario_catalog import stem_of
+from claude_exam.api.decompose import VISUAL_KIND
 from claude_exam.api.schemas import (
     IcaMeta,
     IcaModelId,
     AnswerEntities,
     PromptEntities,
+    QuestionDecomposition,
     SimplifiedPrompt,
     SimplifiedQuestion,
     VisualEntity,
@@ -30,6 +32,9 @@ from claude_exam.html_clean import clean_plain, clean_question
 
 logger = logging.getLogger(__name__)
 
+# Bump when the prompt or the derivation changes: a record of another version counts as
+# missing for a backfill (`batch.is_current`).
+PROMPT_VERSION = "2"
 # A question is a short scenario; more than this means the model is listing nouns.
 # Beyond the limits the reply is trimmed (in order), not rejected.
 MAX_ENTITIES = 16
@@ -272,7 +277,10 @@ def parse_entities(
                 if a.strip() and a.strip().lower() != name.lower()
             )
         )
-        entities[entity_id] = VisualEntity(name=name, kind=kind, aliases=clean_aliases)
+        ref = raw.get("ref") if isinstance(raw.get("ref"), str) else ""
+        entities[entity_id] = VisualEntity(
+            name=name, kind=kind, aliases=clean_aliases, ref=ref
+        )
     entities = dict(list(entities.items())[:MAX_ENTITIES])
 
     if texts is not None:
@@ -379,6 +387,80 @@ async def extract_entities(
     return parse_entities(parsed, n_answers, _source_texts(item, simplified)), meta
 
 
+def derive_entities(
+    decomposition: QuestionDecomposition,
+    item: dict,
+    simplified: SimplifiedPrompt,
+) -> PromptEntities:
+    """
+    The visual entities of a question taken from its decomposition (no ICA call): its
+    drawable entities (`decompose.VISUAL_KIND`; a `concept` is never drawn) become the
+    catalog, each answer lists the entities its answer option relies on first, and
+    `parse_entities` then applies the same rules as to an extracted reply (grounding in
+    the original and simplified text, stable actors, no generic names, limits). Each
+    entity keeps its decomposition id as `ref`.
+    """
+    catalog = [
+        {
+            "id": e.id,
+            "name": e.name,
+            "kind": VISUAL_KIND[e.type],
+            "aliases": e.aliases,
+            "ref": e.id,
+        }
+        for e in decomposition.entities
+        if e.type in VISUAL_KIND
+    ]
+    ids = [e["id"] for e in catalog]
+    options = {o.index: o.entity_ids for o in decomposition.answer_options}
+    answers = [
+        list(dict.fromkeys([*(i for i in options.get(n, []) if i in ids), *ids]))
+        for n in range(len(simplified.answers))
+    ]
+    reply = {"entities": catalog, "question_entities": ids, "answers_entities": answers}
+    return parse_entities(reply, len(simplified.answers), _source_texts(item, simplified))
+
+
+async def _store_entities(
+    simplified: AsyncCollection,
+    existing: dict,
+    entities: PromptEntities,
+    meta: IcaMeta,
+    source: str,
+) -> SimplifiedQuestion:
+    # Conditional on the record not having been rewritten meanwhile: the references
+    # index into the text that was sent, so they must not land on a newer text.
+    stored = await simplified.find_one_and_update(
+        {"question_id": existing["question_id"], "updated_at": existing["updated_at"]},
+        {
+            "$set": {
+                "entities": entities.model_dump(),
+                "entities_ica": meta.model_dump(),
+                "entities_version": PROMPT_VERSION,
+                "entities_source": source,
+                # New entities have no icons yet; `icons.assign_and_store` adds them.
+                "icons_ica": None,
+                "icons_version": None,
+                "updated_at": datetime.now(timezone.utc),
+            }
+        },
+        return_document=ReturnDocument.AFTER,
+    )
+    if stored is None:
+        raise HTTPException(
+            status_code=409,
+            detail="simplified question changed while entities were extracted; retry",
+        )
+    return SimplifiedQuestion(**stored)
+
+
+async def _existing(simplified: AsyncCollection, doc: dict) -> dict:
+    existing = await simplified.find_one({"question_id": str(doc["_id"])})
+    if existing is None:
+        raise HTTPException(status_code=404, detail="simplified question not found")
+    return existing
+
+
 async def enrich_and_store(
     ica: IcaClient,
     simplified: AsyncCollection,
@@ -392,31 +474,36 @@ async def enrich_and_store(
     icons of the replaced entities go with them (`icons_ica` is cleared).
     Errors propagate, unlike inside `simplify_and_store`.
     """
-    question_id = str(doc["_id"])
-    existing = await simplified.find_one({"question_id": question_id})
-    if existing is None:
-        raise HTTPException(status_code=404, detail="simplified question not found")
-
+    existing = await _existing(simplified, doc)
     prompt = SimplifiedPrompt(**existing["prompt"])
     entities, meta = await extract_entities(ica, doc, prompt, model_id, max_tokens)
-    # Conditional on the record not having been rewritten meanwhile: the references
-    # index into the text that was sent, so they must not land on a newer text.
-    stored = await simplified.find_one_and_update(
-        {"question_id": question_id, "updated_at": existing["updated_at"]},
-        {
-            "$set": {
-                "entities": entities.model_dump(),
-                "entities_ica": meta.model_dump(),
-                # New entities have no icons yet; `icons.assign_and_store` adds them.
-                "icons_ica": None,
-                "updated_at": datetime.now(timezone.utc),
-            }
-        },
-        return_document=ReturnDocument.AFTER,
+    return await _store_entities(simplified, existing, entities, meta, "ica")
+
+
+async def derive_and_store(
+    simplified: AsyncCollection,
+    doc: dict,
+    decomposition: QuestionDecomposition,
+    model_id: IcaModelId,
+) -> SimplifiedQuestion:
+    """Like `enrich_and_store`, with the entities derived from the question's
+    decomposition (`derive_entities`, no ICA call). `entities_ica` then records the
+    model only, with `finish_reason` "derived" and no tokens."""
+    existing = await _existing(simplified, doc)
+    prompt = SimplifiedPrompt(**existing["prompt"])
+    entities = derive_entities(decomposition, doc, prompt)
+    meta = IcaMeta(model_id=model_id, finish_reason="derived", total_tokens=0)
+    return await _store_entities(simplified, existing, entities, meta, "decomposition")
+
+
+def is_current(record: dict | None, decomposed: bool = False) -> bool:
+    """Whether a simplified record has entities of today's extraction, and from the
+    right source: derived when the question has a current decomposition (`decomposed`),
+    else extracted."""
+    record = record or {}
+    source = record.get("entities_source") or "ica"
+    return (
+        record.get("entities_ica") is not None
+        and record.get("entities_version") == PROMPT_VERSION
+        and source == ("decomposition" if decomposed else "ica")
     )
-    if stored is None:
-        raise HTTPException(
-            status_code=409,
-            detail="simplified question changed while entities were extracted; retry",
-        )
-    return SimplifiedQuestion(**stored)

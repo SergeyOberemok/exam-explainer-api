@@ -807,6 +807,123 @@
       "title": "AnswerEntities",
       "type": "object"
     },
+    "FlowEdge": {
+      "properties": {
+        "added": {
+          "title": "Added",
+          "type": "boolean"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "source": {
+          "title": "Source",
+          "type": "string"
+        },
+        "source_status": {
+          "enum": [
+            "explicit",
+            "inferred",
+            "unknown"
+          ],
+          "title": "Source Status",
+          "type": "string"
+        },
+        "target": {
+          "title": "Target",
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "next",
+            "yes",
+            "no",
+            "unknown",
+            "approved",
+            "rejected",
+            "custom"
+          ],
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "target",
+        "type",
+        "label",
+        "source_status",
+        "added"
+      ],
+      "title": "FlowEdge",
+      "type": "object"
+    },
+    "FlowNode": {
+      "properties": {
+        "added": {
+          "title": "Added",
+          "type": "boolean"
+        },
+        "condition_id": {
+          "title": "Condition Id",
+          "type": "string"
+        },
+        "entity_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Entity Ids",
+          "type": "array"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "is_question": {
+          "title": "Is Question",
+          "type": "boolean"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "source_status": {
+          "enum": [
+            "explicit",
+            "inferred",
+            "unknown"
+          ],
+          "title": "Source Status",
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "start",
+            "process",
+            "decision",
+            "input",
+            "output",
+            "human_review",
+            "end"
+          ],
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "label",
+        "entity_ids",
+        "condition_id",
+        "source_status",
+        "is_question",
+        "added"
+      ],
+      "title": "FlowNode",
+      "type": "object"
+    },
     "GameAnswer": {
       "description": "One answer option, without whether it is correct.",
       "properties": {
@@ -880,6 +997,9 @@
         "question_id": {
           "title": "Question Id",
           "type": "string"
+        },
+        "resolution": {
+          "$ref": "#/components/schemas/GameResolution"
         },
         "simplified": {
           "$ref": "#/components/schemas/GameReview"
@@ -983,6 +1103,52 @@
       "title": "GameFiftyFiftyResult",
       "type": "object"
     },
+    "GameFlow": {
+      "description": "A flow for the game, flat and null-free (`DecisionFlow` with its visualization\nspread out). All lists are empty when the question has no flow.",
+      "properties": {
+        "edges": {
+          "default": [],
+          "items": {
+            "$ref": "#/components/schemas/FlowEdge"
+          },
+          "title": "Edges",
+          "type": "array"
+        },
+        "nodes": {
+          "default": [],
+          "items": {
+            "$ref": "#/components/schemas/FlowNode"
+          },
+          "title": "Nodes",
+          "type": "array"
+        },
+        "primary": {
+          "default": "",
+          "title": "Primary",
+          "type": "string"
+        },
+        "reason": {
+          "default": "",
+          "title": "Reason",
+          "type": "string"
+        },
+        "secondary": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Secondary",
+          "type": "array"
+        },
+        "trigger": {
+          "default": "",
+          "title": "Trigger",
+          "type": "string"
+        }
+      },
+      "title": "GameFlow",
+      "type": "object"
+    },
     "GameObjective": {
       "properties": {
         "count": {
@@ -1032,6 +1198,32 @@
       "title": "GameObjectiveList",
       "type": "object"
     },
+    "GamePart": {
+      "properties": {
+        "entity_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Entity Ids",
+          "type": "array"
+        },
+        "role": {
+          "title": "Role",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "role",
+        "text"
+      ],
+      "title": "GamePart",
+      "type": "object"
+    },
     "GameQuestion": {
       "properties": {
         "answers": {
@@ -1062,6 +1254,9 @@
             "question": []
           }
         },
+        "flow": {
+          "$ref": "#/components/schemas/GameFlow"
+        },
         "id": {
           "title": "Id",
           "type": "string"
@@ -1072,6 +1267,14 @@
             "type": "string"
           },
           "title": "Objectives",
+          "type": "array"
+        },
+        "parts": {
+          "default": [],
+          "items": {
+            "$ref": "#/components/schemas/GamePart"
+          },
+          "title": "Parts",
           "type": "array"
         },
         "question": {
@@ -1132,6 +1335,44 @@
         "total"
       ],
       "title": "GameQuestionList",
+      "type": "object"
+    },
+    "GameResolution": {
+      "properties": {
+        "answer_requirements": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Answer Requirements",
+          "type": "array"
+        },
+        "flow": {
+          "$ref": "#/components/schemas/GameFlow",
+          "default": {
+            "edges": [],
+            "nodes": [],
+            "primary": "",
+            "reason": "",
+            "secondary": [],
+            "trigger": ""
+          }
+        },
+        "options": {
+          "default": [],
+          "items": {
+            "$ref": "#/components/schemas/OptionEvaluation"
+          },
+          "title": "Options",
+          "type": "array"
+        },
+        "rule": {
+          "default": "",
+          "title": "Rule",
+          "type": "string"
+        }
+      },
+      "title": "GameResolution",
       "type": "object"
     },
     "GameReview": {
@@ -1412,6 +1653,49 @@
       "title": "HTTPValidationError",
       "type": "object"
     },
+    "OptionEvaluation": {
+      "properties": {
+        "gaps": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Gaps",
+          "type": "array"
+        },
+        "index": {
+          "title": "Index",
+          "type": "integer"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        },
+        "supported_requirements": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Supported Requirements",
+          "type": "array"
+        },
+        "verdict": {
+          "enum": [
+            "correct",
+            "incorrect"
+          ],
+          "title": "Verdict",
+          "type": "string"
+        }
+      },
+      "required": [
+        "index",
+        "verdict",
+        "supported_requirements",
+        "gaps",
+        "reason"
+      ],
+      "title": "OptionEvaluation",
+      "type": "object"
+    },
     "PromptEntities": {
       "description": "Entities of a simplified question, resolved per place they are mentioned.",
       "properties": {
@@ -1554,6 +1838,11 @@
         },
         "name": {
           "title": "Name",
+          "type": "string"
+        },
+        "ref": {
+          "default": "",
+          "title": "Ref",
           "type": "string"
         }
       },

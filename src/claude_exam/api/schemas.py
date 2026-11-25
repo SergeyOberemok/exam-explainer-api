@@ -125,6 +125,9 @@ class VisualEntity(BaseModel):
     name: str
     kind: EntityKind
     aliases: list[str] = []
+    # The id of this entity in the question's decomposition ("" when the entities were
+    # extracted without one), so parts and flow nodes can point at its icon.
+    ref: str = ""
     # Key from `icon_catalog.ICONS`, set by the icon step (None before it has run).
     icon: str | None = None
 
@@ -207,6 +210,11 @@ class GameQuestion(BaseModel):
     stem: str = ""
     # One line to show before the question; "" until the question has a story record.
     beat: str = ""
+    # The game text as semantic parts (simplified items of a decomposed question; [] on
+    # originals). A part's `entity_ids` match `entities[].ref`.
+    parts: list["GamePart"] = []
+    # The pre-answer flow of the question (key-free, `flow.py`); empty when it has none.
+    flow: "GameFlow" = Field(default_factory=lambda: GameFlow())
 
 
 class GameQuestionList(BaseModel):
@@ -290,6 +298,9 @@ class GameAnswerResult(BaseModel):
     misconception: str = ""
     # What happens in the story after this answer; "" without a story record.
     outcome: str = ""
+    # How the correct answer resolves the question, and how each option measures up
+    # (`flow.py`); empty when the question has none. Part of the answer key.
+    resolution: "GameResolution" = Field(default_factory=lambda: GameResolution())
 
 
 class GameFiftyFiftyRequest(BaseModel):
@@ -405,6 +416,20 @@ class SimplifyRequest(BaseModel):
     max_tokens: int | None = None
 
 
+PartRole = Literal[
+    "context", "current_state", "problem", "consequence", "goal", "constraint", "ask"
+]
+
+
+class SemanticPart(BaseModel):
+    """One sentence of the game text with what it does in the question, and the
+    decomposition entities (`QuestionDecomposition.entities` ids) it mentions."""
+
+    role: PartRole
+    text: str
+    entity_ids: list[str] = []
+
+
 class SimplifiedPrompt(BaseModel):
     """Mirrors the original item's prompt sub-object with simplified content."""
 
@@ -412,6 +437,9 @@ class SimplifiedPrompt(BaseModel):
     answers: list[str]
     feedbacks: list[str]
     explanation: str
+    # The question as semantic parts, in reading order (the last one is the ask);
+    # `question` is their texts joined. Empty when written without a decomposition.
+    parts: list[SemanticPart] = []
 
 
 class IcaMeta(BaseModel):
@@ -456,6 +484,16 @@ class SimplifiedQuestion(BaseModel):
     # Metadata of the icon call; None until icons were picked for the stored entities
     # (the icons themselves are the `icon` fields inside `entities`).
     icons_ica: IcaMeta | None = None
+    # The prompt versions the entities and icons were written with (`entities.py`,
+    # `icons.py` `PROMPT_VERSION`); None on records written before they existed.
+    entities_version: str | None = None
+    icons_version: str | None = None
+    # "decomposition" when the entities were derived from the question's decomposition,
+    # "ica" (or None, on older records) when the entity call extracted them.
+    entities_source: str | None = None
+    # `decompose.fingerprint` of the decomposition the game text was written with (None:
+    # without one).
+    decomposition_version: str | None = None
     # What the text was written with (`simplify.PROMPT_VERSION`, and
     # `scenario_catalog.frame_version` of the question's chapter); None on records
     # written before the game text existed. A pipeline backfill redoes other versions.
@@ -564,10 +602,22 @@ class EntitiesBackfill(BaseModel):
 # entities -> icons -> check. This is what an import starts. With `only_missing` each
 # step is skipped where its result is current, so the same job resumes a broken one.
 JobMode = Literal[
-    "full", "simplify", "simplify_only", "entities", "icons", "objectives", "story", "check"
+    "full",
+    "simplify",
+    "simplify_only",
+    "entities",
+    "icons",
+    "objectives",
+    "story",
+    "check",
+    "decompose",
+    "flow",
+    "resolve",
 ]
 # Which step a per-question job error comes from.
-JobStage = Literal["simplify", "entities", "icons", "objectives", "story", "check"]
+JobStage = Literal[
+    "simplify", "entities", "icons", "objectives", "story", "check", "decompose", "flow", "resolve"
+]
 
 
 class SimplificationError(BaseModel):
@@ -631,3 +681,279 @@ class ExplainResponse(BaseModel):
     related_lectures: list[Any]
     # Not part of the original item; strip before storing.
     ica: IcaMeta
+
+
+# ---------------------------------------------------------------------------------------
+# Question decomposition, decision flow and resolution (`decompose.py`, `flow.py`).
+# The model replies in these shapes (strict `json_schema`, see `ica_json.strict_schema`)
+# and they are stored as they are in `question_decomposition`, one record per question.
+# Field names follow `docs/question_decomposition_decision_flow_spec.md`, except that a
+# flow edge says `source` / `target` (not `from` / `to`): `from` is a keyword in the
+# game's C#.
+
+SourceStatus = Literal["explicit", "inferred", "unknown"]
+DecompEntityType = Literal[
+    "actor", "system", "object", "knowledge_source", "artifact", "external_service", "concept"
+]
+QuestionIntentKind = Literal[
+    "decision_design",
+    "architecture_design",
+    "process_design",
+    "troubleshooting",
+    "root_cause_analysis",
+    "comparison",
+    "classification",
+    "sequence_explanation",
+    "policy_interpretation",
+    "other",
+]
+RelationshipType = Literal[
+    "performs",
+    "acts_on",
+    "uses",
+    "references",
+    "produces",
+    "communicates_with",
+    "causes",
+    "leads_to",
+    "depends_on",
+    "routes_to",
+    "reviews",
+    "contests",
+    "associated_with",
+]
+ConditionType = Literal["policy", "evidence", "confidence", "permission", "state", "time", "other"]
+ConditionEvaluation = Literal["true_false", "multi_value", "unknown", "not_evaluable"]
+VisualizationKind = Literal[
+    "decision_flow",
+    "process_flow",
+    "sequence_diagram",
+    "architecture_diagram",
+    "cause_effect_diagram",
+    "comparison_matrix",
+    "entity_relationship_diagram",
+    "timeline",
+]
+FlowNodeType = Literal["start", "process", "decision", "input", "output", "human_review", "end"]
+FlowEdgeType = Literal["next", "yes", "no", "unknown", "approved", "rejected", "custom"]
+
+
+class Fact(BaseModel):
+    """One statement of the scenario. `evidence` is the phrase of the question it rests
+    on, copied word for word ("" when it is inferred or unknown)."""
+
+    text: str
+    source_status: SourceStatus
+    evidence: str
+
+
+class DecompEntity(BaseModel):
+    id: str
+    name: str
+    type: DecompEntityType
+    aliases: list[str]
+    description: str
+    source_status: SourceStatus
+    evidence: str
+
+
+class DecompEvent(BaseModel):
+    id: str
+    name: str
+    actor_id: str | None
+    target_id: str | None
+    input_ids: list[str]
+    output_ids: list[str]
+    sequence: int | None
+    source_status: SourceStatus
+    evidence: str
+
+
+class DecompRelationship(BaseModel):
+    source_id: str
+    type: RelationshipType
+    target_id: str
+    source_status: SourceStatus
+
+
+class ProblemStructure(BaseModel):
+    symptoms: list[Fact]
+    root_causes: list[Fact]
+    consequences: list[Fact]
+    affected_entities: list[str]
+
+
+class DecompCondition(BaseModel):
+    id: str
+    description: str
+    condition_type: ConditionType
+    evaluation: ConditionEvaluation
+    source_status: SourceStatus
+    evidence: str
+
+
+class GoalsAndRequirements(BaseModel):
+    business_goals: list[Fact]
+    behavioral_requirements: list[Fact]
+    quality_requirements: list[Fact]
+    constraints: list[Fact]
+
+
+class QuestionIntent(BaseModel):
+    primary: QuestionIntentKind
+    secondary: list[QuestionIntentKind]
+    question_task: str
+    target_of_question: str
+    success_criteria: list[str]
+
+
+class ScenarioContext(BaseModel):
+    description: str
+    current_state: list[Fact]
+    desired_state: list[Fact]
+
+
+class AnswerOptionMechanism(BaseModel):
+    """What one answer proposes, described without judging it."""
+
+    index: int
+    mechanism: str
+    entity_ids: list[str]
+
+
+class QuestionDecomposition(BaseModel):
+    """Stage 1 of the spec: the meaning of a question, written WITHOUT its answer key,
+    so everything here may be shown before the player answers."""
+
+    question_summary: str
+    question_intent: QuestionIntent
+    context: ScenarioContext
+    entities: list[DecompEntity]
+    events: list[DecompEvent]
+    relationships: list[DecompRelationship]
+    problem: ProblemStructure
+    conditions: list[DecompCondition]
+    goals_and_requirements: GoalsAndRequirements
+    answer_options: list[AnswerOptionMechanism]
+    ambiguities_and_unknowns: list[str]
+
+
+class Visualization(BaseModel):
+    primary: VisualizationKind
+    secondary: list[VisualizationKind]
+    reason: str
+
+
+class FlowNode(BaseModel):
+    id: str
+    type: FlowNodeType
+    label: str
+    entity_ids: list[str]
+    # The decomposition condition a decision node tests ("" when none).
+    condition_id: str
+    source_status: SourceStatus
+    # Pre-answer flow: the one decision node that is the question itself; the answer
+    # cards hang on it, so it has no outgoing edges.
+    is_question: bool
+    # Resolution flow: added by the correct answer's mechanism.
+    added: bool
+
+
+class FlowEdge(BaseModel):
+    source: str
+    target: str
+    type: FlowEdgeType
+    label: str
+    source_status: SourceStatus
+    added: bool
+
+
+class DecisionFlow(BaseModel):
+    """Stage 2 of the spec: a flow of nodes and edges, with the visualization that fits
+    the question (a flow without decisions is drawn as a process or cause-effect
+    flow)."""
+
+    visualization: Visualization
+    trigger: str
+    nodes: list[FlowNode]
+    edges: list[FlowEdge]
+
+
+class OptionEvaluation(BaseModel):
+    index: int
+    verdict: Literal["correct", "incorrect"]
+    supported_requirements: list[str]
+    gaps: list[str]
+    reason: str
+
+
+class Resolution(BaseModel):
+    """After answering: what a right answer has to do, how the correct mechanism
+    changes the flow, and how each option measures up. Part of the answer key."""
+
+    answer_requirements: list[str]
+    flow: DecisionFlow
+    options: list[OptionEvaluation]
+    rule: str
+
+
+class DecompositionRecord(BaseModel):
+    """A `question_decomposition` document. Each part keeps the prompt version it was
+    written with; writing a part clears the parts derived from it."""
+
+    question_id: str
+    text_hash: str
+    semantic: QuestionDecomposition
+    semantic_version: str
+    semantic_ica: IcaMeta
+    # `decompose.fingerprint` of `semantic` (None on records written before it was
+    # stored); a game text's `decomposition_version` must equal it.
+    fingerprint: str | None = None
+    flow: DecisionFlow | None = None
+    flow_version: str | None = None
+    flow_ica: IcaMeta | None = None
+    resolution: Resolution | None = None
+    resolution_version: str | None = None
+    resolution_ica: IcaMeta | None = None
+    created_at: datetime
+    updated_at: datetime
+
+    @field_validator("flow", "resolution", mode="wrap")
+    @classmethod
+    def _outdated_part_reads_as_none(cls, value, handler):
+        # A flow or resolution of an older shape (edges once said from/to) is outdated
+        # anyway (its version differs); it must not make the whole record unreadable.
+        try:
+            return handler(value)
+        except ValidationError as exc:
+            logger.warning("ignoring a malformed stored flow or resolution: %s", exc)
+            return None
+
+
+class GamePart(BaseModel):
+    role: str
+    text: str
+    entity_ids: list[str] = []
+
+
+class GameFlow(BaseModel):
+    """A flow for the game, flat and null-free (`DecisionFlow` with its visualization
+    spread out). All lists are empty when the question has no flow."""
+
+    primary: str = ""
+    secondary: list[str] = []
+    reason: str = ""
+    trigger: str = ""
+    nodes: list[FlowNode] = []
+    edges: list[FlowEdge] = []
+
+
+class GameResolution(BaseModel):
+    answer_requirements: list[str] = []
+    flow: GameFlow = GameFlow()
+    options: list[OptionEvaluation] = []
+    rule: str = ""
+
+
+GameQuestion.model_rebuild()
+GameAnswerResult.model_rebuild()

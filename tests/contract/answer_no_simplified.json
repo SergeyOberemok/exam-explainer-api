@@ -18,5 +18,18 @@
     "feedbacks": []
   },
   "misconception": "",
-  "outcome": ""
+  "outcome": "",
+  "resolution": {
+    "answer_requirements": [],
+    "flow": {
+      "primary": "",
+      "secondary": [],
+      "reason": "",
+      "trigger": "",
+      "nodes": [],
+      "edges": []
+    },
+    "options": [],
+    "rule": ""
+  }
 }

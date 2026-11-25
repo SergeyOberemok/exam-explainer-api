@@ -52,7 +52,7 @@ def test_public_question_has_no_answer_key():
     q = to_game_question(doc()).model_dump()
     assert set(q) == {
         "id", "simplified", "section", "assessment_type", "question", "answers", "entities",
-        "objectives", "difficulty", "scenario", "stage", "stem", "beat",
+        "objectives", "difficulty", "scenario", "stage", "stem", "beat", "parts", "flow",
     }
     assert (q["objectives"], q["difficulty"]) == ([], 0)
     assert q["answers"][1] == {"index": 1, "text": "x"}
@@ -77,7 +77,7 @@ def test_simplified_uses_question_id():
     assert q.id == "abc" and q.simplified
 
 
-AGENT = {"name": "Subagent", "kind": "actor", "aliases": ["helper"], "icon": "subagent"}
+AGENT = {"name": "Subagent", "kind": "actor", "aliases": ["helper"], "ref": "", "icon": "subagent"}
 TOOL = {"name": "process_refund", "kind": "object"}
 
 
@@ -91,7 +91,7 @@ def test_simplified_carries_entities_aligned_with_answers():
     assert q["entities"]["question"] == [AGENT]
     assert len(q["entities"]["answers"]) == 4  # trimmed to the answers
     assert q["entities"]["answers"][0] == {
-        "entities": [{**TOOL, "aliases": [], "icon": None}],
+        "entities": [{**TOOL, "aliases": [], "ref": "", "icon": None}],
         "icon": None,
     }
 
@@ -740,3 +740,105 @@ def test_story_lists_chapters_and_counts_playable_questions():
         "design": 0, "build": 0, "team": 0, "incident": 1, "scale": 1,
     }
     assert support["count"] == 2 and body["chapters"][0]["count"] == 0
+
+
+# --- semantic parts, flow and resolution --------------------------------------------
+
+
+def decomposition_of(original, **kw):
+    """A `question_decomposition` record of `original` with a current flow and
+    resolution (the replies the job tests use)."""
+    from test_jobs import decomposition_reply, flow_reply, resolution_reply
+
+    from claude_exam.api import decompose
+    from claude_exam.api.schemas import QuestionDecomposition
+
+    semantic = decomposition_reply(4)
+    return {
+        "question_id": str(original["_id"]),
+        "text_hash": text_hash(original),
+        "semantic": semantic,
+        "semantic_version": decompose.PROMPT_VERSION,
+        "fingerprint": decompose.fingerprint(QuestionDecomposition.model_validate(semantic)),
+        "flow": flow_reply(),
+        "flow_version": decompose.FLOW_VERSION,
+        "resolution": resolution_reply(4, [1]),
+        "resolution_version": decompose.RESOLUTION_VERSION,
+        **kw,
+    }
+
+
+def test_round_sends_parts_and_the_flow_but_keeps_the_resolution_for_the_answer():
+    from claude_exam.api.dependencies import get_async_decomposition_collection
+
+    a, plain = doc(), doc()
+    parts = [{"role": "problem", "text": "It breaks.", "entity_ids": ["e1"]}, {"role": "ask", "text": "Why?", "entity_ids": []}]
+    record = decomposition_of(a)
+    simple = simplified_of(a)
+    simple["prompt"] = {**simple["prompt"], "parts": parts}
+    simple["decomposition_version"] = record["fingerprint"]
+    stale = decomposition_of(plain, text_hash="written for another text")
+    c = client_with(exam=[a, plain], simple=[simple])
+    app.dependency_overrides[get_async_decomposition_collection] = lambda: FakeCollection(
+        [record, stale]
+    )
+    r = c.post("/v1/game/rounds", json={"count": 10})
+    body = r.json()
+    drawn, undrawn = body["items"]
+    assert drawn["flow"]["primary"] == "process_flow"
+    assert [n["id"] for n in drawn["flow"]["nodes"]] == ["n1", "n2", "n3"]
+    assert drawn["flow"]["nodes"][-1]["is_question"] is True and drawn["parts"] == []
+    # A decomposition of another text is not served.
+    assert undrawn["flow"] == {"primary": "", "secondary": [], "reason": "", "trigger": "", "nodes": [], "edges": []}
+    simplified = body["simplified"][0]
+    assert simplified["parts"] == parts and simplified["flow"] == drawn["flow"]
+    # Nothing of the resolution goes out before answering.
+    assert "Plan before editing" not in str(body) and "Plan first" not in str(body)
+
+    url = f"/v1/game/rounds/{body['round_id']}/answers"
+    result = c.post(url, json={"question_id": str(a["_id"]), "answer_index": 0}).json()
+    resolution = result["resolution"]
+    assert resolution["rule"] == "Plan first when edits need review."
+    assert [o["verdict"] for o in resolution["options"]] == ["incorrect", "correct", "incorrect", "incorrect"]
+    assert any(n["added"] for n in resolution["flow"]["nodes"])
+    empty = c.post(url, json={"question_id": str(plain["_id"]), "answer_index": 1}).json()["resolution"]
+    assert empty == {"answer_requirements": [], "flow": undrawn["flow"], "options": [], "rule": ""}
+
+
+EMPTY_FLOW = {"primary": "", "secondary": [], "reason": "", "trigger": "", "nodes": [], "edges": []}
+
+
+def test_no_flow_or_resolution_for_a_game_text_of_another_decomposition():
+    # Re-decomposing a question gives its ids to other things; the game text's parts
+    # and entities still name the old ones, so the new flow would get wrong icons.
+    from claude_exam.api.dependencies import get_async_decomposition_collection
+
+    a = doc()
+    simple = simplified_of(a)
+    simple["decomposition_version"] = "an older decomposition"
+    c = client_with(exam=[a], simple=[simple])
+    app.dependency_overrides[get_async_decomposition_collection] = lambda: FakeCollection(
+        [decomposition_of(a)]
+    )
+    body = c.post("/v1/game/rounds", json={"count": 10}).json()
+    assert body["items"][0]["flow"] == EMPTY_FLOW and body["simplified"][0]["flow"] == EMPTY_FLOW
+    url = f"/v1/game/rounds/{body['round_id']}/answers"
+    result = c.post(url, json={"question_id": str(a["_id"]), "answer_index": 1}).json()
+    assert result["resolution"]["rule"] == "" and result["resolution"]["options"] == []
+
+
+def test_no_resolution_without_a_current_flow():
+    # A resolution continues the flow the player saw; an outdated flow is not sent, so
+    # neither is its resolution.
+    from claude_exam.api.dependencies import get_async_decomposition_collection
+
+    a = doc()
+    c = client_with(exam=[a], simple=[])
+    app.dependency_overrides[get_async_decomposition_collection] = lambda: FakeCollection(
+        [decomposition_of(a, flow_version="an older flow")]
+    )
+    body = c.post("/v1/game/rounds", json={"count": 10}).json()
+    assert body["items"][0]["flow"] == EMPTY_FLOW
+    url = f"/v1/game/rounds/{body['round_id']}/answers"
+    result = c.post(url, json={"question_id": str(a["_id"]), "answer_index": 1}).json()
+    assert result["resolution"]["rule"] == ""

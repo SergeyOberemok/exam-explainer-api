@@ -27,6 +27,9 @@ from claude_exam.api.schemas import (
 
 logger = logging.getLogger(__name__)
 
+# Bump when the prompt changes: a record of another version counts as missing.
+PROMPT_VERSION = "2"
+
 _SYSTEM_MESSAGE = """\
 You choose icons from an icon catalog for one multiple-choice exam question, so a quiz \
 game can show one picture on the question and one on each answer card. The exam is \
@@ -219,6 +222,7 @@ async def assign_and_store(
             "$set": {
                 "entities": with_icons.model_dump(),
                 "icons_ica": meta.model_dump(),
+                "icons_version": PROMPT_VERSION,
                 "updated_at": datetime.now(timezone.utc),
             }
         },
@@ -230,3 +234,9 @@ async def assign_and_store(
             detail="simplified question changed while icons were picked; retry",
         )
     return SimplifiedQuestion(**stored)
+
+
+def is_current(record: dict | None) -> bool:
+    """Whether a simplified record has icons of today's prompt."""
+    record = record or {}
+    return record.get("icons_ica") is not None and record.get("icons_version") == PROMPT_VERSION

@@ -10,6 +10,7 @@ import logging
 from bson import ObjectId
 from pydantic import ValidationError
 
+from claude_exam.api import decompose
 from claude_exam.api.icon_catalog import known as known_icon
 from claude_exam.api.objective_catalog import known as known_objective
 from claude_exam.api.scenario_catalog import (
@@ -22,10 +23,15 @@ from claude_exam.api.scenario_catalog import (
 )
 from claude_exam.api.schemas import (
     AnswerEntities,
+    DecisionFlow,
     GameAnswer,
+    GameFlow,
+    GamePart,
     GameQuestion,
+    GameResolution,
     GameReview,
     PromptEntities,
+    Resolution,
 )
 
 logger = logging.getLogger(__name__)
@@ -196,16 +202,101 @@ def outcomes_of(original: dict, record: dict | None) -> dict:
     }
 
 
+def game_flow(flow: dict | None) -> GameFlow:
+    """A stored `DecisionFlow` as the game reads it; empty when there is none or it is
+    malformed (a flow is decoration, like the entities)."""
+    if not flow:
+        return GameFlow()
+    try:
+        parsed = DecisionFlow.model_validate(flow)
+    except ValidationError as e:
+        logger.warning("ignoring malformed flow: %s", e)
+        return GameFlow()
+    return GameFlow(
+        primary=parsed.visualization.primary,
+        secondary=list(parsed.visualization.secondary),
+        reason=parsed.visualization.reason,
+        trigger=parsed.trigger,
+        nodes=parsed.nodes,
+        edges=parsed.edges,
+    )
+
+
+def _current_decomposition(original: dict, record: dict | None) -> dict | None:
+    return record if decompose.is_current(record, original) else None
+
+
+def _same_ids(original: dict, record: dict | None, simplified: dict | None) -> bool:
+    """Whether the game text (None: none offered) was written from this decomposition,
+    so its parts and entities name the same ids as the flow."""
+    return simplified is None or simplified.get(
+        "decomposition_version"
+    ) == decompose.current_fingerprint(record, original)
+
+
+def flow_of(original: dict, record: dict | None, simplified: dict | None = None) -> GameFlow:
+    """The pre-answer flow of a question from its `question_decomposition` record, when
+    it was written for today's text and versions. With `simplified` (the game text the
+    round offers) the flow is sent only when that text was written from the same
+    decomposition: its parts and entities (`ref`) name the decomposition's ids, and so
+    do the flow's nodes, but a rewritten decomposition may give an id to another thing,
+    and the game would draw a node with another entity's icon."""
+    current = _current_decomposition(original, record)
+    if not (decompose.flow_is_current(current) and _same_ids(original, current, simplified)):
+        return GameFlow()
+    return game_flow(current["flow"])
+
+
+def resolution_of(
+    original: dict, record: dict | None, simplified: dict | None = None
+) -> dict | None:
+    """The resolution to keep in a round entry (a `GameResolution` dump), None without
+    one; sent exactly when `flow_of` sends the flow it continues. Part of the answer
+    key."""
+    record = _current_decomposition(original, record)
+    if not (
+        decompose.flow_is_current(record)
+        and decompose.resolution_is_current(record)
+        and _same_ids(original, record, simplified)
+    ):
+        return None
+    try:
+        resolution = Resolution.model_validate(record["resolution"])
+    except ValidationError as e:
+        logger.warning("ignoring malformed resolution: %s", e)
+        return None
+    return GameResolution(
+        answer_requirements=resolution.answer_requirements,
+        flow=game_flow(resolution.flow.model_dump()),
+        options=resolution.options,
+        rule=resolution.rule,
+    ).model_dump()
+
+
+def parts_of(doc: dict) -> list[GamePart]:
+    """The semantic parts of a simplified doc ([] when it has none or they are
+    malformed)."""
+    raw = (doc.get("prompt") or {}).get("parts")
+    if not isinstance(raw, list):
+        return []
+    try:
+        return [GamePart.model_validate(p) for p in raw]
+    except ValidationError:
+        return []
+
+
 def to_game_question(
     doc: dict,
     *,
     simplified: bool = False,
     tags: dict | None = None,
     story: dict | None = None,
+    flow: GameFlow | None = None,
 ) -> GameQuestion:
     """Map an `examination` doc, or an `examination_simplified` doc when `simplified`
-    (only those carry entities). `tags` is the question's `question_objectives` record
-    and `story` what `story_of` returned for the original."""
+    (only those carry entities and parts). `tags` is the question's
+    `question_objectives` record, `story` what `story_of` returned for the original and
+    `flow` what `flow_of` returned for it."""
     prompt = doc.get("prompt") or {}
     story = story or {}
     return GameQuestion(
@@ -225,6 +316,8 @@ def to_game_question(
         # A simplified text has the scenario woven in, so it has no separate stem.
         stem="" if simplified else story.get("stem", ""),
         beat=story.get("beat", ""),
+        parts=parts_of(doc) if simplified else [],
+        flow=flow or GameFlow(),
     )
 
 
@@ -246,9 +339,11 @@ def round_entry(
     simplified: dict | None,
     tags: dict | None = None,
     record: dict | None = None,
+    decomposition: dict | None = None,
 ) -> dict:
     """What a round document keeps for one playable question: its answer key and reviews
-    (`record` is its `question_story` record)."""
+    (`record` is its `question_story` record, `decomposition` its
+    `question_decomposition` record)."""
     correct = correct_indices(doc)[0]
     count = len(answers_of(doc))
     return {
@@ -258,6 +353,7 @@ def round_entry(
         "simplified": to_review(simplified).model_dump() if simplified else None,
         "misconceptions": misconceptions_of(tags, count, correct),
         "outcomes": outcomes_of(doc, record),
+        "resolution": resolution_of(doc, decomposition, simplified),
     }
 
 

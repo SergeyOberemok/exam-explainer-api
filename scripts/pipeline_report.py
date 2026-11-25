@@ -9,7 +9,10 @@ anything left to do, and what kind of thing it is:
   catalog (`propose_scenarios.py`, `propose_objectives.py`), then run the backfill;
 - a game text the check found changed: read it (`--show`), then write it again with
   `POST /questions/{id}/simplify?force=true` and check it with
-  `POST /examination/{id}/check`. Until then the game serves the original only.
+  `POST /examination/{id}/check`. Until then the game serves the original only;
+- a pre-answer flow that may point at the correct answer (`flow.leak_warning`): look at
+  it with `scripts/run_pipeline.py ID --stages flow --dry-run --mermaid` and redo it
+  (`POST /examination/{id}/flow`) or tighten the flow prompt.
 
 Usage: uv run python scripts/pipeline_report.py [DATABASE_URL] [--source FILE] [--show] [--check]
   --source FILE  only questions imported from this file
@@ -24,7 +27,7 @@ from collections import Counter
 
 from pymongo import MongoClient
 
-from claude_exam.api import check, simplify
+from claude_exam.api import check, decompose, entities, icons, simplify
 from claude_exam.api.batch import STAGES
 from claude_exam.api.game.domain import (
     CHECK_CHANGED,
@@ -39,6 +42,8 @@ from claude_exam.api.objective_catalog import CATALOG_VERSION as OBJECTIVE_CATAL
 from claude_exam.api.objective_catalog import for_section, normalize_section
 from claude_exam.api.objectives import PROMPT_VERSION as OBJECTIVE_PROMPT
 from claude_exam.api.scenario_catalog import CHAPTER_VERSIONS, unknown_paragraph
+from claude_exam.api.flow import leak_warning
+from claude_exam.api.schemas import DecisionFlow
 from claude_exam.api.simplify import quality_warnings
 from claude_exam.api.story import PROMPT_VERSION as STORY_PROMPT
 
@@ -53,7 +58,13 @@ def database_url(args: list[str]) -> str:
     return get_settings().database_url
 
 
-def stage_states(doc: dict, simplified: dict | None, tags: dict | None, story: dict | None) -> dict:
+def stage_states(
+    doc: dict,
+    simplified: dict | None,
+    tags: dict | None,
+    story: dict | None,
+    decomposition: dict | None = None,
+) -> dict:
     """For each step of the full pipeline: "current", "outdated" or "missing". The same
     rules as `batch.is_current`, on records already read."""
 
@@ -61,6 +72,9 @@ def stage_states(doc: dict, simplified: dict | None, tags: dict | None, story: d
         return "missing" if record is None else "current" if current else "outdated"
 
     place = story_of(doc, story)
+    found = decompose.read_decomposition(decomposition, doc)
+    fingerprint = decompose.fingerprint(found) if found else None
+    decomposed = decompose.is_current(decomposition, doc)
     return {
         "objectives": state(
             tags,
@@ -79,14 +93,23 @@ def stage_states(doc: dict, simplified: dict | None, tags: dict | None, story: d
                 )
             ),
         ),
-        "simplify": state(simplified, simplify.is_current(simplified, doc, place)),
+        "decompose": state(decomposition, decomposed),
+        "simplify": state(simplified, simplify.is_current(simplified, doc, place, fingerprint)),
         "entities": state(
             simplified and simplified.get("entities_ica"),
-            bool(simplified and simplified.get("entities_ica")),
+            entities.is_current(simplified, found is not None),
         ),
         "icons": state(
             simplified and simplified.get("icons_ica"),
-            bool(simplified and simplified.get("icons_ica")),
+            icons.is_current(simplified),
+        ),
+        "flow": state(
+            decomposition and decomposition.get("flow"),
+            decomposed and decompose.flow_is_current(decomposition),
+        ),
+        "resolve": state(
+            decomposition and decomposition.get("resolution"),
+            decomposed and decompose.resolution_is_current(decomposition),
         ),
         "check": state(simplified and simplified.get("check"), check.is_current(simplified)),
     }
@@ -112,6 +135,7 @@ def main() -> int:
     simplified = {r["question_id"]: r for r in db["examination_simplified"].find()}
     tags = {r["question_id"]: r for r in db["question_objectives"].find()}
     stories = {r["question_id"]: r for r in db["question_story"].find()}
+    decompositions = {r["question_id"]: r for r in db["question_decomposition"].find()}
 
     states = {stage: Counter() for stage in STAGES["full"]}
     verdicts: Counter = Counter()
@@ -123,14 +147,27 @@ def main() -> int:
     hard: list[str] = []
     lossy: list[tuple[str, list[str]]] = []
     unusable: list[str] = []
+    leaks: list[tuple[str, str]] = []
+    views: Counter = Counter()
 
     for doc in docs:
         question_id = str(doc["_id"])
         text = simplified.get(question_id)
+        record = decompositions.get(question_id)
         for stage, state in stage_states(
-            doc, text, tags.get(question_id), stories.get(question_id)
+            doc, text, tags.get(question_id), stories.get(question_id), record
         ).items():
             states[stage][state] += 1
+        if decompose.is_current(record, doc) and decompose.flow_is_current(record):
+            try:
+                flow = DecisionFlow.model_validate(record["flow"])
+            except ValueError:
+                flow = None
+            if flow is not None:
+                views[flow.visualization.primary] += 1
+                warning = leak_warning(doc, flow)
+                if warning:
+                    leaks.append((question_id, warning))
         unplayable += not is_playable(doc)
         if not for_section(doc.get("section") or ""):
             sections[normalize_section(doc.get("section")) or "(no section)"] += 1
@@ -163,6 +200,7 @@ def main() -> int:
         + (", ".join(f"{name} {count}" for name, count in verdicts.most_common()) or "(none)")
     )
     print("  difficulty: " + ", ".join(f"{d or 'untagged'}: {difficulty[d]}" for d in (1, 2, 3, 0)))
+    print("  flow views: " + (", ".join(f"{v} {c}" for v, c in views.most_common()) or "(none)"))
 
     todo = sum(c["outdated"] + c["missing"] for c in states.values())
     print("\nNEEDS WORK")
@@ -183,12 +221,16 @@ def main() -> int:
     for question_id, problems in lossy:
         print(f"    {question_id}: {'; '.join(problems)}")
 
+    print(f"  pre-answer flows that may point at the correct answer: {len(leaks)}")
+    for question_id, warning in leaks:
+        print(f"    {question_id}: {warning}")
+
     print("\nFOR INFORMATION")
     print(f"  questions the model missed in both wordings (hard): {len(hard)}")
     for question_id in hard:
         print(f"    {question_id}")
 
-    needs_work = bool(todo or sections or paragraphs or changed or unusable or lossy)
+    needs_work = bool(todo or sections or paragraphs or changed or unusable or lossy or leaks)
     return 1 if needs_work and "--check" in argv else 0
 
 

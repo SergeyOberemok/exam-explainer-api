@@ -7,9 +7,11 @@ from bson import ObjectId
 from fastapi import HTTPException
 from pymongo import AsyncMongoClient
 
-from claude_exam.api import check, simplify
+from claude_exam.api import check, decompose, entities, flow, icons, simplify
 from claude_exam.api.check import check_and_store
-from claude_exam.api.entities import enrich_and_store
+from claude_exam.api.decompose import decompose_and_store, read_decomposition
+from claude_exam.api.entities import derive_and_store, enrich_and_store
+from claude_exam.api.flow import flow_and_store, resolve_and_store
 from claude_exam.api.game.domain import difficulty_of, story_of
 from claude_exam.api.ica import IcaClient
 from claude_exam.api.icons import assign_and_store
@@ -32,10 +34,23 @@ STALE_JOB_SECONDS = 15 * 60
 # (`PIPELINE_CONCURRENCY` in the settings). The steps of one question stay in order.
 DEFAULT_CONCURRENCY = 3
 # The steps each job mode runs for a question, in order. In "full" the objectives come
-# first because the story step orders a question by its difficulty, and the story
-# before the game text because that text is set in the question's chapter and stage.
+# first because the story step orders a question by its difficulty, the story before
+# the game text because that text is set in the question's chapter and stage, and the
+# decomposition before the game text because that text is written as its semantic parts
+# and the entities are derived from it. The flow and its resolution need only the
+# decomposition; the check comes last.
 STAGES: dict[JobMode, tuple[JobStage, ...]] = {
-    "full": ("objectives", "story", "simplify", "entities", "icons", "check"),
+    "full": (
+        "objectives",
+        "story",
+        "decompose",
+        "simplify",
+        "entities",
+        "icons",
+        "flow",
+        "resolve",
+        "check",
+    ),
     "simplify": ("simplify", "entities", "icons"),
     "simplify_only": ("simplify",),
     "entities": ("entities", "icons"),
@@ -43,6 +58,9 @@ STAGES: dict[JobMode, tuple[JobStage, ...]] = {
     "objectives": ("objectives",),
     "story": ("story",),
     "check": ("check",),
+    "decompose": ("decompose", "flow", "resolve"),
+    "flow": ("flow", "resolve"),
+    "resolve": ("resolve",),
 }
 # A step that needs what another step of the same job stores: when that one fails (or
 # could not run), this one is not tried. Steps not listed here run whatever happened
@@ -51,6 +69,8 @@ _NEEDS: dict[JobStage, JobStage] = {
     "entities": "simplify",
     "icons": "entities",
     "check": "simplify",
+    "flow": "decompose",
+    "resolve": "flow",
 }
 # Counters kept from before "full" existed: questions whose earlier steps were stored
 # but whose entity / icon step failed.
@@ -62,6 +82,7 @@ class Stores(NamedTuple):
     simplified: object
     objectives: object
     story: object
+    decomposition: object = None
 
 
 def _now() -> datetime:
@@ -124,6 +145,17 @@ async def _story(stores: Stores, doc: dict) -> dict:
     return story_of(doc, record)
 
 
+async def _decomposition_record(stores: Stores, doc: dict) -> dict | None:
+    if stores.decomposition is None:
+        return None
+    return await stores.decomposition.find_one({"question_id": str(doc["_id"])})
+
+
+async def _decomposition(stores: Stores, doc: dict):
+    """The question's current decomposition, or None."""
+    return read_decomposition(await _decomposition_record(stores, doc), doc)
+
+
 async def is_current(stage: JobStage, stores: Stores, doc: dict) -> bool:
     """Whether the question already has what `stage` would store, written with today's
     prompt and catalogs (for a story also: a seed record). A job with `only_missing`
@@ -135,15 +167,28 @@ async def is_current(stage: JobStage, stores: Stores, doc: dict) -> bool:
     if stage == "story":
         found = await stores.story.find_one(current_story_query(question_id), {"_id": 1})
         return found is not None
+    if stage in ("decompose", "flow", "resolve"):
+        record = await _decomposition_record(stores, doc)
+        if not decompose.is_current(record, doc):
+            return False
+        if stage == "decompose":
+            return True
+        # A resolution continues its flow: with an outdated flow it is outdated too.
+        if not flow.flow_is_current(record):
+            return False
+        return stage == "flow" or flow.resolution_is_current(record)
     record = await stores.simplified.find_one({"question_id": question_id})
     if record is None:
         return False
+    found = await _decomposition(stores, doc)
+    decomposed = found is not None
     if stage == "simplify":
-        return simplify.is_current(record, doc, await _story(stores, doc))
+        version = decompose.fingerprint(found) if decomposed else None
+        return simplify.is_current(record, doc, await _story(stores, doc), version)
     if stage == "entities":
-        return record.get("entities_ica") is not None
+        return entities.is_current(record, decomposed)
     if stage == "icons":
-        return record.get("icons_ica") is not None
+        return icons.is_current(record)
     return check.is_current(record)
 
 
@@ -164,6 +209,9 @@ def _step(stage: JobStage, ica: IcaClient, stores: Stores, doc: dict, model_id: 
             ica, stores.story, doc, model_id, difficulty=difficulty_of(tags)
         )
 
+    async def decomposed():
+        await decompose_and_store(ica, stores.decomposition, doc, model_id)
+
     async def game_text():
         await simplify_and_store(
             ica,
@@ -172,10 +220,21 @@ def _step(stage: JobStage, ica: IcaClient, stores: Stores, doc: dict, model_id: 
             model_id,
             with_entities=False,
             story=await _story(stores, doc),
+            decomposition=await _decomposition(stores, doc),
         )
 
     async def entities():
-        await enrich_and_store(ica, stores.simplified, doc, model_id)
+        found = await _decomposition(stores, doc)
+        if found is not None:
+            await derive_and_store(stores.simplified, doc, found, model_id)
+        else:
+            await enrich_and_store(ica, stores.simplified, doc, model_id)
+
+    async def drawn():
+        await flow_and_store(ica, stores.decomposition, doc, model_id)
+
+    async def resolved():
+        await resolve_and_store(ica, stores.decomposition, doc, model_id)
 
     async def icons():
         await assign_and_store(ica, stores.simplified, str(doc["_id"]), model_id)
@@ -188,10 +247,13 @@ def _step(stage: JobStage, ica: IcaClient, stores: Stores, doc: dict, model_id: 
     return {
         "objectives": objectives,
         "story": story,
+        "decompose": decomposed,
         "simplify": game_text,
         "entities": entities,
         "icons": icons,
         "check": checked,
+        "flow": drawn,
+        "resolve": resolved,
     }[stage]
 
 
@@ -204,11 +266,12 @@ async def _process(
     model_id: IcaModelId,
     mode: JobMode,
     only_missing: bool,
+    stages: tuple[JobStage, ...] | None = None,
 ) -> bool:
     """Run the steps of `mode` for one question and record the outcome on the job.
     Never raises. Returns whether anything was stored or was already there."""
     question_id = str(object_id)
-    stages = STAGES[mode]
+    stages = stages or STAGES[mode]
     stored = skipped = 0
     blocked: set[JobStage] = set()
     errors: list[dict] = []
@@ -276,6 +339,7 @@ async def run_simplification_job(
     mode: JobMode = "simplify",
     only_missing: bool = False,
     concurrency: int = 1,
+    stages: tuple[JobStage, ...] | None = None,
 ) -> None:
     """
     Process the given examination questions (see `JobMode` and `STAGES`), `concurrency`
@@ -293,6 +357,9 @@ async def run_simplification_job(
     one (`_NEEDS`); what was stored is kept. Progress is written after every question.
     Jobs in this process run one at a time (`lock`) so concurrent imports do not
     multiply ICA load. The job fails only when no question got anything stored.
+
+    `stages` replaces the steps of `mode` (in the order given): how
+    `scripts/run_pipeline.py` runs a chosen few steps for one question.
     """
     db = mongo.get_default_database()
     stores = Stores(
@@ -300,6 +367,7 @@ async def run_simplification_job(
         db["examination_simplified"],
         db["question_objectives"],
         db["question_story"],
+        db["question_decomposition"],
     )
     jobs = db["simplification_jobs"]
 
@@ -321,7 +389,15 @@ async def run_simplification_job(
             async def one(object_id: ObjectId) -> bool:
                 async with slots:
                     return await _process(
-                        object_id, ica, stores, jobs, job_id, model_id, mode, only_missing
+                        object_id,
+                        ica,
+                        stores,
+                        jobs,
+                        job_id,
+                        model_id,
+                        mode,
+                        only_missing,
+                        stages,
                     )
 
             results = await asyncio.gather(*(one(i) for i in question_ids))

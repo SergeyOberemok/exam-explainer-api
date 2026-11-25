@@ -21,5 +21,18 @@
     ]
   },
   "misconception": "Header names are free to choose.",
-  "outcome": "Every call still comes back unauthorized."
+  "outcome": "Every call still comes back unauthorized.",
+  "resolution": {
+    "answer_requirements": [],
+    "flow": {
+      "primary": "",
+      "secondary": [],
+      "reason": "",
+      "trigger": "",
+      "nodes": [],
+      "edges": []
+    },
+    "options": [],
+    "rule": ""
+  }
 }

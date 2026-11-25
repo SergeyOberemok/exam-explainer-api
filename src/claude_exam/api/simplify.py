@@ -13,7 +13,6 @@ the length of each answer. A reply that fails is sent back with what was wrong, 
 step (`check.py`) tests that the rewrite still has the same right answer.
 """
 
-import json
 import logging
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
@@ -22,10 +21,13 @@ from fastapi import HTTPException
 from pymongo import ReturnDocument
 from pymongo.asynchronous.collection import AsyncCollection
 
-from claude_exam.api.entities import extract_entities
+from claude_exam.api.entities import PROMPT_VERSION as entities_version
+from claude_exam.api.entities import derive_entities, extract_entities
 from claude_exam.api.exam_terms import lost_identifiers, lost_names, lost_numbers
 from claude_exam.api.ica import IcaClient
-from claude_exam.api.ica_json import ask_json
+from claude_exam.api import decompose
+from claude_exam.api.ica_json import ask_validated
+from claude_exam.api.icons import PROMPT_VERSION as icons_version
 from claude_exam.api.icons import pick_icons
 from claude_exam.api.scenario_catalog import (
     BY_KEY,
@@ -42,6 +44,8 @@ from claude_exam.api.schemas import (
     IcaMeta,
     IcaModelId,
     PromptEntities,
+    QuestionDecomposition,
+    SemanticPart,
     SimplifiedPrompt,
     SimplifiedQuestion,
 )
@@ -51,7 +55,7 @@ logger = logging.getLogger(__name__)
 
 # Bump when the prompt or the meaning of a stored field changes: records of another
 # version count as missing for a pipeline backfill.
-PROMPT_VERSION = "2"
+PROMPT_VERSION = "3"
 # How much longer than its original a rewritten answer may be before it is rejected.
 MAX_ANSWER_GROWTH = 1.25
 ANSWER_SLACK_CHARS = 15
@@ -146,7 +150,7 @@ else - no markdown fences, no prose before or after, no comments. \
 Respond with exactly this schema:
 
 {
-  "question": "<the game version of the question - plain text, no HTML>",
+  {{QUESTION_SCHEMA}},
   {{ANSWERS_SCHEMA}},
   {{FEEDBACKS_SCHEMA}},
   "explanation": "<2-3 sentences ending with a one-line rule>"
@@ -196,7 +200,34 @@ def opening(item: dict, chapter: str | None) -> str:
     return f"OPENING: {name} ({role}) brings this to you."
 
 
-def _build_system_message(n_answers: int, chapter: str | None = None) -> str:
+_QUESTION_TEXT = '"question": "<the game version of the question - plain text, no HTML>"'
+_QUESTION_PARTS = (
+    '"parts": [\n'
+    '    {"role": "<context|current_state|problem|consequence|goal|constraint|ask>", '
+    '"text": "<one sentence of the game version of the question>", '
+    '"entity_ids": ["<ids of the ENTITIES this sentence mentions>"]}\n'
+    "  ]"
+)
+_PARTS_RULE = """
+
+THE QUESTION AS PARTS
+Write the game version of the question as "parts": its sentences in reading order, \
+each one with the role it plays - context (where and what), current_state (what \
+happens now), problem (what goes wrong), consequence (its impact), goal (what should \
+happen), constraint (a limit that must hold), ask (the question itself). One sentence \
+per part, 2 to 6 parts, exactly one "ask" and it comes last, ending with "?". The \
+ENTITIES list given with the question is what the question is about: name them with \
+the same words, and give each part the ids of the entities it mentions ([] for \
+none). The parts follow the PROBLEM given with the question; do not add a cause or a \
+fix it does not list. The ask asks exactly what the original question asks, in plain \
+words: do not widen or change it (a question asking for "the fix" does not become \
+"the cause and the fix")."""
+MAX_PARTS = 6
+
+
+def _build_system_message(
+    n_answers: int, chapter: str | None = None, with_parts: bool = False
+) -> str:
     # Fill the {{ANSWERS_SCHEMA}} / {{FEEDBACKS_SCHEMA}} placeholders with the
     # correct number of entries so the model knows the exact expected array length.
     letters = [chr(65 + i) for i in range(n_answers)]
@@ -228,13 +259,42 @@ def _build_system_message(n_answers: int, chapter: str | None = None) -> str:
         _SYSTEM_MESSAGE.replace("{{COMPANY_INTRO}}", COMPANY_INTRO)
         .replace("{{CHAPTER}}", block)
         .replace("{{PEOPLE_RULE}}", people_rule)
-        .replace("{{BACKGROUND_RULE}}", background)
+        .replace("{{BACKGROUND_RULE}}", background + (_PARTS_RULE if with_parts else ""))
+        .replace("{{QUESTION_SCHEMA}}", _QUESTION_PARTS if with_parts else _QUESTION_TEXT)
         .replace("{{ANSWERS_SCHEMA}}", f'"answers": [\n    {answers_entries}\n  ]')
         .replace("{{FEEDBACKS_SCHEMA}}", f'"feedbacks": [\n    {feedbacks_entries}\n  ]')
     )
 
 
-def _build_user_message(item: dict, story: dict | None = None) -> str:
+def _decomposition_block(decomposition: QuestionDecomposition) -> str:
+    """What the parts are built on: the entities (with their ids) and the problem."""
+    entities = "\n".join(
+        f"  {e.id}: {e.name} ({e.type})"
+        + (f" - also: {', '.join(e.aliases)}" if e.aliases else "")
+        for e in decomposition.entities
+    )
+    p = decomposition.problem
+    problem = "\n".join(
+        f"  {name}: {f.text}"
+        for name, facts in (
+            ("symptom", p.symptoms),
+            ("cause", p.root_causes),
+            ("consequence", p.consequences),
+        )
+        for f in facts
+    )
+    goals = "\n".join(f"  goal: {f.text}" for f in decomposition.context.desired_state)
+    return (
+        f"ENTITIES:\n{entities or '  (none)'}\n\n"
+        f"PROBLEM:\n{problem or '  (none stated)'}"
+        + (f"\n{goals}" if goals else "")
+        + f"\n\nTHE QUESTION ASKS: {decomposition.question_intent.question_task}"
+    )
+
+
+def _build_user_message(
+    item: dict, story: dict | None = None, decomposition: QuestionDecomposition | None = None
+) -> str:
     """Render one practice-exam item as the user turn: the question split into its
     scenario paragraph and the question itself, where the question stands in the story,
     and the answer key."""
@@ -269,6 +329,8 @@ def _build_user_message(item: dict, story: dict | None = None) -> str:
         f"PER-CHOICE FEEDBACK:\n{feedbacks_block}",
         f"OFFICIAL EXPLANATION:\n{explanation}",
     ]
+    if decomposition is not None:
+        parts.append(_decomposition_block(decomposition))
     return "\n\n".join(parts)
 
 
@@ -338,6 +400,41 @@ def quality_warnings(item: dict, parsed: dict) -> list[str]:
     return warnings
 
 
+def parts_errors(parsed: dict, decomposition: QuestionDecomposition) -> list[str]:
+    """What is wrong with the `parts` of a reply (see `_PARTS_RULE`); empty when they
+    pass. The faults are sent back to the model."""
+    raw = parsed.get("parts")
+    if not isinstance(raw, list) or not raw:
+        return ['"parts" must be a non-empty list of {role, text, entity_ids}']
+    try:
+        parts = [SemanticPart.model_validate(p) for p in raw]
+    except ValueError as exc:
+        return [f'"parts" has an invalid item: {str(exc).splitlines()[0]}']
+    errors = []
+    if len(parts) > MAX_PARTS:
+        errors.append(f"at most {MAX_PARTS} parts, got {len(parts)}")
+    if any(not p.text.strip() for p in parts):
+        errors.append("every part needs a sentence")
+    asks = [i for i, p in enumerate(parts) if p.role == "ask"]
+    if asks != [len(parts) - 1]:
+        errors.append('exactly one part has role "ask", and it is the last one')
+    known = {e.id for e in decomposition.entities}
+    unknown = sorted({i for p in parts for i in p.entity_ids if i not in known})
+    if unknown:
+        errors.append(f"parts refer to entity ids that are not listed: {', '.join(unknown)}")
+    return errors
+
+
+def joined(parsed: dict) -> dict:
+    """A parts reply with `question` set to its sentences joined (a copy), so the
+    checks of the plain text apply unchanged."""
+    texts = [
+        str(p.get("text", "")).strip() if isinstance(p, dict) else ""
+        for p in parsed.get("parts") or []
+    ]
+    return {**parsed, "question": " ".join(t for t in texts if t)}
+
+
 def _validate_shape(
     parsed: dict, n_answers: int, correct: list[str] | None = None
 ) -> None:
@@ -372,27 +469,13 @@ def _validate_shape(
                 )
 
 
-def _repair_note(previous: dict, errors: list[str]) -> str:
-    """What the model gets after a rejected reply: that reply and what is wrong with
-    it. Without its own text it writes a new one and loses something else."""
-    listed = "\n".join(f"- {e}" for e in errors)
-    return (
-        "\n\nYOUR PREVIOUS REPLY:\n"
-        f"{json.dumps(previous, ensure_ascii=False, indent=1)}\n\n"
-        "IT WAS REJECTED FOR THESE REASONS ONLY:\n"
-        f"{listed}\n"
-        "Reply with the same JSON object, changing only the places named above and "
-        "leaving every other sentence exactly as it is. Copy an exact term letter "
-        "for letter into the place it belongs."
-    )
-
-
 async def simplify_item(
     ica: IcaClient,
     item: dict,
     model_id: IcaModelId,
     max_tokens: int | None = None,
     story: dict | None = None,
+    decomposition: QuestionDecomposition | None = None,
 ) -> tuple[SimplifiedPrompt, IcaMeta]:
     """
     Run one exam item (needs `prompt`, `correct_response`, `section`) through the
@@ -402,61 +485,79 @@ async def simplify_item(
     question's own scenario paragraph names, or just in the company.
 
     A reply that breaks `fidelity_errors` is sent back with what was wrong; when the
-    last of `MAX_ATTEMPTS` replies still breaks it the call raises 502. The metadata counts the tokens of all attempts.
+    last of `MAX_ATTEMPTS` replies still breaks it the call raises 502. The metadata
+    counts the tokens of all attempts.
+
+    With `decomposition` (the question's, see `decompose.py`) the question is written
+    as semantic parts that name its entities (`parts_errors`); `question` is then their
+    sentences joined, and every check of the plain text runs on that.
     """
     n_answers = len((item.get("prompt") or {}).get("answers", []))
     if n_answers == 0:
         raise HTTPException(
             status_code=422, detail="question has no answers to simplify"
         )
-    system = _build_system_message(n_answers, chapter_key(item, story))
-    user = _build_user_message(item, story)
+    with_parts = decomposition is not None
+    system = _build_system_message(n_answers, chapter_key(item, story), with_parts)
+    user = _build_user_message(item, story, decomposition)
 
-    errors: list[str] = []
-    parsed: dict = {}
-    tokens = 0
-    for _ in range(MAX_ATTEMPTS):
-        parsed, meta = await ask_json(
-            ica,
-            model_id,
-            user + (_repair_note(parsed, errors) if errors else ""),
-            system=system,
-            what="output",
-            max_tokens=max_tokens,
-        )
-        tokens += meta.total_tokens
-        _validate_shape(parsed, n_answers, item.get("correct_response") or [])
-        errors = fidelity_errors(item, parsed)
-        if not errors:
-            break
-        logger.info("game text of %s needs repair: %s", item.get("_id"), "; ".join(errors))
-    else:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Exam Explainer output rejected: {'; '.join(errors)}",
-        )
+    correct = item.get("correct_response") or []
 
+    def validate(parsed: dict) -> list[str]:
+        if not with_parts:
+            _validate_shape(parsed, n_answers, correct)
+            return fidelity_errors(item, parsed)
+        errors = parts_errors(parsed, decomposition)
+        if errors:
+            return errors
+        text = joined(parsed)
+        _validate_shape(text, n_answers, correct)
+        return fidelity_errors(item, text)
+
+    parsed, meta = await ask_validated(
+        ica,
+        model_id,
+        user,
+        system=system,
+        what="game text",
+        validate=validate,
+        max_attempts=MAX_ATTEMPTS,
+        max_tokens=max_tokens,
+        label=item.get("_id"),
+    )
+
+    if with_parts:
+        parsed = joined(parsed)
     for warning in quality_warnings(item, parsed):
         logger.info("simplify %s: %s", item.get("_id"), warning)
-    meta.total_tokens = tokens
     return (
         SimplifiedPrompt(
             question=parsed["question"],
             answers=parsed["answers"],
             feedbacks=parsed["feedbacks"],
             explanation=parsed["explanation"],
+            parts=parsed.get("parts") or [],
         ),
         meta,
     )
 
 
-def is_current(record: dict | None, doc: dict, story: dict | None = None) -> bool:
-    """Whether a stored simplified record was written with today's prompt and with the
-    story of the question's chapter as it is today."""
+def is_current(
+    record: dict | None,
+    doc: dict,
+    story: dict | None = None,
+    decomposition_version: str | None = None,
+) -> bool:
+    """Whether a stored simplified record was written with today's prompt, with the
+    story of the question's chapter as it is today, and with the question's current
+    decomposition (`decomposition_version`: its `decompose.fingerprint`, None when it
+    has none). So a text written before the question was decomposed, or with another
+    decomposition, is outdated."""
     return (
         record is not None
         and record.get("prompt_version") == PROMPT_VERSION
         and record.get("frame_version") == frame_version(chapter_key(doc, story))
+        and record.get("decomposition_version") == decomposition_version
     )
 
 
@@ -468,6 +569,7 @@ async def simplify_and_store(
     max_tokens: int | None = None,
     with_entities: bool = True,
     story: dict | None = None,
+    decomposition: QuestionDecomposition | None = None,
 ) -> SimplifiedQuestion:
     """
     Write the game text of one examination document and upsert the result into
@@ -481,15 +583,24 @@ async def simplify_and_store(
     question and answers are unchanged, and so does the result of the check step.
     After a successful extraction a third call picks the icons, best effort too
     (`icons.assign_and_store` backfills).
+
+    With `decomposition` the text is written as semantic parts, and the entities are
+    derived from the decomposition instead of being asked for.
     """
-    prompt, meta = await simplify_item(ica, doc, model_id, max_tokens, story)
+    prompt, meta = await simplify_item(ica, doc, model_id, max_tokens, story, decomposition)
 
     entities, entities_meta, icons_meta = PromptEntities(), None, None
-    if with_entities:
+    entities_source = None
+    if with_entities and decomposition is not None:
+        entities = derive_entities(decomposition, doc, prompt)
+        entities_meta = IcaMeta(model_id=model_id, finish_reason="derived", total_tokens=0)
+        entities_source = "decomposition"
+    elif with_entities:
         try:
             entities, entities_meta = await extract_entities(
                 ica, doc, prompt, model_id, max_tokens
             )
+            entities_source = "ica"
         except Exception as exc:  # best effort: never lose the simplified text
             logger.warning(
                 "entity extraction failed for %s: %s",
@@ -516,8 +627,17 @@ async def simplify_and_store(
         and old.get("question") == prompt.question
         and old.get("answers") == prompt.answers
     )
+    # Derived entities point into their decomposition (`ref`), so they also need the
+    # same one.
+    fingerprint = decompose.fingerprint(decomposition) if decomposition else None
     keep_entities = (
-        entities_meta is None and same_text and existing.get("entities_ica") is not None
+        entities_meta is None
+        and same_text
+        and existing.get("entities_ica") is not None
+        and (
+            existing.get("entities_source") != "decomposition"
+            or existing.get("decomposition_version") == fingerprint
+        )
     )
 
     now = datetime.now(timezone.utc)
@@ -531,12 +651,16 @@ async def simplify_and_store(
         "ica": meta.model_dump(),
         "prompt_version": PROMPT_VERSION,
         "frame_version": frame_version(chapter_key(doc, story)),
+        "decomposition_version": fingerprint,
         "updated_at": now,
     }
     if not keep_entities:
         fields["entities"] = entities.model_dump()
         fields["entities_ica"] = entities_meta.model_dump() if entities_meta else None
         fields["icons_ica"] = icons_meta.model_dump() if icons_meta else None
+        fields["entities_version"] = entities_version if entities_meta else None
+        fields["icons_version"] = icons_version if icons_meta else None
+        fields["entities_source"] = entities_source
     if not same_text:
         fields["check"] = None
     stored = await simplified.find_one_and_update(

@@ -50,6 +50,8 @@ async def ensure_indexes(db: AsyncDatabase) -> None:
         ("question_story", "question_id", {"unique": True}),
         # A story round reads a chapter's stage in order.
         ("question_story", [("scenario", 1), ("stage", 1), ("order", 1)], {}),
+        # One decomposition record per question; makes its upsert race-safe.
+        ("question_decomposition", "question_id", {"unique": True}),
         # Game endpoints filter by these fields; avoids collection scans.
         ("examination", [("section", 1), ("assessment_type", 1)], {}),
         ("examination_simplified", [("section", 1), ("assessment_type", 1)], {}),

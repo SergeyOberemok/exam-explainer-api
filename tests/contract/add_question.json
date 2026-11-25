@@ -32,7 +32,16 @@
     "scenario": "support",
     "stage": "build",
     "stem": "Which header carries the API key?",
-    "beat": "The first API call of the support agent is refused."
+    "beat": "The first API call of the support agent is refused.",
+    "parts": [],
+    "flow": {
+      "primary": "",
+      "secondary": [],
+      "reason": "",
+      "trigger": "",
+      "nodes": [],
+      "edges": []
+    }
   },
   "simplified": [
     {
@@ -64,12 +73,14 @@
             "aliases": [
               "key"
             ],
+            "ref": "",
             "icon": "credential"
           },
           {
             "name": "Send Request",
             "kind": "action",
             "aliases": [],
+            "ref": "",
             "icon": "send"
           }
         ],
@@ -82,6 +93,7 @@
                 "aliases": [
                   "auth header"
                 ],
+                "ref": "",
                 "icon": null
               }
             ],
@@ -93,6 +105,7 @@
                 "name": "x-api-key",
                 "kind": "object",
                 "aliases": [],
+                "ref": "",
                 "icon": null
               }
             ],
@@ -112,7 +125,16 @@
       "scenario": "support",
       "stage": "build",
       "stem": "",
-      "beat": "The first API call of the support agent is refused."
+      "beat": "The first API call of the support agent is refused.",
+      "parts": [],
+      "flow": {
+        "primary": "",
+        "secondary": [],
+        "reason": "",
+        "trigger": "",
+        "nodes": [],
+        "edges": []
+      }
     }
   ]
 }

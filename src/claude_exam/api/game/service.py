@@ -10,6 +10,7 @@ from bson import ObjectId
 
 from claude_exam.api.game import errors
 from claude_exam.api.game.domain import (
+    flow_of,
     FIFTY_FIFTY_CHARGES,
     FIFTY_FIFTY_ELIMINATES,
     MAX_ROUND_QUESTIONS,
@@ -37,6 +38,7 @@ from claude_exam.api.schemas import (
     GameReview,
     GameRound,
     GameRoundBatch,
+    GameResolution,
     GameRoundQuestion,
     GameStage,
     GameStory,
@@ -60,6 +62,8 @@ def answer_result(question_id: str, answer_index: int, entry: dict) -> GameAnswe
         simplified=GameReview(**simplified) if simplified else GameReview(),
         misconception=misconceptions[answer_index] if answer_index < len(misconceptions) else "",
         outcome=outcomes.get("win" if is_correct else "fail") or "",
+        # ... nor, before the decomposition existed, a resolution.
+        resolution=GameResolution(**(entry.get("resolution") or {})),
     )
 
 
@@ -79,6 +83,7 @@ class GameService:
         simplified_by_id = await self.questions.get_simplified_many(ids)
         tags_by_id = await self.questions.get_tags_many(ids)
         story_by_id = await self.questions.get_story_many(ids)
+        decomposition_by_id = await self.questions.get_decomposition_many(ids)
         entries: dict[str, dict] = {}
         items: list[GameQuestion] = []
         simplified_items: list[GameQuestion] = []
@@ -88,11 +93,13 @@ class GameService:
             record = story_by_id.get(question_id)
             story = story_of(doc, record)
             simplified = usable_simplified(doc, simplified_by_id.get(question_id))
-            entries[question_id] = round_entry(doc, simplified, tags, record)
-            items.append(to_game_question(doc, tags=tags, story=story))
+            decomposition = decomposition_by_id.get(question_id)
+            flow = flow_of(doc, decomposition, simplified)
+            entries[question_id] = round_entry(doc, simplified, tags, record, decomposition)
+            items.append(to_game_question(doc, tags=tags, story=story, flow=flow))
             if simplified is not None:
                 simplified_items.append(
-                    to_game_question(simplified, simplified=True, tags=tags, story=story)
+                    to_game_question(simplified, simplified=True, tags=tags, story=story, flow=flow)
                 )
         return entries, items, simplified_items
 
@@ -225,6 +232,7 @@ class GameService:
         simplified_by_id = await self.questions.get_simplified_many(question_ids)
         tags_by_id = await self.questions.get_tags_many(question_ids)
         story_by_id = await self.questions.get_story_many(question_ids)
+        decomposition_by_id = await self.questions.get_decomposition_many(question_ids)
         items, simplified_items = [], []
         for question_id in question_ids:
             doc = docs.get(question_id)
@@ -232,12 +240,15 @@ class GameService:
                 continue
             tags = tags_by_id.get(question_id)
             story = story_of(doc, story_by_id.get(question_id))
-            items.append(to_game_question(doc, tags=tags, story=story))
             # Offer the simplified text only if the stored entry can review it.
             simplified = simplified_by_id.get(question_id)
-            if simplified is not None and (stored.get(question_id) or {}).get("simplified"):
+            if not (stored.get(question_id) or {}).get("simplified"):
+                simplified = None
+            flow = flow_of(doc, decomposition_by_id.get(question_id), simplified)
+            items.append(to_game_question(doc, tags=tags, story=story, flow=flow))
+            if simplified is not None:
                 simplified_items.append(
-                    to_game_question(simplified, simplified=True, tags=tags, story=story)
+                    to_game_question(simplified, simplified=True, tags=tags, story=story, flow=flow)
                 )
         remaining = await self.questions.count(
             playable_query(
@@ -349,9 +360,10 @@ class GameService:
         tags = (await self.questions.get_tags_many([question_id])).get(question_id)
         record = (await self.questions.get_story_many([question_id])).get(question_id)
         story = story_of(doc, record)
+        decomposition = (await self.questions.get_decomposition_many([question_id])).get(question_id)
 
         if not await self.rounds.add_question(
-            round_id, question_id, round_entry(doc, simplified, tags, record)
+            round_id, question_id, round_entry(doc, simplified, tags, record, decomposition)
         ):
             stored = await self.rounds.get_entries(round_id, [question_id])
             if stored is None:
@@ -363,10 +375,11 @@ class GameService:
             if entry.get("simplified") is None:
                 simplified = None
 
+        flow = flow_of(doc, decomposition, simplified)
         return GameRoundQuestion(
-            item=to_game_question(doc, tags=tags, story=story),
+            item=to_game_question(doc, tags=tags, story=story, flow=flow),
             simplified=(
-                [to_game_question(simplified, simplified=True, tags=tags, story=story)]
+                [to_game_question(simplified, simplified=True, tags=tags, story=story, flow=flow)]
                 if simplified
                 else []
             ),

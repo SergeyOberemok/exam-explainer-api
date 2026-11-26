@@ -77,7 +77,7 @@
 <body>
 <header>
   <h1>Prompt evaluation</h1>
-  <span class="hint">Dry run: steps are computed in memory, nothing is written.</span>
+  <span class="hint" id="mode-hint">Dry run: steps are computed in memory, nothing is written.</span>
   <span class="key"><label for="apikey" class="muted">X-API-Key</label>
     <input id="apikey" type="password" placeholder="only if API_KEY is set" size="18"></span>
 </header>
@@ -99,12 +99,14 @@
       <div class="row" style="margin-top:8px">
         <select id="model"></select>
         <button id="run" disabled>Run pipeline</button>
+        <label class="muted" title="A real run: the steps write their records to the database, as the import and the backfill do"><input type="checkbox" id="persist"> save to database</label>
+        <label class="muted" id="force-label" hidden title="Redo steps whose result is current"><input type="checkbox" id="force"> force</label>
         <span id="run-state" class="muted"></span>
       </div>
     </div>
   </section>
   <section class="col" id="results">
-    <div class="empty card">Results appear here: first what is stored, then the dry run as each step finishes.</div>
+    <div class="empty card">Results appear here: first what is stored, then the run as each step finishes.</div>
   </section>
 </main>
 
@@ -168,12 +170,27 @@ async function loadOptions() {
   $("find-error").textContent = "";
   $("stages").replaceChildren(...options.stages.map((s) => {
     const dry = options.dry_stages.includes(s);
-    return h("label", { title: dry ? "" : "no dry form: its stored record is used" },
-      h("input", { type: "checkbox", value: s, checked: dry, disabled: !dry }), s);
+    return h("label", { title: dry ? "" : "no dry form: only a saving run does it" },
+      h("input", { type: "checkbox", value: s, checked: dry, disabled: !dry, "data-dry": dry ? "1" : null }), s);
   }));
   $("model").replaceChildren(...options.models.map((m) =>
     h("option", { value: m, selected: m === options.default_model }, m)));
 }
+
+// Saving run: every step can be chosen (the ones with no dry form too), and nothing is
+// checked for you; the dry run keeps to the steps that have a dry form.
+$("persist").addEventListener("change", () => {
+  const on = $("persist").checked;
+  $("force-label").hidden = !on;
+  $("mode-hint").textContent = on
+    ? "Saving run: the chosen steps WRITE their records to the database."
+    : "Dry run: steps are computed in memory, nothing is written.";
+  $("run").textContent = on ? "Run and save" : "Run pipeline";
+  for (const input of $("stages").querySelectorAll("input")) {
+    input.disabled = !on && !input.dataset.dry;
+    if (!on && !input.dataset.dry) input.checked = false;
+  }
+});
 
 // --- state ----------------------------------------------------------------------------
 let current = null; // { original, stored }
@@ -247,7 +264,10 @@ async function loadQuestion(id) {
 
 $("run").addEventListener("click", async () => {
   const stages = [...$("stages").querySelectorAll("input:checked")].map((i) => i.value);
+  const persist = $("persist").checked;
   if (!question || !stages.length) return;
+  if (persist && !confirm(`Run ${stages.join(", ")} and WRITE the results for this question?`)) return;
+  const source = persist ? "saved" : "dry run";
   $("run").disabled = true;
   const controller = (running = new AbortController());
   const started = Date.now();
@@ -256,7 +276,7 @@ $("run").addEventListener("click", async () => {
   renderResults(current.stored, "stored", steps, stages);
   try {
     const res = await fetch(`${API}/questions/${question}/run`, {
-      method: "POST", headers: headers(true), body: JSON.stringify({ stages, model: $("model").value }),
+      method: "POST", headers: headers(true), body: JSON.stringify({ stages, model: $("model").value, persist, force: persist && $("force").checked }),
       signal: controller.signal,
     });
     if (!res.ok) { $("run-state").textContent = await failure(res); return; }
@@ -275,7 +295,8 @@ $("run").addEventListener("click", async () => {
         if (!line) continue;
         const event = JSON.parse(line);
         if (event.stage === "done") finished = true; else steps.push(event);
-        renderResults(event.result, "dry run", steps, stages);
+        renderResults(event.result, source, steps, stages);
+        if (persist) current.stored = event.result; // what is stored now
       }
     }
     const failed = steps.filter((s) => s.status.startsWith("failed")).length;
@@ -324,7 +345,7 @@ function jsonBlock(label, value) {
 const openState = {};
 function panel(key, title, source, value, view) {
   const el = h("details", { class: "panel", open: openState[key] ?? true },
-    h("summary", {}, title, chip(source, source === "dry run" ? "ok" : ""), value == null ? chip("empty", "warn") : ""),
+    h("summary", {}, title, chip(source, source !== "stored" ? "ok" : ""), value == null ? chip("empty", "warn") : ""),
     h("div", { class: "body" }, value == null ? empty() : view(value), value == null ? "" : jsonBlock("JSON", value)));
   el.addEventListener("toggle", () => { openState[key] = el.open; });
   return el;

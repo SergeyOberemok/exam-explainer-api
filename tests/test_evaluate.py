@@ -125,3 +125,55 @@ def test_the_run_needs_the_api_key_when_one_is_set():
     assert client.get(f"/evaluate/questions/{q['_id']}").status_code == 401
     assert client.get(f"/evaluate/questions/{q['_id']}", headers={"X-API-Key": "secret"}).status_code == 200
     assert client.get("/evaluate/ui/").status_code == 200
+
+
+def test_a_persisted_run_writes_the_records_and_streams_what_is_stored():
+    q = question()
+    mongo = FakeMongo([q])
+    client = client_for(mongo, ScriptedIca())
+    stages = ["decompose", "flow", "rephrase"]
+    response = client.post(
+        f"/evaluate/questions/{q['_id']}/run", json={"stages": stages, "persist": True}
+    )
+    assert response.status_code == 200
+    events = lines(response)
+    assert [e["stage"] for e in events] == [*stages, "done"]
+    assert [e["status"] for e in events[:3]] == ["ok or current"] * 3
+    result = events[-1]["result"]
+    assert result["decomposition"] and result["flow"] and result["rephrase"]["answers"]
+    # Written, unlike a dry run: the view now shows the same records.
+    stored = client.get(f"/evaluate/questions/{q['_id']}").json()["stored"]
+    assert stored["decomposition"] and stored["rephrase"]
+    assert written(mongo)["question_decomposition"] == 1
+
+
+def test_a_persisted_step_that_fails_is_reported():
+    q = question()
+    ica = ScriptedIca(decompose=[HTTPException(status_code=502, detail="bad reply")] * 5)
+    client = client_for(FakeMongo([q]), ica)
+    events = lines(
+        client.post(
+            f"/evaluate/questions/{q['_id']}/run",
+            json={"stages": ["decompose"], "persist": True},
+        )
+    )
+    assert events[0]["status"] == "failed 502" and events[-1]["stage"] == "done"
+
+
+def test_a_persisted_run_is_refused_while_a_job_runs():
+    import asyncio
+
+    from claude_exam.api.main import app
+
+    q = question()
+    client = client_for(FakeMongo([q]), ScriptedIca())
+    from claude_exam.api.dependencies import get_simplification_lock
+
+    locked = asyncio.Semaphore(0)
+    app.dependency_overrides[get_simplification_lock] = lambda: locked
+    response = client.post(
+        f"/evaluate/questions/{q['_id']}/run", json={"stages": ["decompose"], "persist": True}
+    )
+    assert response.status_code == 409
+    # A dry run does not take the lock.
+    assert client.post(f"/evaluate/questions/{q['_id']}/run", json={"stages": ["decompose"]}).status_code == 200

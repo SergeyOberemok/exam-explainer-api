@@ -14,6 +14,8 @@ from claude_exam.api.game.errors import (
     RoundNotFound,
     SimplifiedNotFound,
 )
+from claude_exam.api.game.card_repository import CardRepository
+from claude_exam.api.game.card_service import CardService
 from claude_exam.api.game.repository import QuestionRepository, RoundRepository
 from claude_exam.api.game.service import GameService
 from claude_exam.api.ica import IcaClient
@@ -74,6 +76,17 @@ def get_async_decomposition_collection(request: Request) -> AsyncCollection:
 
 AsyncDecompositionCollectionDep = Annotated[
     AsyncCollection, Depends(get_async_decomposition_collection)
+]
+
+
+def get_async_game_question_collection(request: Request) -> AsyncCollection:
+    """The composed game documents (`compose.py`), one per question the game serves."""
+    client: AsyncMongoClient = request.app.state.async_mongo_client
+    return client.get_default_database()["game_question"]
+
+
+AsyncGameQuestionCollectionDep = Annotated[
+    AsyncCollection, Depends(get_async_game_question_collection)
 ]
 
 
@@ -170,6 +183,18 @@ def get_game_service(
 
 
 GameServiceDep = Annotated[GameService, Depends(get_game_service)]
+
+
+def get_card_service(
+    cards: AsyncGameQuestionCollectionDep,
+    examination: AsyncCollectionDep,
+    rounds: AsyncRoundsCollectionDep,
+) -> CardService:
+    """The `/v2/game` service, over the composed `game_question` documents."""
+    return CardService(CardRepository(cards, examination), RoundRepository(rounds))
+
+
+CardServiceDep = Annotated[CardService, Depends(get_card_service)]
 
 
 _OBJECT_ID_HEX = re.compile(OBJECT_ID_PATTERN)

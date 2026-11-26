@@ -19,6 +19,7 @@ from fastapi import HTTPException
 
 from claude_exam.api.beat import beat_item
 from claude_exam.api.check import check_item
+from claude_exam.api.compose import compose as compose_document
 from claude_exam.api.decompose import (
     decompose_item,
     has_flow,
@@ -40,7 +41,7 @@ from claude_exam.api.ica import IcaClient
 from claude_exam.api.icons import pick_icons, stored_entities
 from claude_exam.api.question_view import key_free
 from claude_exam.api.rephrase import quality_warnings, rephrase_item
-from claude_exam.api.scenario_catalog import scenario_of, split_scenario, stem_of
+from claude_exam.api.scenario_catalog import scenario_of, split_scenario, stem_of, text_hash
 from claude_exam.api.schemas import (
     DecisionFlow,
     IcaMeta,
@@ -51,7 +52,7 @@ from claude_exam.api.schemas import (
 )
 from claude_exam.html_clean import clean_plain, clean_question
 
-DRY_STAGES = ("decompose", "beat", "icons", "flow", "resolve", "rephrase", "check")
+DRY_STAGES = ("decompose", "beat", "icons", "flow", "resolve", "compose", "rephrase", "check")
 
 
 class Result:
@@ -67,7 +68,30 @@ class Result:
         self.check: dict | None = None
         # The beat written by a dry run (None: the stored story's beat is used).
         self.beat: str | None = None
+        # The game document (`compose.py`): composed by a dry run from the pieces above,
+        # or the stored one; `game_missing` is what kept a dry run from composing it.
+        self.game: dict | None = None
+        self.game_missing: list[str] = []
         self.steps: list[dict] = []
+
+    def decomposition_record(self, doc: dict) -> dict | None:
+        """The pieces above as a `question_decomposition` record, as `compose` reads one."""
+        if self.decomposition is None:
+            return None
+        entities = self.entities or PromptEntities()
+        drawn = entities.question_icon or any(
+            e.icon for e in [*entities.question, *(x for a in entities.answers for x in a.entities)]
+        )
+        return {
+            "question_id": str(doc["_id"]),
+            "text_hash": text_hash(doc),
+            "semantic": self.decomposition.model_dump(),
+            "parts": [p.model_dump() for p in self.parts],
+            "entities": entities.model_dump(),
+            "icons_ica": {"dry": True} if drawn else None,
+            "flow": self.flow.model_dump() if self.flow is not None else None,
+            "resolution": self.resolution.model_dump() if self.resolution is not None else None,
+        }
 
     def code_flow(self, doc: dict) -> tuple[DecisionFlow | None, list[str]]:
         """The experiment: the flow built in code and the flow gate's verdict on it."""
@@ -77,8 +101,16 @@ class Result:
         return built, flow_errors(doc, self.decomposition, built.model_dump())
 
     @classmethod
-    def from_records(cls, doc: dict, simplified: dict | None, decomposition: dict | None) -> "Result":
+    def from_records(
+        cls,
+        doc: dict,
+        simplified: dict | None,
+        decomposition: dict | None,
+        game: dict | None = None,
+    ) -> "Result":
         result = cls()
+        if game:
+            result.game = {k: game.get(k) for k in ("public", "key")}
         result.decomposition = read_decomposition(decomposition, doc)
         if result.decomposition is not None:
             try:
@@ -111,6 +143,8 @@ class Result:
             "rephrase": dump(self.rephrase),
             "check": _plain(self.check),
             "beat": self.beat,
+            "game": _plain(self.game),
+            "game_missing": self.game_missing,
         }
         if doc is not None:
             answers = [clean_plain(a) for a in answers_of(doc)]
@@ -137,6 +171,7 @@ async def run_dry(
     story_record: dict | None,
     stages: Sequence[str],
     model: str,
+    objectives_record: dict | None = None,
 ) -> AsyncIterator[dict]:
     """Runs `stages` in order on `result` (the stored records, `Result.from_records`) and
     yields one step dict per stage: `stage`, `status` ("ok", "failed <code>" or
@@ -175,8 +210,26 @@ async def run_dry(
             return meta
         if stage == "resolve":
             need(result.flow, "a flow")
-            result.resolution, meta = await resolve_item(ica, doc, result.decomposition, result.flow, model)
+            result.resolution, meta = await resolve_item(
+                ica, doc, result.decomposition, result.flow, model, place=story
+            )
             return meta
+        if stage == "compose":
+            # From the pieces of this run and the stored objectives and story (with the
+            # beat this run wrote, if it wrote one).
+            story_for = story_record
+            if story_record is not None and result.beat is not None:
+                story_for = {**story_record, "beat": result.beat}
+            game, result.game_missing = compose_document(
+                doc, objectives_record, story_for, result.decomposition_record(doc)
+            )
+            result.game = {k: game[k] for k in ("public", "key")} if game else None
+            if game is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"not ready for the game, missing: {', '.join(result.game_missing)}",
+                )
+            return None
         if stage == "rephrase":
             result.rephrase, meta = await rephrase_item(
                 ica, doc, model, place=story, decomposition=result.decomposition

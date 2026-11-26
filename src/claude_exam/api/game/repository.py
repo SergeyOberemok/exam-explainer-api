@@ -25,10 +25,12 @@ from bson import ObjectId
 from pymongo import ReturnDocument
 from pymongo.asynchronous.collection import AsyncCollection
 
+from claude_exam.api import hold
 from claude_exam.api.game.domain import (
     FIFTY_FIFTY_CHARGES,
     MAX_ROUND_QUESTIONS,
     PLAYABLE_QUERY,
+    ids_filter,
 )
 from claude_exam.api.scenario_catalog import BY_KEY, STAGE_KEYS
 
@@ -136,9 +138,7 @@ class QuestionRepository:
         if self.objectives is None:
             return {}
         tagged = await self.objectives.find({}, {"question_id": 1, "objectives": 1}).to_list()
-        ids = [ObjectId(t["question_id"]) for t in tagged if ObjectId.is_valid(t.get("question_id", ""))]
-        cursor = self.examination.find({**PLAYABLE_QUERY, "_id": {"$in": ids}}, {"_id": 1})
-        playable = {str(d["_id"]) for d in await cursor.to_list()}
+        playable = await self.playable_ids([str(t.get("question_id", "")) for t in tagged])
         counts: dict[str, int] = {}
         for record in tagged:
             if record.get("question_id") in playable:
@@ -176,15 +176,30 @@ class QuestionRepository:
             ),
         )
 
+    async def rephrased_ids(self) -> list[str]:
+        """Ids of the questions with a rephrase record: the only ones the game serves."""
+        return [str(i) for i in await self.simplified.distinct("question_id")]
+
+    async def held_ids(self) -> list[str]:
+        """Ids of the questions held for manual processing (`hold.py`)."""
+        cursor = self.examination.find(hold.HELD, {"_id": 1})
+        return [str(d["_id"]) for d in await cursor.to_list()]
+
     async def playable_ids(self, question_ids: list[str]) -> set[str]:
-        """Which of the given questions pass the playable pre-filter."""
-        ids = [ObjectId(i) for i in question_ids if ObjectId.is_valid(i)]
-        cursor = self.examination.find({**PLAYABLE_QUERY, "_id": {"$in": ids}}, {"_id": 1})
+        """Which of the given questions pass the playable pre-filter and have a rephrase
+        record."""
+        rephrased = set(await self.rephrased_ids())
+        ids = ids_filter(i for i in question_ids if i in rephrased)
+        cursor = self.examination.find({**PLAYABLE_QUERY, "_id": ids}, {"_id": 1})
         return {str(d["_id"]) for d in await cursor.to_list()}
 
     async def sections(self, *, simplified: bool = False) -> list[str]:
-        collection = self.simplified if simplified else self.examination
-        return await collection.distinct("section")
+        if simplified:
+            return await self.simplified.distinct("section")
+        # Only sections of questions the game serves (those with a rephrase record).
+        return await self.examination.distinct(
+            "section", {"_id": ids_filter(await self.rephrased_ids())}
+        )
 
 
 class RoundRepository:

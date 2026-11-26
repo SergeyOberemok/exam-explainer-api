@@ -1,7 +1,8 @@
 from bson import ObjectId
+from fakes import FakeCollection as BaseFake
 from fastapi.testclient import TestClient
 
-from claude_exam.api.dependencies import get_async_collection
+from claude_exam.api.dependencies import get_async_collection, get_async_simplified_collection
 from claude_exam.api.main import app
 from claude_exam.api.search import build_filter, plain_terms, to_hit
 
@@ -55,9 +56,13 @@ def teardown_function():
     app.dependency_overrides.clear()
 
 
-def client_with(docs):
+def client_with(docs, rephrased=None):
+    """`rephrased`: the docs with a rephrase record (the only ones the game search
+    serves); all of them by default."""
     fake = FakeCollection(docs)
+    records = [{"question_id": str(d["_id"])} for d in (docs if rephrased is None else rephrased)]
     app.dependency_overrides[get_async_collection] = lambda: fake
+    app.dependency_overrides[get_async_simplified_collection] = lambda: BaseFake(records)
     return TestClient(app), fake
 
 
@@ -141,6 +146,18 @@ def test_game_search_has_no_answer_key_and_only_playable():
     text = str(body)
     assert "correct" not in text and "explanation" not in text and "score" not in text
     assert fake.last_filter["correct_response"] == {"$size": 1}
+
+
+def test_game_search_serves_only_questions_with_a_rephrase_record():
+    with_record, bare = doc(), doc()
+    client, fake = client_with([with_record, bare], rephrased=[with_record])
+    client.get("/v1/search/game-questions", params={"q": "caching"})
+    assert fake.last_filter["_id"] == {"$in": [with_record["_id"]]}
+    client.post("/v1/search/game-questions", json={"q": "caching"})
+    assert fake.last_filter["_id"] == {"$in": [with_record["_id"]]}
+    # The study search is unchanged.
+    client.get("/v1/search/questions", params={"q": "caching"})
+    assert "_id" not in fake.last_filter
 
 
 def test_game_search_validates_params():

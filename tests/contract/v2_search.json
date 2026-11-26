@@ -1,0 +1,150 @@
+{
+  "items": [
+    {
+      "id": "65f0000000000000000000a1",
+      "section": "Tools and MCPs",
+      "assessment_type": "multiple-choice",
+      "scenario": "support",
+      "stage": "build",
+      "objectives": [
+        "tools-mcp-config",
+        "tools-errors"
+      ],
+      "difficulty": 2,
+      "icon": "credential",
+      "beat": "The first API call of the support agent is refused.",
+      "question": "SCENARIO: You are building a customer support resolution agent.\n\nQUESTION: Which header carries the API key?",
+      "stem": "Which header carries the API key?",
+      "briefing": [
+        {
+          "role": "context",
+          "text": "A support agent calls the API.",
+          "entity_ids": [
+            "e1"
+          ]
+        }
+      ],
+      "ask": {
+        "text": "Which header carries the API key?",
+        "entity_ids": [
+          "e1"
+        ]
+      },
+      "cast": [
+        {
+          "ref": "e1",
+          "name": "API Key",
+          "type": "artifact",
+          "aliases": [
+            "key"
+          ],
+          "icon": "credential",
+          "scene": true
+        },
+        {
+          "ref": "e2",
+          "name": "Ambiguity",
+          "type": "concept",
+          "aliases": [],
+          "icon": "idea",
+          "scene": false
+        },
+        {
+          "ref": "e3",
+          "name": "x-api-key",
+          "type": "concept",
+          "aliases": [],
+          "icon": "idea",
+          "scene": false
+        }
+      ],
+      "tools": [
+        {
+          "index": 0,
+          "text": "Authorization",
+          "label": "Send the key as a bearer token",
+          "icon": "permission",
+          "components": [
+            "e1"
+          ]
+        },
+        {
+          "index": 1,
+          "text": "x-api-key",
+          "label": "Send the key in its own header",
+          "icon": "",
+          "components": [
+            "e1",
+            "e3"
+          ]
+        },
+        {
+          "index": 2,
+          "text": "X-Key",
+          "label": "Send the key in a custom header",
+          "icon": "tags",
+          "components": [
+            "e1"
+          ]
+        }
+      ],
+      "map": {
+        "primary": "process_flow",
+        "secondary": [],
+        "reason": "No branching.",
+        "trigger": "Work starts",
+        "nodes": [
+          {
+            "id": "n1",
+            "type": "start",
+            "label": "Work starts",
+            "entity_ids": [],
+            "condition_id": "",
+            "source_status": "inferred",
+            "is_question": false,
+            "added": false
+          },
+          {
+            "id": "n2",
+            "type": "process",
+            "label": "Edits happen",
+            "entity_ids": [],
+            "condition_id": "",
+            "source_status": "inferred",
+            "is_question": false,
+            "added": false
+          },
+          {
+            "id": "n3",
+            "type": "decision",
+            "label": "Which mode?",
+            "entity_ids": [],
+            "condition_id": "",
+            "source_status": "inferred",
+            "is_question": true,
+            "added": false
+          }
+        ],
+        "edges": [
+          {
+            "source": "n1",
+            "target": "n2",
+            "type": "next",
+            "label": "",
+            "source_status": "inferred",
+            "added": false
+          },
+          {
+            "source": "n2",
+            "target": "n3",
+            "type": "next",
+            "label": "",
+            "source_status": "inferred",
+            "added": false
+          }
+        ]
+      }
+    }
+  ],
+  "total": 1
+}

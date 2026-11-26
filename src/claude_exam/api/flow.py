@@ -44,6 +44,8 @@ from claude_exam.api.ica import IcaClient
 from claude_exam.api.ica_json import ask_validated, schema_skeleton
 from claude_exam.api.leaks import answer_only, leak, leak_errors, points_at_correct
 from claude_exam.api.question_view import KeyFreeQuestion, key_free, the_ask
+from claude_exam.api.scenario_catalog import BY_KEY, COMPANY, COMPANY_INTRO, STAGES
+from claude_exam.api.story import people
 from claude_exam.api.schemas import (
     DecisionFlow,
     DecompositionRecord,
@@ -168,7 +170,14 @@ fix as two branches of the same decision. Keep the start and the nodes the learn
 chose after.
 3. options: one per answer, same order (A is index 0): verdict ("correct" for the \
 correct answer only), the requirements it supports (from answer_requirements), its \
-gaps (why it falls short; [] for the correct one), and one sentence of reason.
+gaps (why it falls short; [] for the correct one), one sentence of reason, and:
+   - consequence: ONE line of the game's story (at most {{CONSEQUENCE_WORDS}} words, \
+present tense, no letter or option number) telling what happens in the STORY below \
+when the team does what this option proposes: the correct one solves the problem, a \
+wrong one fails the way its gaps say. Show the effect, do not explain the rule.
+   - impact: "success" for the correct answer; "partial" for a wrong answer that would \
+partly work (it meets some requirements, the situation improves but the problem stays); \
+"failure" for one that does not help or makes it worse.
 4. rule: one line a learner can take to similar questions.
 
 {{RULES}}
@@ -430,6 +439,20 @@ def resolution_errors(
         errors.append(
             f"the verdict of option(s) {', '.join(wrong)} does not match the correct answer"
         )
+    for o in resolution.options:
+        letter = chr(65 + o.index)
+        if (o.impact == "success") != (o.verdict == "correct"):
+            errors.append(
+                f"option {letter}: impact must be \"success\" exactly for the correct answer"
+                " (a wrong one is \"partial\" or \"failure\")"
+            )
+        words = len(o.consequence.split())
+        if not words:
+            errors.append(f"option {letter}: consequence must be one line of the story")
+        elif words > MAX_CONSEQUENCE_WORDS:
+            errors.append(
+                f"option {letter}: consequence has {words} words, at most {MAX_CONSEQUENCE_WORDS}"
+            )
     if not resolution.answer_requirements:
         errors.append("answer_requirements must list what a correct answer has to achieve")
     if not resolution.rule.strip():
@@ -668,7 +691,25 @@ def flow_from(decomposition: QuestionDecomposition, question: KeyFreeQuestion | 
 # Bump when the gates, `prune_after_question` or `with_question_label` change what is
 # stored from the same reply (the prompts are in the input keys, `step_key.py`).
 FLOW_CODE_VERSION = "2"
-RESOLVE_CODE_VERSION = "2"
+RESOLVE_CODE_VERSION = "3"
+# A consequence is one line of the story, like the story's own lines (`story.py`).
+MAX_CONSEQUENCE_WORDS = 25
+
+
+def _story_block(place: dict | None) -> str:
+    """Where the question sits in the game's story (what `game.domain.story_of`
+    returned): the company, the chapter with its people and the stage, so a
+    consequence reads as a moment of that story."""
+    place = place or {}
+    lines = [f"STORY: {COMPANY}. {COMPANY_INTRO}"]
+    scenario = BY_KEY.get(place.get("scenario") or "")
+    if scenario is not None:
+        lines.append(f'Chapter "{scenario.title}": {scenario.intro}')
+        lines.append(f"People: {people(scenario)}")
+    stage = next((s for s in STAGES if s.key == place.get("stage")), None)
+    if stage is not None:
+        lines.append(f"Stage {stage.title}: {stage.description}")
+    return "\n".join(lines)
 
 
 def flow_messages(q: KeyFreeQuestion, decomposition: QuestionDecomposition) -> tuple[str, str]:
@@ -686,10 +727,12 @@ def flow_input_key(doc: dict, decomposition: QuestionDecomposition) -> str:
 
 
 def resolve_messages(
-    doc: dict, decomposition: QuestionDecomposition, flow: DecisionFlow
+    doc: dict, decomposition: QuestionDecomposition, flow: DecisionFlow, place: dict | None
 ) -> tuple[str, str]:
-    """The (system, user) messages that resolve `doc` after `flow`; 422 unless it has
-    exactly one correct answer (which a job does not retry)."""
+    """The (system, user) messages that resolve `doc` after `flow`, with the story the
+    consequences are set in (`place`, what `game.domain.story_of` returned; None or
+    empty without a chapter); 422 unless it has exactly one correct answer (which a job
+    does not retry)."""
     if len(correct_indices(doc)) != 1:
         raise HTTPException(status_code=422, detail="the resolution needs exactly one correct answer")
     questions = {n.id for n in flow.nodes if n.is_question}
@@ -701,17 +744,23 @@ def resolve_messages(
         f"{_key_block(doc)}\n\n"
         f"DECOMPOSITION:\n{_compact(decomposition)}\n\n"
         f"FLOW BEFORE ANSWERING (without the question node):\n{_compact(before)}\n\n"
-        f"THE LEARNER CHOSE AN ANSWER AFTER: {', '.join(chose_after) or '(the start)'}"
+        f"THE LEARNER CHOSE AN ANSWER AFTER: {', '.join(chose_after) or '(the start)'}\n\n"
+        f"{_story_block(place)}"
     )
-    return _system(_RESOLVE_SYSTEM, Resolution), user
+    system = _system(_RESOLVE_SYSTEM, Resolution).replace(
+        "{{CONSEQUENCE_WORDS}}", str(MAX_CONSEQUENCE_WORDS)
+    )
+    return system, user
 
 
 def resolve_input_key(
-    doc: dict, decomposition: QuestionDecomposition, flow: DecisionFlow
+    doc: dict, decomposition: QuestionDecomposition, flow: DecisionFlow, place: dict | None
 ) -> str | None:
     """The input key of the resolution that continues `flow` (`step_key.py`)."""
     return key_or_none(
-        lambda: step_key(RESOLVE_CODE_VERSION, *resolve_messages(doc, decomposition, flow))
+        lambda: step_key(
+            RESOLVE_CODE_VERSION, *resolve_messages(doc, decomposition, flow, place)
+        )
     )
 
 
@@ -753,10 +802,12 @@ async def resolve_item(
     flow: DecisionFlow,
     model_id: IcaModelId,
     max_tokens: int | None = None,
+    *,
+    place: dict | None,
 ) -> tuple[Resolution, IcaMeta]:
     """The resolution of one question: needs exactly one correct answer (422 otherwise,
-    which a job does not retry)."""
-    system, user = resolve_messages(doc, decomposition, flow)
+    which a job does not retry). `place` sets its consequences in the story."""
+    system, user = resolve_messages(doc, decomposition, flow, place)
     parsed, meta = await ask_validated(
         ica,
         model_id,
@@ -827,20 +878,25 @@ async def resolve_and_store(
     doc: dict,
     model_id: IcaModelId,
     max_tokens: int | None = None,
+    *,
+    place: dict | None,
 ) -> DecompositionRecord:
-    """Write the resolution of a question that has a current flow (404 otherwise)."""
+    """Write the resolution of a question that has a current flow (404 otherwise).
+    `place` is where the story puts the question (`game.domain.story_of`)."""
     record, decomposition = await _record(store, doc)
     if not has_flow(record):
         raise HTTPException(status_code=404, detail="question has no current flow")
     flow = DecisionFlow.model_validate(record["flow"])
-    resolution, meta = await resolve_item(ica, doc, decomposition, flow, model_id, max_tokens)
+    resolution, meta = await resolve_item(
+        ica, doc, decomposition, flow, model_id, max_tokens, place=place
+    )
     return await _conditional_set(
         store,
         record,
         {
             "resolution": resolution.model_dump(),
             "resolution_ica": meta.model_dump(),
-            "resolution_input_key": resolve_input_key(doc, decomposition, flow),
+            "resolution_input_key": resolve_input_key(doc, decomposition, flow, place),
         },
     )
 

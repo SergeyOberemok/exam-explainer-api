@@ -434,8 +434,7 @@ async def test_a_new_decomposition_replaces_its_parts_and_clears_what_was_built_
     assert record["parts"] and record["icons_ica"] and record["flow"] and record["resolution"]
 
     # The decomposition prompt changed (nothing bumped): it is written again, with its
-    # parts and entities, and its rewrite clears the icons, flow and resolution. The
-    # rephrase does not read it, so it and its check are kept.
+    # parts and entities, and its rewrite clears the icons, flow and resolution.
     monkeypatch.setattr(decompose, "_SYSTEM_MESSAGE", decompose._SYSTEM_MESSAGE + "\nNew rule.")
     other = decomposition_reply()
     other["context"]["description"] = "Another reading."
@@ -446,7 +445,6 @@ async def test_a_new_decomposition_replaces_its_parts_and_clears_what_was_built_
     assert [c for c in ica.calls if c != "story"] == ["decompose", "icons", "flow", "resolve"]
     record = await db["question_decomposition"].find_one({"question_id": str(q["_id"])})
     assert record["parts"][0]["text"] == "Another reading."
-    assert (await stored(mongo, q))["check"] is not None
 
 
 def test_single_question_routes():

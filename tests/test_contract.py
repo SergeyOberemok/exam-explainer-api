@@ -6,7 +6,9 @@
   can't read fails there too.
 - `tests/contract/icon_catalog.json`: every icon key the API can send; the game's tests
   check that it ships a picture for each.
-- `tests/contract/openapi_game.json`: the OpenAPI schemas and paths of the game routes.
+- `tests/contract/openapi_game.json`: the OpenAPI schemas and paths of the game routes;
+  `openapi_game_v2.json` the same for `/v2/game` (composed questions, `compose.py`),
+  whose responses are pinned as `v2_*.json`.
 
 After an intended change, regenerate both copies and commit them in both repos:
 
@@ -22,9 +24,13 @@ from bson import ObjectId
 from fakes import FakeCollection, FakeRounds
 from fastapi.testclient import TestClient
 
+from test_jobs import decomposition_reply, flow_reply, resolution_reply
+
+from claude_exam.api import compose
 from claude_exam.api.dependencies import (
     get_async_collection,
     get_async_decomposition_collection,
+    get_async_game_question_collection,
     get_async_objectives_collection,
     get_async_rounds_collection,
     get_async_simplified_collection,
@@ -73,14 +79,20 @@ EXAM = [
     question(Q2, "What caches prompts?", ["cache_control", "retries", "batches", "tools"], "a"),
     question(Q3, "Which <tag> is literal?", ["<example>", "<b>", "none"], "a"),
 ]
-# Q1 has a rephrase (question and answers only; the review stays the original's).
+# Q1 has a rephrase (question and answers only; the review stays the original's). The
+# game serves only questions with a rephrase record, so Q2 and Q3 have one too, but the
+# check found it `changed`: the game plays their original and offers no rephrase.
 SIMPLE = [
     {
         **EXAM[0],
         "_id": ObjectId("65f0000000000000000000b1"),
         "question_id": str(Q1),
         "prompt": {"question": "Where does the key go?", "answers": EXAM[0]["prompt"]["answers"]},
-    }
+    },
+    *(
+        {**q, "_id": ObjectId(), "question_id": str(q["_id"]), "check": {"verdict": "changed"}}
+        for q in EXAM[1:]
+    ),
 ]
 
 # Q1 is decomposed: its parts and entities (with icons) are served on the question and,
@@ -218,9 +230,76 @@ def test_validation_error_response(client):
     check("error_validation.json", client.post("/v1/game/rounds", json={"count": 0}).json())
 
 
-def test_openapi_game_schema():
+# --- /v2/game: composed questions -------------------------------------------------------
+
+# Q1 composed from fixed records: its decomposition (the stored parts and entities of v1
+# above, a decomposition whose answer options name what each answer proposes, a flow
+# and a resolution with a consequence per answer), its objectives and its story.
+V2_SEMANTIC = decomposition_reply(3)
+V2_SEMANTIC["entities"][0].update({"name": "API Key", "type": "artifact", "aliases": ["key"]})
+V2_SEMANTIC["entities"].append(
+    {"id": "e3", "name": "x-api-key", "type": "concept", "aliases": [], "description": "A header", "source_status": "inferred", "evidence": ""}
+)
+V2_SEMANTIC["answer_options"] = [
+    {"index": 0, "mechanism": "Send the key as a bearer token", "entity_ids": ["e1"]},
+    {"index": 1, "mechanism": "Send the key in its own header", "entity_ids": ["e1", "e3"]},
+    {"index": 2, "mechanism": "Send the key in a custom header", "entity_ids": ["e1"]},
+]
+V2_RESOLUTION = resolution_reply(3, (1,))
+V2_RESOLUTION["options"][2]["impact"] = "partial"
+V2_DECOMPOSITION = {
+    **DECOMPOSITION[0],
+    "semantic": V2_SEMANTIC,
+    "icons_ica": {"model_id": "claude-haiku-5-5", "finish_reason": "stop", "total_tokens": 1, "attempts": 1},
+    "flow": flow_reply(),
+    "resolution": V2_RESOLUTION,
+}
+
+
+def v2_cards() -> list[dict]:
+    composed, lacks = compose.compose(EXAM[0], TAGS[0], STORY[0], V2_DECOMPOSITION)
+    assert lacks == []
+    return [{**composed, "_id": ObjectId("65f0000000000000000000f1"), "question_id": str(Q1), "held": False}]
+
+
+@pytest.fixture
+def client_v2():
+    rounds = FakeRounds()
+    app.dependency_overrides[get_async_game_question_collection] = lambda: FakeCollection(v2_cards())
+    app.dependency_overrides[get_async_collection] = lambda: FakeCollection(EXAM)
+    app.dependency_overrides[get_async_rounds_collection] = lambda: rounds
+    return TestClient(app)
+
+
+def test_game_v2_flow_responses(client_v2):
+    client = client_v2
+    game_round = client.post("/v2/game/rounds", json={"count": 2}).json()
+    rid = game_round["round_id"]
+    check("v2_round.json", {**game_round, "round_id": ROUND_ID})
+    base = f"/v2/game/rounds/{rid}"
+    check("v2_answer.json", client.post(
+        f"{base}/answers", json={"question_id": str(Q1), "answer_index": 1}
+    ).json())
+    other = client.post("/v2/game/rounds", json={"count": 1}).json()["round_id"]
+    check("v2_answer_wrong.json", client.post(
+        f"/v2/game/rounds/{other}/answers", json={"question_id": str(Q1), "answer_index": 2}
+    ).json())
+    check("v2_batch_empty.json", client.post(f"{base}/batches", json={"batch_index": 1}).json())
+    check("v2_add_question.json", client.post(f"{base}/questions", json={"question_id": str(Q1)}).json())
+    check("v2_search.json", client.post("/v2/search/game-questions", json={"q": "key"}).json())
+    check("v2_story.json", client.get("/v2/game/story").json())
+
+
+@pytest.mark.parametrize(
+    ("prefixes", "name"),
+    [
+        (("/v1/game", "/v1/search/game"), "openapi_game.json"),
+        (("/v2/game", "/v2/search/game"), "openapi_game_v2.json"),
+    ],
+)
+def test_openapi_game_schema(prefixes, name):
     spec = app.openapi()
-    paths = {p: v for p, v in spec["paths"].items() if p.startswith(("/v1/game", "/v1/search/game"))}
+    paths = {p: v for p, v in spec["paths"].items() if p.startswith(prefixes)}
     used = set()
 
     def collect(node):
@@ -240,7 +319,7 @@ def test_openapi_game_schema():
     collect(paths)
     schemas = {n: spec["components"]["schemas"][n] for n in sorted(used)}
     snapshot = {"paths": paths, "schemas": schemas}
-    path = CONTRACT_DIR / "openapi_game.json"
+    path = CONTRACT_DIR / name
     text = json.dumps(snapshot, indent=2, sort_keys=True) + "\n"
     if UPDATE:
         path.parent.mkdir(parents=True, exist_ok=True)

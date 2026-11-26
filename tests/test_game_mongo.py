@@ -60,6 +60,14 @@ def question(**kw):
 async def make_service(db, docs):
     if docs:
         await db.examination.insert_many(docs)
+        # The game serves only questions with a rephrase record; these are never offered
+        # (the check found them `changed`), so the questions play as their original.
+        await db.examination_simplified.insert_many(
+            [
+                {"question_id": str(d["_id"]), "prompt": d["prompt"], "check": {"verdict": "changed"}}
+                for d in docs
+            ]
+        )
     return GameService(
         QuestionRepository(db.examination, db.examination_simplified),
         RoundRepository(db.game_rounds),
@@ -129,3 +137,63 @@ async def test_round_cap_uses_the_question_ids_index(db, monkeypatch):
     left = next(str(d["_id"]) for d in docs if str(d["_id"]) not in in_round)
     with pytest.raises(errors.RoundFull):
         await svc.add_question(rid, left)
+
+
+# --- /v2/game over composed documents (`compose.py`) -----------------------------------
+
+
+def card(question_id: str, **kw):
+    """A composed `game_question` document, as `compose.compose_and_store` writes one."""
+    return {
+        "question_id": question_id,
+        "held": False,
+        "section": "S",
+        "assessment_type": "t",
+        "scenario": "",
+        "stage": "",
+        "order": 0,
+        "objectives": ["o1"],
+        "difficulty": 1,
+        "count": 4,
+        "public": {"id": question_id, "section": "S", "assessment_type": "t", "question": "q", "ask": {"text": "q?"}},
+        "key": {
+            "correct": 1,
+            "review": {"explanation": "e", "feedbacks": ["a", "b", "c", "d"]},
+            "outcomes": [
+                {"index": i, "verdict": "correct" if i == 1 else "incorrect",
+                 "impact": "success" if i == 1 else "failure", "consequence": f"c{i}"}
+                for i in range(4)
+            ],
+        },
+        **kw,
+    }
+
+
+async def test_v2_rounds_serve_composed_documents_and_answer_once(db):
+    from claude_exam.api.game.card_repository import CardRepository
+    from claude_exam.api.game.card_service import CardService
+
+    ids = [str(ObjectId()) for _ in range(3)]
+    await db["game_question"].insert_many([card(ids[0]), card(ids[1]), card(ids[2], held=True)])
+    svc = CardService(CardRepository(db["game_question"], db["examination"]), RoundRepository(db["game_rounds"]))
+
+    started = await svc.create_round(5, "", "")
+    assert sorted(c.id for c in started.items) == sorted(ids[:2]) and started.total == 2
+    rid = ObjectId(started.round_id)
+    # The key is kept in the round, not sent; answering returns that answer's outcome.
+    stored = await db["game_rounds"].find_one({"_id": rid})
+    assert stored["questions"][ids[0]]["key"]["outcomes"][2]["consequence"] == "c2"
+    result = await svc.answer(rid, ids[0], 2)
+    assert (result.is_correct, result.outcome.consequence) == (False, "c2")
+    with pytest.raises(errors.AlreadyAnswered):
+        await svc.answer(rid, ids[0], 1)
+    assert (await svc.next_batch(rid, 1, 5)).items == []
+    # A held question exists but is not served; an unknown one is not found.
+    await db["examination"].insert_one({"_id": ObjectId(ids[2])})
+    with pytest.raises(errors.QuestionNotPlayable):
+        await svc.add_question(rid, ids[2])
+    with pytest.raises(errors.QuestionNotFound):
+        await svc.add_question(rid, str(ObjectId()))
+    listed = await svc.list_questions(10, None, None, shuffle=False)
+    assert [c.id for c in listed.items] == sorted(ids[:2]) and listed.total == 2
+    assert await svc.sections() == ["S"]

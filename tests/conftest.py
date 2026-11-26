@@ -3,6 +3,7 @@ from fakes import FakeCollection
 
 from claude_exam.api.dependencies import (
     get_async_decomposition_collection,
+    get_async_game_question_collection,
     get_async_objectives_collection,
     get_async_story_collection,
 )
@@ -21,6 +22,7 @@ def fresh_app_state():
     app.dependency_overrides[get_async_objectives_collection] = lambda: FakeCollection([])
     app.dependency_overrides[get_async_story_collection] = lambda: FakeCollection([])
     app.dependency_overrides[get_async_decomposition_collection] = lambda: FakeCollection([])
+    app.dependency_overrides[get_async_game_question_collection] = lambda: FakeCollection([])
     yield
     app.state.api_key = None
     app.dependency_overrides.clear()

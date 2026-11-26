@@ -19,7 +19,8 @@ from claude_exam.api import batch, decompose, objectives, rephrase, story
 from claude_exam.api.batch import STAGES, Stores
 
 pytestmark = pytest.mark.anyio
-ALL = list(STAGES["full"])
+# The game's steps, then the rephrase and its check (their own job mode, for study use).
+ALL = [*STAGES["full"], *STAGES["rephrase"]]
 
 
 @pytest.fixture
@@ -40,6 +41,7 @@ def stores_of(mongo) -> Stores:
         db["question_objectives"],
         db["question_story"],
         db["question_decomposition"],
+        db["game_question"],
     )
 
 
@@ -52,6 +54,8 @@ async def done():
     q = in_chapter(section=TAGGABLE)
     mongo, ica = FakeMongo([q]), ScriptedIca()
     job = await run_job(mongo, ica, [q["_id"]], "full")
+    assert job.failed == 0
+    job = await run_job(mongo, ica, [q["_id"]], "rephrase")
     assert job.failed == 0
     return q, mongo, ica
 

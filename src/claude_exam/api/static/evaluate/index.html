@@ -531,8 +531,9 @@ function resolutionView(r, source) {
     h("p", {}, h("strong", {}, "Rule: "), r.rule),
     h("h3", {}, "Answer requirements"), h("ul", {}, r.answer_requirements.map((x) => h("li", {}, x))),
     h("h3", {}, "Options"),
-    table(["", "verdict", "supports", "gaps", "reason"], r.options.map((o) => [LETTER(o.index),
-      chip(o.verdict, o.verdict === "correct" ? "ok" : "bad"), (o.supported_requirements || []).join("; "), (o.gaps || []).join("; "), o.reason])),
+    table(["", "verdict", "impact", "consequence", "supports", "gaps", "reason"], r.options.map((o) => [LETTER(o.index),
+      chip(o.verdict, o.verdict === "correct" ? "ok" : "bad"), chip(o.impact, IMPACT[o.impact]), o.consequence || h("span", { class: "muted" }, "—"),
+      (o.supported_requirements || []).join("; "), (o.gaps || []).join("; "), o.reason])),
     h("h3", {}, "Resolved flow"), diagram(source));
 }
 
@@ -544,6 +545,34 @@ function codeFlowView(f, source, errors) {
       ? h("div", {}, h("h3", {}, "Flow gate"), h("ul", {}, errors.map((x) => h("li", { class: "error" }, x))))
       : h("p", {}, chip("passes the flow gate", "ok")),
     flowView(f, source));
+}
+
+const IMPACT = { success: "ok", partial: "warn", failure: "bad" };
+
+// The game document (`compose`): what /v2/game sends before answering, in the order a
+// player meets it, then the outcome of each answer (the key, sent only after answering).
+function gameView(g) {
+  const card = g.public, key = g.key;
+  const names = Object.fromEntries(card.cast.map((c) => [c.ref, c]));
+  const member = (ref) => names[ref] ? `${names[ref].name} ‹${names[ref].icon}›` : ref;
+  return h("div", {},
+    card.beat ? h("p", { class: "muted" }, card.beat) : "",
+    h("h3", {}, "1. Briefing"),
+    table(["role", "text", "cast"], [...card.briefing.map((x) => [chip(x.role), x.text, x.entity_ids.map(member).join(", ")]),
+      [chip("ask", "ok"), h("strong", {}, card.ask.text), card.ask.entity_ids.map(member).join(", ")]]),
+    h("h3", {}, "2. Tools"),
+    table(["", "icon", "label", "made of", "text"], card.tools.map((t) => [LETTER(t.index), t.icon || "—", t.label,
+      t.components.map(member).join(", "), t.text])),
+    h("h3", {}, `Cast (${card.cast.length})`),
+    table(["ref", "name", "type", "icon", "in the scene"], card.cast.map((c) => [c.ref, c.name, chip(c.type), c.icon, c.scene ? "yes" : "answer only"])),
+    h("h3", {}, "4. Outcomes (after answering)"),
+    table(["", "impact", "consequence", "misconception"], key.outcomes.map((o) => [h("strong", {}, LETTER(o.index), o.index === key.correct ? " ✓" : ""),
+      chip(o.impact, IMPACT[o.impact]), o.consequence, o.misconception || "—"])),
+    h("div", { class: "kv" }, "win", key.win || "—", "fail", key.fail || "—", "rule", key.rule || "—"));
+}
+
+function gameMissingView(missing) {
+  return h("ul", {}, missing.map((x) => h("li", { class: "error" }, `missing ${x}`)));
 }
 
 // The line shown before the question (key-free beat step).
@@ -570,6 +599,9 @@ function renderResults(r, source, steps, planned) {
     panel("code_flow", "Flow built in code (experiment)", source, r.code_flow,
       (f) => codeFlowView(f, m.code_flow, r.code_flow_errors || [])),
     panel("resolution", "Resolution", source, r.resolution, (x) => resolutionView(x, m.resolution)),
+    r.game || !r.game_missing?.length
+      ? panel("game", "Game card (compose, /v2/game)", source, r.game, gameView)
+      : panel("game", "Game card (compose, /v2/game): not composed", source, r.game_missing, gameMissingView),
     panel("rephrase", "Rephrase", source, r.rephrase, rephraseView),
     panel("check", "Check of the rephrase", source, r.check, checkView),
     h("details", { class: "panel" }, h("summary", {}, "Raw result"), h("div", { class: "body" }, jsonBlock("everything", r))),

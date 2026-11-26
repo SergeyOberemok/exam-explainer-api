@@ -1646,12 +1646,27 @@
     },
     "OptionEvaluation": {
       "properties": {
+        "consequence": {
+          "default": "",
+          "title": "Consequence",
+          "type": "string"
+        },
         "gaps": {
           "items": {
             "type": "string"
           },
           "title": "Gaps",
           "type": "array"
+        },
+        "impact": {
+          "default": "failure",
+          "enum": [
+            "success",
+            "partial",
+            "failure"
+          ],
+          "title": "Impact",
+          "type": "string"
         },
         "index": {
           "title": "Index",

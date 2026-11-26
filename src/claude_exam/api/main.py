@@ -15,11 +15,16 @@ from claude_exam.api.indexes import ensure_indexes
 from claude_exam.api.routers.evaluate import router as evaluate_router
 from claude_exam.api.routers.examination import router as examination_router
 from claude_exam.api.routers.game import router as game_router
+from claude_exam.api.routers.game_v2 import router as game_v2_router
+from claude_exam.api.routers.game_v2 import search_router as search_v2_router
 from claude_exam.api.routers.ica import router as ica_router
 from claude_exam.api.routers.questions import router as questions_router
 from claude_exam.api.routers.search import router as search_router
 
 API_VERSION_PREFIX = "/v1"
+# /v2/game serves the composed questions (`compose.py`); /v1 stays until the Unity client
+# has moved to it.
+API_V2_PREFIX = "/v2"
 
 
 @asynccontextmanager
@@ -59,6 +64,8 @@ install_error_handlers(app)
 # breaking change gets a new prefix (/v2) while /v1 keeps working.
 app.include_router(game_router, prefix=API_VERSION_PREFIX)
 app.include_router(search_router, prefix=API_VERSION_PREFIX)
+app.include_router(game_v2_router, prefix=API_V2_PREFIX)
+app.include_router(search_v2_router, prefix=API_V2_PREFIX)
 app.include_router(examination_router)
 app.include_router(evaluate_router)
 app.include_router(ica_router)

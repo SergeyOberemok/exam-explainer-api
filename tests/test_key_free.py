@@ -60,7 +60,7 @@ def test_the_steps_shown_after_answering_do_read_the_key():
     drawn = DecisionFlow.model_validate(flow_reply())
     assert EXPLANATION in "\n".join(objectives.messages(DOC))
     assert "CORRECT ANSWER: B" in "\n".join(story.messages({**DOC, "_id": "x"}))
-    assert "[CORRECT]" in "\n".join(flow.resolve_messages(DOC, d, drawn))
+    assert "[CORRECT]" in "\n".join(flow.resolve_messages(DOC, d, drawn, None))
 
 
 def test_the_beat_is_not_written_by_the_step_that_reads_the_key():

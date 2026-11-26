@@ -24,6 +24,7 @@ from claude_exam.api.check import check_and_store
 from claude_exam.api.dependencies import (
     AsyncCollectionDep,
     AsyncDecompositionCollectionDep,
+    AsyncGameQuestionCollectionDep,
     ExaminationDocDep,
     AsyncJobsCollectionDep,
     AsyncMongoClientDep,
@@ -213,6 +214,7 @@ async def backfill_pipeline(
     objectives: AsyncObjectivesCollectionDep,
     story: AsyncStoryCollectionDep,
     decomposition: AsyncDecompositionCollectionDep,
+    game_question: AsyncGameQuestionCollectionDep,
     starter: JobStarterDep,
     model_id: ModelIdQuery = "claude-haiku-5-5",
     only_missing: Annotated[
@@ -240,7 +242,7 @@ async def backfill_pipeline(
     applied; `only_missing=false` redoes everything. Track it via
     `GET /examination/jobs/{job_id}`.
     """
-    stores = Stores(collection, simplified, objectives, story, decomposition)
+    stores = Stores(collection, simplified, objectives, story, decomposition, game_question)
     question_ids: list[ObjectId] = []
     query = hold.with_hold({"source": source} if source else {}, include_manual)
     async for doc in collection.find(query):
@@ -395,16 +397,22 @@ async def draw_question_flow(
 async def resolve_question(
     doc: ExaminationDocDep,
     decomposition: AsyncDecompositionCollectionDep,
+    story: AsyncStoryCollectionDep,
     ica: IcaClientDep,
     lock: SimplificationLockDep,
     model_id: ModelIdQuery = "claude-haiku-5-5",
     max_tokens: MaxTokensQuery = None,
 ) -> DecompositionRecord:
     """(Re)write the resolution of a question with a current flow (sees the key,
-    `flow.py`). 404 without a flow, 409 while a job runs."""
+    `flow.py`), its consequences set in the question's place in the story. 404 without
+    a flow, 409 while a job runs. The game document (`compose`) is outdated until the
+    next full or compose job."""
     _refuse_while_a_job_runs(lock)
+    place = story_of(doc, await story.find_one({"question_id": str(doc["_id"])}))
     async with lock:
-        return await resolve_and_store(ica, decomposition, doc, model_id, max_tokens)
+        return await resolve_and_store(
+            ica, decomposition, doc, model_id, max_tokens, place=place
+        )
 
 
 @router.post("/{question_id}/objectives")

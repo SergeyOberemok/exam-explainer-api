@@ -1,15 +1,22 @@
 """One page on the state of the ingest pipeline: what every stored question has, what
 is missing or outdated, and what the game cannot serve.
 
+The game (`/v2/game`) serves a question's composed document (`game_question`, the last
+step, `compose.py`); a question that cannot be composed is listed with what it lacks.
+
 Read-only. Run it after an import job (or any backfill) to see whether there is
 anything left to do, and what kind of thing it is:
 - a step that is missing or was written with an older prompt or catalog: run
   `POST /examination/pipeline/backfill`;
 - a scenario paragraph no chapter claims, or a section without objectives: extend the
   catalog (`propose_scenarios.py`, `propose_objectives.py`), then run the backfill;
-- a rephrase the check found changed: read it (`--show`), then write it again with
+- a question that cannot be composed: the steps it lacks are run by the backfill; a
+  resolution "without a consequence per answer" was written before the resolve step
+  wrote consequences, and the backfill writes it again (its prompt changed);
+- a rephrase the check found changed (only `/v1/game` and study use read rephrases):
+  read it (`--show`), then write it again with
   `POST /questions/{id}/rephrase?force=true` and check it with
-  `POST /examination/{id}/check`. Until then the game serves the original only;
+  `POST /examination/{id}/check`. Until then /v1 serves the original only;
 - a pre-answer flow that may point at the correct answer (`flow.leak_warning`): look at
   it with `scripts/run_pipeline.py ID --stages flow --dry-run --mermaid` and redo it
   (`POST /examination/{id}/flow`) or tighten the flow prompt.
@@ -27,7 +34,7 @@ from collections import Counter
 
 from pymongo import MongoClient
 
-from claude_exam.api import decompose, hold, pipeline_keys
+from claude_exam.api import compose, decompose, hold, pipeline_keys
 from claude_exam.api.batch import STAGES
 from claude_exam.api.pipeline_keys import Records
 from claude_exam.api.game.domain import (
@@ -61,11 +68,23 @@ def stage_states(
     tags: dict | None,
     story: dict | None,
     decomposition: dict | None = None,
+    game_question: dict | None = None,
 ) -> dict:
-    """For each step of the full pipeline: "current", "outdated" or "missing", by the
-    same rule as the job (`pipeline_keys.state`), on records already read."""
-    records = Records(objectives=tags, story=story, decomposition=decomposition, simplified=simplified)
-    return {stage: pipeline_keys.state(stage, doc, records) for stage in STAGES["full"]}
+    """For each step of the full pipeline, and the rephrase and its check (their own job
+    mode): "current", "outdated" or "missing", by the same rule as the job
+    (`pipeline_keys.state`), on records already read."""
+    records = Records(
+        objectives=tags,
+        story=story,
+        decomposition=decomposition,
+        simplified=simplified,
+        game_question=game_question,
+    )
+    return {stage: pipeline_keys.state(stage, doc, records) for stage in REPORTED}
+
+
+# The game's steps, then the rephrase and its check (study use and /v1 only).
+REPORTED = (*STAGES["full"], *STAGES["rephrase"])
 
 
 def show(doc: dict, simplified: dict) -> None:
@@ -89,14 +108,18 @@ def main() -> int:
     tags = {r["question_id"]: r for r in db["question_objectives"].find()}
     stories = {r["question_id"]: r for r in db["question_story"].find()}
     decompositions = {r["question_id"]: r for r in db["question_decomposition"].find()}
+    games = {r["question_id"]: r for r in db["game_question"].find()}
 
-    states = {stage: Counter() for stage in STAGES["full"]}
+    states = {stage: Counter() for stage in REPORTED}
     verdicts: Counter = Counter()
     difficulty: Counter = Counter()
     sections: Counter = Counter()
     paragraphs: Counter = Counter()
     unplayable = 0
     held = 0
+    # Playable, but without a game document (not served by /v2), by what is missing.
+    uncomposed: Counter = Counter()
+    not_composed = 0
     changed: list[str] = []
     hard: list[str] = []
     lossy: list[tuple[str, list[str]]] = []
@@ -109,7 +132,7 @@ def main() -> int:
         text = simplified.get(question_id)
         record = decompositions.get(question_id)
         question_states = stage_states(
-            doc, text, tags.get(question_id), stories.get(question_id), record
+            doc, text, tags.get(question_id), stories.get(question_id), record, games.get(question_id)
         )
         for stage, state in question_states.items():
             states[stage][state] += 1
@@ -125,6 +148,10 @@ def main() -> int:
                     leaks.append((question_id, warning))
         held += hold.is_held(doc)
         unplayable += not is_playable(doc) and not hold.is_held(doc)
+        if is_playable(doc) and question_id not in games:
+            not_composed += 1
+            for part in compose.missing(doc, tags.get(question_id), stories.get(question_id), record):
+                uncomposed[part] += 1
         if not for_section(doc.get("section") or ""):
             sections[normalize_section(doc.get("section")) or "(no section)"] += 1
         paragraph = unknown_paragraph(doc)
@@ -147,9 +174,10 @@ def main() -> int:
                 lossy.append((question_id, hard_problems))
 
     print(f"{len(docs)} questions" + (f" from {source}" if source else "") + f", {unplayable} the game cannot play"
-          + (f", {held} held for manual processing (not played yet)" if held else "") + "\n")
+          + (f", {held} held for manual processing (not played yet)" if held else "")
+          + (f", {not_composed} without a game document (not served)" if not_composed else "") + "\n")
     print(f"  {'step':<12}{'current':>9}{'outdated':>10}{'missing':>9}")
-    for stage in STAGES["full"]:
+    for stage in REPORTED:
         c = states[stage]
         print(f"  {stage:<12}{c['current']:>9}{c['outdated']:>10}{c['missing']:>9}")
     print(
@@ -159,9 +187,11 @@ def main() -> int:
     print("  difficulty: " + ", ".join(f"{d or 'untagged'}: {difficulty[d]}" for d in (1, 2, 3, 0)))
     print("  flow views: " + (", ".join(f"{v} {c}" for v, c in views.most_common()) or "(none)"))
 
-    todo = sum(c["outdated"] + c["missing"] for c in states.values())
+    todo = sum(states[s]["outdated"] + states[s]["missing"] for s in STAGES["full"])
     print("\nNEEDS WORK")
-    print(f"  steps to run (POST /examination/pipeline/backfill): {todo}")
+    print(f"  game steps to run (POST /examination/pipeline/backfill): {todo}")
+    for part, count in uncomposed.most_common():
+        print(f"  not composed for the game, missing {part}: {count}")
     for name, count in sections.most_common():
         print(f"  section without objectives: {name!r} ({count} questions)")
     for name, count in paragraphs.most_common():

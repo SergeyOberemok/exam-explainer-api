@@ -8,9 +8,11 @@ description: Use when the user wants to add practice-exam questions to the game'
 One upload does everything for a new question: learning objectives, its place in the
 game's story, its decomposition (with semantic parts and visual entities built from it),
 the story line shown before it (the beat, written without the key), icons, the flow
-shown before answering and the resolution shown after, a rephrase (the
-question in plain words, set in the company, written without the key) and a check that
-the rephrase still has the same right answer. Your
+shown before answering, the resolution shown after (with a story consequence and an
+impact per answer), and last the game document the game serves (`compose`: the
+question as briefing, ask, tools, map and outcomes, put together in code). The rephrase
+and its check are no longer part of an upload (the game does not read them; job mode
+`rephrase` still writes them for study use). Your
 job is to run it, read the report, and fix what the report names. Do not hand-write
 records for questions: if the pipeline cannot do something, the fix is a catalog or a
 prompt, so the next upload needs no hand work either.
@@ -75,19 +77,21 @@ skip them (add `?include_manual=true` to a backfill to take them after all). The
 the user to open `http://127.0.0.1:8000/evaluate/ui/`: "Waiting for the pipeline"
 lists the held questions with the steps each one needs. Clicking one loads it, "Select
 missing steps" ticks them and turns on "save to database", and "Run and save" runs them.
-A question is released into the game by itself once no required step is missing (the
-rephrase and its check are optional), or by hand with "Release to game"
+A question is released into the game by itself once no step is missing (the last one
+composes its game document, which needs all the others), or by hand with "Release to game"
 (`POST /evaluate/questions/<id>/release`; `/hold` holds it again). In manual mode, skip
 the job polling below; the report of step 6 counts the held questions.
 
 ### The job
 
 It returns `job_id`. Poll `GET /examination/jobs/<job_id>` until `status` is `completed`
-or `failed` (about 30 seconds per question with the default three at a time; eight
-model calls each, more when a gate asks for a repair). In the job: `succeeded`, `failed`, `stages_failed` (failures per step) and
+or `failed` (about 25 seconds per question with the default three at a time; seven
+model calls each, more when a gate asks for a repair; the compose step makes none). In the job: `succeeded`, `failed`, `stages_failed` (failures per step) and
 `errors` (question, step, status, detail).
 
-- 422 errors are the catalog gaps of steps 2 and 3. Fix the catalog, then step 5.
+- 422 errors are the catalog gaps of steps 2 and 3. Fix the catalog, then step 5. A 422
+  of the `compose` step says what the question still lacks ("not ready for the game,
+  missing: ..."); it follows from an earlier step's failure and goes away with it.
 - 502 errors are replies the gates rejected three times (the detail says which rule).
   A few are normal; step 5 tries them again. The same question failing twice is worth
   reading: the rule may be wrong for it, which is a change to `exam_terms.py` or the
@@ -117,11 +121,15 @@ uv run python scripts/pipeline_report.py --source <file name> --check
 
 Exit status 0 means done. Otherwise it names what is left:
 
-- **steps to run**: step 5.
+- **game steps to run**: step 5.
+- **not composed for the game, missing ...**: what keeps questions out of the game.
+  Usually the steps step 5 runs. "resolution with a consequence per answer" is a
+  resolution written before the resolve step wrote consequences; step 5 writes it again.
 - **section without objectives / scenario no chapter claims**: steps 3 and 2.
-- **rephrases the check found changed**: a model answering the rephrase without the
-  key picked a wrong answer, but the right one on the original. The game does not offer
-  these rephrases (only the original). Read them with `--show`, write each again
+- **rephrases the check found changed** (only for rephrases written with job mode
+  `rephrase`, which only `/v1/game` and the study routes read): a model answering the
+  rephrase without the key picked a wrong answer, but the right one on the original.
+  /v1 does not offer these rephrases (only the original). Read them with `--show`, write each again
   with `POST /questions/<id>/rephrase?force=true` and check it with
   `POST /examination/<id>/check`. If the same kind of mistake repeats, fix the prompt in
   `rephrase.py` instead.
@@ -137,7 +145,10 @@ Exit status 0 means done. Otherwise it names what is left:
 
 To look at or redo one question step by step, use
 `uv run python scripts/run_pipeline.py <id> --show --mermaid` (add `--dry-run` to write
-nothing, `--stages a,b` for some steps, `--force` to redo current ones).
+nothing, `--stages a,b` for some steps, `--force` to redo current ones). `--show` ends
+with the game card the compose step makes (briefing, ask, tools with what they are made
+of, outcomes); `--dry-run --stages resolve,compose --show` tries a resolve prompt change
+on the card without writing anything.
 
 Then `uv run python scripts/story_coverage.py` and `uv run python scripts/objective_coverage.py`
 show how the new questions spread over chapters, stages and objectives.
@@ -146,4 +157,4 @@ show how the new questions spread over chapters, stages and objectives.
 
 How many questions were stored and how many were duplicates; how many have everything;
 what is left and whose decision it is (a new chapter or new objectives are theirs to
-approve); and how many rephrases the check held back.
+approve); and how many questions have a game document (served by `/v2/game`).

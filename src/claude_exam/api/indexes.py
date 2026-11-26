@@ -68,6 +68,12 @@ async def ensure_indexes(db: AsyncDatabase) -> None:
             TEXT_INDEX_KEYS,
             {"name": TEXT_INDEX_NAME, "weights": TEXT_INDEX_WEIGHTS, "default_language": "english"},
         ),
+        # One game document per question (`compose.py`); makes its upsert race-safe.
+        ("game_question", "question_id", {"unique": True}),
+        # /v2/game rounds filter served documents by these, and read a story in order.
+        ("game_question", [("held", 1), ("section", 1), ("assessment_type", 1)], {}),
+        ("game_question", [("held", 1), ("scenario", 1), ("stage", 1), ("order", 1)], {}),
+        ("game_question", "objectives", {}),
         # Rounds are only needed while a game is played; Mongo drops them after a day.
         ("game_rounds", "created_at", {"expireAfterSeconds": ROUND_TTL_SECONDS}),
     ]

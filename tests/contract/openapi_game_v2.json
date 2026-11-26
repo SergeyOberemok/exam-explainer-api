@@ -1,0 +1,1633 @@
+{
+  "paths": {
+    "/v2/game/objectives": {
+      "get": {
+        "description": "The objective catalog with how many served questions each objective has.",
+        "operationId": "list_objectives_v2_game_objectives_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GameObjectiveList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Objectives",
+        "tags": [
+          "game v2"
+        ]
+      }
+    },
+    "/v2/game/questions": {
+      "get": {
+        "description": "Served questions without their answer keys. To play, start a round.",
+        "operationId": "list_questions_v2_game_questions_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "count",
+            "required": false,
+            "schema": {
+              "default": 10,
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Count",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "section",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Section"
+            }
+          },
+          {
+            "in": "query",
+            "name": "assessment_type",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 100,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Assessment Type"
+            }
+          },
+          {
+            "in": "query",
+            "name": "shuffle",
+            "required": false,
+            "schema": {
+              "default": true,
+              "title": "Shuffle",
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GameCardList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Questions",
+        "tags": [
+          "game v2"
+        ]
+      }
+    },
+    "/v2/game/questions/{question_id}": {
+      "get": {
+        "operationId": "get_question_v2_game_questions__question_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "question_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{24}$",
+              "title": "Question Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GameCard"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Question",
+        "tags": [
+          "game v2"
+        ]
+      }
+    },
+    "/v2/game/rounds": {
+      "post": {
+        "description": "Start a round of composed questions (the same filters as `/v1/game/rounds`). 404\n`no_questions` when nothing matches.",
+        "operationId": "create_round_v2_game_rounds_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GameRoundRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GameCardRound"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create Round",
+        "tags": [
+          "game v2"
+        ]
+      }
+    },
+    "/v2/game/rounds/{round_id}/answers": {
+      "post": {
+        "description": "Answer one question of a round, once: the outcome of that answer, the review and\nthe resolved flow. The same answer again repeats the result; another one is 409\n`already_answered`.",
+        "operationId": "answer_round_question_v2_game_rounds__round_id__answers_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "round_id",
+            "required": true,
+            "schema": {
+              "title": "Round Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GameAnswerRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GameCardAnswerResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Answer Round Question",
+        "tags": [
+          "game v2"
+        ]
+      }
+    },
+    "/v2/game/rounds/{round_id}/answers/{question_id}": {
+      "get": {
+        "description": "The answer the round recorded for a question (404 `question_not_answered`).",
+        "operationId": "get_round_answer_v2_game_rounds__round_id__answers__question_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "question_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{24}$",
+              "title": "Question Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "round_id",
+            "required": true,
+            "schema": {
+              "title": "Round Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GameCardAnswerResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Round Answer",
+        "tags": [
+          "game v2"
+        ]
+      }
+    },
+    "/v2/game/rounds/{round_id}/batches": {
+      "post": {
+        "description": "The round's next questions, none already in it; asking for an existing batch\nreturns it again.",
+        "operationId": "next_round_batch_v2_game_rounds__round_id__batches_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "round_id",
+            "required": true,
+            "schema": {
+              "title": "Round Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GameRoundBatchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GameCardBatch"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Next Round Batch",
+        "tags": [
+          "game v2"
+        ]
+      }
+    },
+    "/v2/game/rounds/{round_id}/fifty-fifty": {
+      "post": {
+        "description": "Remove two random wrong answers (tools) from an unanswered question.",
+        "operationId": "use_round_fifty_fifty_v2_game_rounds__round_id__fifty_fifty_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "round_id",
+            "required": true,
+            "schema": {
+              "title": "Round Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GameFiftyFiftyRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GameFiftyFiftyResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Use Round Fifty Fifty",
+        "tags": [
+          "game v2"
+        ]
+      }
+    },
+    "/v2/game/rounds/{round_id}/questions": {
+      "post": {
+        "description": "Add a served question (a search result) to the round. 404 `question_not_found`\nfor an unknown id, 422 `question_not_playable` for one the game does not serve.",
+        "operationId": "add_round_question_v2_game_rounds__round_id__questions_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "round_id",
+            "required": true,
+            "schema": {
+              "title": "Round Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GameRoundQuestionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GameCardRoundQuestion"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Add Round Question",
+        "tags": [
+          "game v2"
+        ]
+      }
+    },
+    "/v2/game/sections": {
+      "get": {
+        "operationId": "list_sections_v2_game_sections_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GameSectionList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Sections",
+        "tags": [
+          "game v2"
+        ]
+      }
+    },
+    "/v2/game/story": {
+      "get": {
+        "description": "The company, its chapters and stages with their served question counts.",
+        "operationId": "get_story_v2_game_story_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GameStory"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Story",
+        "tags": [
+          "game v2"
+        ]
+      }
+    },
+    "/v2/search/game-questions": {
+      "get": {
+        "description": "Served questions matching `q`, best first, without their answer key. To play one,\nadd it to a round with `POST /v2/game/rounds/{round_id}/questions`.",
+        "operationId": "search_cards_v2_search_game_questions_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "q",
+            "required": true,
+            "schema": {
+              "maxLength": 2000,
+              "minLength": 2,
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "section",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 200,
+              "title": "Section",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "assessment_type",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 100,
+              "title": "Assessment Type",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 5,
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GameCardList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Search Cards",
+        "tags": [
+          "game v2"
+        ]
+      },
+      "post": {
+        "description": "`GET /v2/search/game-questions` with the fields in a JSON body.",
+        "operationId": "search_cards_by_body_v2_search_game_questions_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SearchRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GameCardList"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Search Cards By Body",
+        "tags": [
+          "game v2"
+        ]
+      }
+    }
+  },
+  "schemas": {
+    "FlowEdge": {
+      "properties": {
+        "added": {
+          "title": "Added",
+          "type": "boolean"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "source": {
+          "title": "Source",
+          "type": "string"
+        },
+        "source_status": {
+          "enum": [
+            "explicit",
+            "inferred",
+            "unknown"
+          ],
+          "title": "Source Status",
+          "type": "string"
+        },
+        "target": {
+          "title": "Target",
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "next",
+            "yes",
+            "no",
+            "unknown",
+            "approved",
+            "rejected",
+            "custom"
+          ],
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "target",
+        "type",
+        "label",
+        "source_status",
+        "added"
+      ],
+      "title": "FlowEdge",
+      "type": "object"
+    },
+    "FlowNode": {
+      "properties": {
+        "added": {
+          "title": "Added",
+          "type": "boolean"
+        },
+        "condition_id": {
+          "title": "Condition Id",
+          "type": "string"
+        },
+        "entity_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Entity Ids",
+          "type": "array"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "is_question": {
+          "title": "Is Question",
+          "type": "boolean"
+        },
+        "label": {
+          "title": "Label",
+          "type": "string"
+        },
+        "source_status": {
+          "enum": [
+            "explicit",
+            "inferred",
+            "unknown"
+          ],
+          "title": "Source Status",
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "start",
+            "process",
+            "decision",
+            "input",
+            "output",
+            "human_review",
+            "end"
+          ],
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "type",
+        "label",
+        "entity_ids",
+        "condition_id",
+        "source_status",
+        "is_question",
+        "added"
+      ],
+      "title": "FlowNode",
+      "type": "object"
+    },
+    "GameAnswerRequest": {
+      "properties": {
+        "answer_index": {
+          "minimum": 0.0,
+          "title": "Answer Index",
+          "type": "integer"
+        },
+        "question_id": {
+          "pattern": "^[0-9a-f]{24}$",
+          "title": "Question Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "question_id",
+        "answer_index"
+      ],
+      "title": "GameAnswerRequest",
+      "type": "object"
+    },
+    "GameAsk": {
+      "properties": {
+        "entity_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Entity Ids",
+          "type": "array"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "text"
+      ],
+      "title": "GameAsk",
+      "type": "object"
+    },
+    "GameCard": {
+      "description": "What the game shows before the question is answered, in the order a player meets\nit: the beat, the briefing item by item, the ask, the tools, and the map.",
+      "properties": {
+        "ask": {
+          "$ref": "#/components/schemas/GameAsk"
+        },
+        "assessment_type": {
+          "title": "Assessment Type",
+          "type": "string"
+        },
+        "beat": {
+          "default": "",
+          "title": "Beat",
+          "type": "string"
+        },
+        "briefing": {
+          "default": [],
+          "items": {
+            "$ref": "#/components/schemas/GamePart"
+          },
+          "title": "Briefing",
+          "type": "array"
+        },
+        "cast": {
+          "default": [],
+          "items": {
+            "$ref": "#/components/schemas/GameCastMember"
+          },
+          "title": "Cast",
+          "type": "array"
+        },
+        "difficulty": {
+          "default": 0,
+          "title": "Difficulty",
+          "type": "integer"
+        },
+        "icon": {
+          "default": "",
+          "title": "Icon",
+          "type": "string"
+        },
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "map": {
+          "$ref": "#/components/schemas/GameFlow"
+        },
+        "objectives": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Objectives",
+          "type": "array"
+        },
+        "question": {
+          "title": "Question",
+          "type": "string"
+        },
+        "scenario": {
+          "default": "",
+          "title": "Scenario",
+          "type": "string"
+        },
+        "section": {
+          "title": "Section",
+          "type": "string"
+        },
+        "stage": {
+          "default": "",
+          "title": "Stage",
+          "type": "string"
+        },
+        "stem": {
+          "default": "",
+          "title": "Stem",
+          "type": "string"
+        },
+        "tools": {
+          "default": [],
+          "items": {
+            "$ref": "#/components/schemas/GameTool"
+          },
+          "title": "Tools",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "section",
+        "assessment_type",
+        "question",
+        "ask"
+      ],
+      "title": "GameCard",
+      "type": "object"
+    },
+    "GameCardAnswerResult": {
+      "properties": {
+        "answer_index": {
+          "title": "Answer Index",
+          "type": "integer"
+        },
+        "answer_requirements": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Answer Requirements",
+          "type": "array"
+        },
+        "correct_index": {
+          "title": "Correct Index",
+          "type": "integer"
+        },
+        "is_correct": {
+          "title": "Is Correct",
+          "type": "boolean"
+        },
+        "outcome": {
+          "$ref": "#/components/schemas/GameOutcome"
+        },
+        "question_id": {
+          "title": "Question Id",
+          "type": "string"
+        },
+        "resolution_flow": {
+          "$ref": "#/components/schemas/GameFlow"
+        },
+        "review": {
+          "$ref": "#/components/schemas/GameReview"
+        },
+        "rule": {
+          "default": "",
+          "title": "Rule",
+          "type": "string"
+        },
+        "story_line": {
+          "default": "",
+          "title": "Story Line",
+          "type": "string"
+        }
+      },
+      "required": [
+        "question_id",
+        "answer_index",
+        "is_correct",
+        "correct_index",
+        "outcome",
+        "review"
+      ],
+      "title": "GameCardAnswerResult",
+      "type": "object"
+    },
+    "GameCardBatch": {
+      "properties": {
+        "batch_index": {
+          "title": "Batch Index",
+          "type": "integer"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/components/schemas/GameCard"
+          },
+          "title": "Items",
+          "type": "array"
+        },
+        "remaining": {
+          "title": "Remaining",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "batch_index",
+        "items",
+        "remaining"
+      ],
+      "title": "GameCardBatch",
+      "type": "object"
+    },
+    "GameCardList": {
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/components/schemas/GameCard"
+          },
+          "title": "Items",
+          "type": "array"
+        },
+        "total": {
+          "title": "Total",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "items",
+        "total"
+      ],
+      "title": "GameCardList",
+      "type": "object"
+    },
+    "GameCardRound": {
+      "properties": {
+        "fifty_fifty_charges": {
+          "title": "Fifty Fifty Charges",
+          "type": "integer"
+        },
+        "items": {
+          "items": {
+            "$ref": "#/components/schemas/GameCard"
+          },
+          "title": "Items",
+          "type": "array"
+        },
+        "round_id": {
+          "title": "Round Id",
+          "type": "string"
+        },
+        "total": {
+          "title": "Total",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "round_id",
+        "items",
+        "total",
+        "fifty_fifty_charges"
+      ],
+      "title": "GameCardRound",
+      "type": "object"
+    },
+    "GameCardRoundQuestion": {
+      "properties": {
+        "item": {
+          "$ref": "#/components/schemas/GameCard"
+        }
+      },
+      "required": [
+        "item"
+      ],
+      "title": "GameCardRoundQuestion",
+      "type": "object"
+    },
+    "GameCastMember": {
+      "description": "One entity of the question's decomposition (concepts included), referenced by\n`ref` from the briefing, the ask, the tools and the map.",
+      "properties": {
+        "aliases": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Aliases",
+          "type": "array"
+        },
+        "icon": {
+          "default": "",
+          "title": "Icon",
+          "type": "string"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "ref": {
+          "title": "Ref",
+          "type": "string"
+        },
+        "scene": {
+          "default": true,
+          "title": "Scene",
+          "type": "boolean"
+        },
+        "type": {
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ref",
+        "name",
+        "type"
+      ],
+      "title": "GameCastMember",
+      "type": "object"
+    },
+    "GameChapter": {
+      "properties": {
+        "count": {
+          "title": "Count",
+          "type": "integer"
+        },
+        "district": {
+          "title": "District",
+          "type": "string"
+        },
+        "intro": {
+          "title": "Intro",
+          "type": "string"
+        },
+        "key": {
+          "title": "Key",
+          "type": "string"
+        },
+        "outro": {
+          "title": "Outro",
+          "type": "string"
+        },
+        "stages": {
+          "items": {
+            "$ref": "#/components/schemas/GameStage"
+          },
+          "title": "Stages",
+          "type": "array"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "title",
+        "district",
+        "intro",
+        "outro",
+        "count",
+        "stages"
+      ],
+      "title": "GameChapter",
+      "type": "object"
+    },
+    "GameFiftyFiftyRequest": {
+      "properties": {
+        "question_id": {
+          "pattern": "^[0-9a-f]{24}$",
+          "title": "Question Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "question_id"
+      ],
+      "title": "GameFiftyFiftyRequest",
+      "type": "object"
+    },
+    "GameFiftyFiftyResult": {
+      "properties": {
+        "eliminated_indices": {
+          "items": {
+            "type": "integer"
+          },
+          "title": "Eliminated Indices",
+          "type": "array"
+        },
+        "fifty_fifty_remaining": {
+          "title": "Fifty Fifty Remaining",
+          "type": "integer"
+        },
+        "question_id": {
+          "title": "Question Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "question_id",
+        "eliminated_indices",
+        "fifty_fifty_remaining"
+      ],
+      "title": "GameFiftyFiftyResult",
+      "type": "object"
+    },
+    "GameFlow": {
+      "description": "A flow for the game, flat and null-free (`DecisionFlow` with its visualization\nspread out). All lists are empty when the question has no flow.",
+      "properties": {
+        "edges": {
+          "default": [],
+          "items": {
+            "$ref": "#/components/schemas/FlowEdge"
+          },
+          "title": "Edges",
+          "type": "array"
+        },
+        "nodes": {
+          "default": [],
+          "items": {
+            "$ref": "#/components/schemas/FlowNode"
+          },
+          "title": "Nodes",
+          "type": "array"
+        },
+        "primary": {
+          "default": "",
+          "title": "Primary",
+          "type": "string"
+        },
+        "reason": {
+          "default": "",
+          "title": "Reason",
+          "type": "string"
+        },
+        "secondary": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Secondary",
+          "type": "array"
+        },
+        "trigger": {
+          "default": "",
+          "title": "Trigger",
+          "type": "string"
+        }
+      },
+      "title": "GameFlow",
+      "type": "object"
+    },
+    "GameObjective": {
+      "properties": {
+        "count": {
+          "title": "Count",
+          "type": "integer"
+        },
+        "key": {
+          "title": "Key",
+          "type": "string"
+        },
+        "section": {
+          "title": "Section",
+          "type": "string"
+        },
+        "statement": {
+          "title": "Statement",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "section",
+        "title",
+        "statement",
+        "count"
+      ],
+      "title": "GameObjective",
+      "type": "object"
+    },
+    "GameObjectiveList": {
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/components/schemas/GameObjective"
+          },
+          "title": "Items",
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "title": "GameObjectiveList",
+      "type": "object"
+    },
+    "GameOutcome": {
+      "description": "What one answer leads to. Part of the answer key.",
+      "properties": {
+        "consequence": {
+          "default": "",
+          "title": "Consequence",
+          "type": "string"
+        },
+        "gaps": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Gaps",
+          "type": "array"
+        },
+        "impact": {
+          "enum": [
+            "success",
+            "partial",
+            "failure"
+          ],
+          "title": "Impact",
+          "type": "string"
+        },
+        "index": {
+          "title": "Index",
+          "type": "integer"
+        },
+        "misconception": {
+          "default": "",
+          "title": "Misconception",
+          "type": "string"
+        },
+        "reason": {
+          "default": "",
+          "title": "Reason",
+          "type": "string"
+        },
+        "verdict": {
+          "enum": [
+            "correct",
+            "incorrect"
+          ],
+          "title": "Verdict",
+          "type": "string"
+        }
+      },
+      "required": [
+        "index",
+        "verdict",
+        "impact"
+      ],
+      "title": "GameOutcome",
+      "type": "object"
+    },
+    "GamePart": {
+      "properties": {
+        "entity_ids": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Entity Ids",
+          "type": "array"
+        },
+        "role": {
+          "title": "Role",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "role",
+        "text"
+      ],
+      "title": "GamePart",
+      "type": "object"
+    },
+    "GameReview": {
+      "description": "What one version of a question shows once it is answered.",
+      "properties": {
+        "explanation": {
+          "default": "",
+          "title": "Explanation",
+          "type": "string"
+        },
+        "feedbacks": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Feedbacks",
+          "type": "array"
+        }
+      },
+      "title": "GameReview",
+      "type": "object"
+    },
+    "GameRoundBatchRequest": {
+      "description": "Ask for the round's next batch. `batch_index` is the batch wanted (the start is batch 0,\nso the first call sends 1); sending the same index again returns that batch again.",
+      "properties": {
+        "batch_index": {
+          "minimum": 1.0,
+          "title": "Batch Index",
+          "type": "integer"
+        },
+        "count": {
+          "default": 10,
+          "maximum": 50.0,
+          "minimum": 1.0,
+          "title": "Count",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "batch_index"
+      ],
+      "title": "GameRoundBatchRequest",
+      "type": "object"
+    },
+    "GameRoundQuestionRequest": {
+      "properties": {
+        "question_id": {
+          "pattern": "^[0-9a-f]{24}$",
+          "title": "Question Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "question_id"
+      ],
+      "title": "GameRoundQuestionRequest",
+      "type": "object"
+    },
+    "GameRoundRequest": {
+      "properties": {
+        "assessment_type": {
+          "default": "",
+          "maxLength": 100,
+          "title": "Assessment Type",
+          "type": "string"
+        },
+        "count": {
+          "default": 10,
+          "maximum": 50.0,
+          "minimum": 1.0,
+          "title": "Count",
+          "type": "integer"
+        },
+        "objective": {
+          "default": "",
+          "maxLength": 100,
+          "title": "Objective",
+          "type": "string"
+        },
+        "ordered": {
+          "default": false,
+          "title": "Ordered",
+          "type": "boolean"
+        },
+        "scenario": {
+          "default": "",
+          "maxLength": 100,
+          "title": "Scenario",
+          "type": "string"
+        },
+        "section": {
+          "default": "",
+          "maxLength": 200,
+          "title": "Section",
+          "type": "string"
+        },
+        "stage": {
+          "default": "",
+          "maxLength": 100,
+          "title": "Stage",
+          "type": "string"
+        }
+      },
+      "title": "GameRoundRequest",
+      "type": "object"
+    },
+    "GameSectionList": {
+      "properties": {
+        "items": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Items",
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "title": "GameSectionList",
+      "type": "object"
+    },
+    "GameStage": {
+      "properties": {
+        "count": {
+          "title": "Count",
+          "type": "integer"
+        },
+        "key": {
+          "title": "Key",
+          "type": "string"
+        },
+        "title": {
+          "title": "Title",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "title",
+        "count"
+      ],
+      "title": "GameStage",
+      "type": "object"
+    },
+    "GameStory": {
+      "description": "The game's main scenario: one company, chapters in play order, the same stages\nin each. Send a chapter and stage key as `scenario` and `stage` to start a round.",
+      "properties": {
+        "chapters": {
+          "items": {
+            "$ref": "#/components/schemas/GameChapter"
+          },
+          "title": "Chapters",
+          "type": "array"
+        },
+        "company": {
+          "title": "Company",
+          "type": "string"
+        },
+        "intro": {
+          "title": "Intro",
+          "type": "string"
+        }
+      },
+      "required": [
+        "company",
+        "intro",
+        "chapters"
+      ],
+      "title": "GameStory",
+      "type": "object"
+    },
+    "GameTool": {
+      "description": "One answer as a tool the player can use: its text, what it proposes in a few\nwords (`label`, unjudged) and the cast members it is made of.",
+      "properties": {
+        "components": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Components",
+          "type": "array"
+        },
+        "icon": {
+          "default": "",
+          "title": "Icon",
+          "type": "string"
+        },
+        "index": {
+          "title": "Index",
+          "type": "integer"
+        },
+        "label": {
+          "default": "",
+          "title": "Label",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "index",
+        "text"
+      ],
+      "title": "GameTool",
+      "type": "object"
+    },
+    "HTTPValidationError": {
+      "properties": {
+        "detail": {
+          "items": {
+            "$ref": "#/components/schemas/ValidationError"
+          },
+          "title": "Detail",
+          "type": "array"
+        }
+      },
+      "title": "HTTPValidationError",
+      "type": "object"
+    },
+    "SearchRequest": {
+      "description": "The body of `POST /v1/search/...`: the same fields as the GET query, for texts\ntoo long for a URL (a pasted question, percent-encoded, can pass a proxy's limit).",
+      "properties": {
+        "assessment_type": {
+          "default": "",
+          "maxLength": 100,
+          "title": "Assessment Type",
+          "type": "string"
+        },
+        "limit": {
+          "default": 5,
+          "maximum": 50.0,
+          "minimum": 1.0,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "q": {
+          "maxLength": 2000,
+          "minLength": 2,
+          "title": "Q",
+          "type": "string"
+        },
+        "section": {
+          "default": "",
+          "maxLength": 200,
+          "title": "Section",
+          "type": "string"
+        }
+      },
+      "required": [
+        "q"
+      ],
+      "title": "SearchRequest",
+      "type": "object"
+    },
+    "ValidationError": {
+      "properties": {
+        "ctx": {
+          "title": "Context",
+          "type": "object"
+        },
+        "input": {
+          "title": "Input"
+        },
+        "loc": {
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ]
+          },
+          "title": "Location",
+          "type": "array"
+        },
+        "msg": {
+          "title": "Message",
+          "type": "string"
+        },
+        "type": {
+          "title": "Error Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "loc",
+        "msg",
+        "type"
+      ],
+      "title": "ValidationError",
+      "type": "object"
+    }
+  }
+}

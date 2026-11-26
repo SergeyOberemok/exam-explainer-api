@@ -7,8 +7,8 @@ one question by hand.
   `POST /examination/pipeline/backfill` would (`batch.run_simplification_job`, same code
   path, visible under `GET /examination/jobs/{job_id}`), so it UPDATES the question's
   records in the database: its objectives, story, decomposition (with its parts,
-  entities and icons), flow, resolution, rephrase and check, as far as the chosen
-  steps go. Without `--force` a step whose
+  entities and icons), flow, resolution and game document (compose), as far as the
+  chosen steps go (`--mode rephrase` for the rephrase and its check). Without `--force` a step whose
   result is current is skipped (`only_missing`).
 - `--dry-run`: calls the steps' compute functions only, feeding each step's result to the
   next in memory, and writes NOTHING. A step that is not run uses what is stored
@@ -28,7 +28,7 @@ Usage:
   --mode      a job mode (`batch.STAGES`), default "full"
   --force     a real run redoes every chosen step, current or not
   --show      print the question, its beat, decomposition, parts (with their roles),
-              entities with their icons, the resolution and the rephrase
+              entities with their icons, the resolution, the game card and the rephrase
   --mermaid   print the flows as Mermaid `flowchart TD`, to paste into any Mermaid viewer
   --out FILE  write everything as JSON
 
@@ -94,7 +94,10 @@ async def dry_run(args, ica: IcaClient, db, doc: dict) -> Result:
         await db["question_decomposition"].find_one({"question_id": question_id}),
     )
     story = await db["question_story"].find_one({"question_id": question_id})
-    async for step in run_dry(ica, doc, result, story, args.stage_list, args.model):
+    tags = await db["question_objectives"].find_one({"question_id": question_id})
+    async for step in run_dry(
+        ica, doc, result, story, args.stage_list, args.model, objectives_record=tags
+    ):
         print_step(step)
     if result.beat is None:
         result.beat = (story or {}).get("beat") or ""
@@ -127,6 +130,7 @@ async def real_run(args, ica: IcaClient, mongo: AsyncMongoClient, db, doc: dict)
         doc,
         await db["examination_simplified"].find_one({"question_id": question_id}),
         await db["question_decomposition"].find_one({"question_id": question_id}),
+        await db["game_question"].find_one({"question_id": question_id}),
     )
     story = await db["question_story"].find_one({"question_id": question_id})
     result.beat = (story or {}).get("beat") or ""
@@ -228,7 +232,22 @@ def show(doc: dict, result: Result) -> None:
         for o in r.options:
             gaps = f" gaps: {'; '.join(o.gaps)}" if o.gaps else ""
             print(f"  {chr(65 + o.index)} {o.verdict}: {o.reason}{gaps}")
+            print(f"      {o.impact}: {o.consequence or '(no consequence)'}")
         print(f"  rule: {r.rule}")
+    if result.game:
+        card = result.game["public"]
+        print("\nGAME CARD (compose)")
+        for part in card["briefing"]:
+            print(f"  {part['role']:<14}{part['text']}")
+        print(f"  {'ask':<14}{card['ask']['text']}")
+        names = {c["ref"]: f"{c['name']}<{c['icon']}>" for c in card["cast"]}
+        for tool in card["tools"]:
+            parts = ", ".join(names.get(r, r) for r in tool["components"])
+            print(f"  tool {chr(65 + tool['index'])} <{tool['icon']}> {tool['label']}  [{parts}]")
+        for outcome in result.game["key"]["outcomes"]:
+            print(f"  outcome {chr(65 + outcome['index'])} {outcome['impact']}: {outcome['consequence']}")
+    elif result.game_missing:
+        print(f"\nGAME CARD: not composed, missing {', '.join(result.game_missing)}")
     if result.check:
         print(f"\nCHECK: {result.check.get('verdict')}")
 

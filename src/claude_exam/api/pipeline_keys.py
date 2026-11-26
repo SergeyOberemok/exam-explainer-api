@@ -13,7 +13,7 @@ from typing import Literal, NamedTuple
 
 from pydantic import ValidationError
 
-from claude_exam.api import beat, check, decompose, flow, icons, objectives, rephrase, story
+from claude_exam.api import beat, check, compose, decompose, flow, icons, objectives, rephrase, story
 from claude_exam.api.game.domain import story_of
 from claude_exam.api.question_view import key_free
 from claude_exam.api.schemas import DecisionFlow, JobStage
@@ -28,6 +28,8 @@ class Records(NamedTuple):
     story: dict | None = None
     decomposition: dict | None = None
     simplified: dict | None = None
+    # The question's game document (`compose.py`, collection `game_question`).
+    game_question: dict | None = None
 
 
 def _flow(records: Records) -> DecisionFlow | None:
@@ -49,6 +51,7 @@ KEY_FIELD: dict[str, tuple[str, str]] = {
     "resolve": ("decomposition", "resolution_input_key"),
     "rephrase": ("simplified", "input_key"),
     "check": ("simplified", "check.input_key"),
+    "compose": ("game_question", "input_key"),
 }
 
 
@@ -66,6 +69,7 @@ def _has_result(stage: JobStage, records: Records) -> bool:
             "resolve": decomposition.get("resolution"),
             "rephrase": records.simplified,
             "check": simplified.get("check"),
+            "compose": records.game_question,
         }[stage]
     )
 
@@ -90,6 +94,8 @@ def expected_key(stage: JobStage, doc: dict, records: Records) -> str | None:
         return story.input_key(doc)
     if stage == "decompose":
         return decompose.input_key(doc)
+    if stage == "compose":
+        return compose.input_key(doc, records.objectives, records.story, records.decomposition)
     found = decompose.read_decomposition(records.decomposition, doc)
     if stage == "beat":
         return beat.input_key(doc, records.story, found)
@@ -107,7 +113,7 @@ def expected_key(stage: JobStage, doc: dict, records: Records) -> str | None:
     drawn = _flow(records)
     if drawn is None or not is_current("flow", doc, records):
         return None
-    return flow.resolve_input_key(doc, found, drawn)
+    return flow.resolve_input_key(doc, found, drawn, place)
 
 
 def is_current(stage: JobStage, doc: dict, records: Records) -> bool:

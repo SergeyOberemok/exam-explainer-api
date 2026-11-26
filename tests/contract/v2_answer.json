@@ -1,0 +1,102 @@
+{
+  "question_id": "65f0000000000000000000a1",
+  "answer_index": 1,
+  "is_correct": true,
+  "correct_index": 1,
+  "outcome": {
+    "index": 1,
+    "verdict": "correct",
+    "impact": "success",
+    "consequence": "The review goes well.",
+    "misconception": "",
+    "reason": "Because.",
+    "gaps": []
+  },
+  "story_line": "The agent reaches the API.",
+  "review": {
+    "explanation": "Why: SCENARIO: You are building a customer support resolution agent.\n\nQUESTION: Which header carries the API key?",
+    "feedbacks": [
+      "Feedback for Authorization.",
+      "Feedback for x-api-key.",
+      "Feedback for X-Key."
+    ]
+  },
+  "rule": "Plan first when edits need review.",
+  "answer_requirements": [
+    "No edit before review"
+  ],
+  "resolution_flow": {
+    "primary": "process_flow",
+    "secondary": [],
+    "reason": "No branching.",
+    "trigger": "Work starts",
+    "nodes": [
+      {
+        "id": "n1",
+        "type": "start",
+        "label": "Work starts",
+        "entity_ids": [],
+        "condition_id": "",
+        "source_status": "inferred",
+        "is_question": false,
+        "added": false
+      },
+      {
+        "id": "n2",
+        "type": "process",
+        "label": "Edits happen",
+        "entity_ids": [],
+        "condition_id": "",
+        "source_status": "inferred",
+        "is_question": false,
+        "added": false
+      },
+      {
+        "id": "n4",
+        "type": "process",
+        "label": "Plan before editing",
+        "entity_ids": [],
+        "condition_id": "",
+        "source_status": "inferred",
+        "is_question": false,
+        "added": true
+      },
+      {
+        "id": "n5",
+        "type": "end",
+        "label": "Reviewed changes",
+        "entity_ids": [],
+        "condition_id": "",
+        "source_status": "inferred",
+        "is_question": false,
+        "added": true
+      }
+    ],
+    "edges": [
+      {
+        "source": "n1",
+        "target": "n2",
+        "type": "next",
+        "label": "",
+        "source_status": "inferred",
+        "added": false
+      },
+      {
+        "source": "n2",
+        "target": "n4",
+        "type": "next",
+        "label": "",
+        "source_status": "inferred",
+        "added": true
+      },
+      {
+        "source": "n4",
+        "target": "n5",
+        "type": "next",
+        "label": "",
+        "source_status": "inferred",
+        "added": true
+      }
+    ]
+  }
+}

@@ -2,7 +2,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
 
-from claude_exam.api.dependencies import AsyncCollectionDep
+from claude_exam.api.dependencies import AsyncCollectionDep, AsyncSimplifiedCollectionDep
 from claude_exam.api.schemas import (
     SEARCH_TEXT_MAX,
     GameQuestionList,
@@ -61,6 +61,7 @@ async def search_by_body(
 @router.get("/game-questions")
 async def search_game(
     collection: AsyncCollectionDep,
+    simplified: AsyncSimplifiedCollectionDep,
     q: SearchText,
     section: Section = "",
     assessment_type: AssessmentType = "",
@@ -69,18 +70,20 @@ async def search_game(
     """Playable questions matching `q`, best first, without their answer key. To play one,
     add it to a round with `POST /v1/game/rounds/{round_id}/questions`."""
     return await search_game_questions(
-        collection, q, section=section, assessment_type=assessment_type, limit=limit
+        collection, simplified, q, section=section, assessment_type=assessment_type, limit=limit
     )
 
 
 @router.post("/game-questions")
 async def search_game_by_body(
-    collection: AsyncCollectionDep, body: SearchRequest
+    collection: AsyncCollectionDep,
+    simplified: AsyncSimplifiedCollectionDep, body: SearchRequest
 ) -> GameQuestionList:
     """`GET /v1/search/game-questions` with the fields in a JSON body: what the game
     sends, since a pasted question can be too long for a URL."""
     return await search_game_questions(
         collection,
+        simplified,
         body.q,
         section=body.section,
         assessment_type=body.assessment_type,

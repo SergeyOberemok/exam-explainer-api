@@ -4,7 +4,7 @@ An import with `manual=true` stores its questions with `pipeline_mode: "manual"`
 no job: the questions are processed one by one from the evaluation page. While held, a
 question is not playable (`game.domain.PLAYABLE_QUERY` / `is_playable`) and the backfills
 leave it alone unless asked (`include_manual`). It is released (the field removed) as soon
-as a real run leaves none of its required steps missing (`batch.release_if_ready`), or by
+as a real run leaves none of its steps missing (`batch.release_if_ready`), or by
 hand (`POST /evaluate/questions/{id}/release`).
 """
 
@@ -13,9 +13,9 @@ MANUAL = "manual"
 # Matches every question that is not held (also those without the field).
 NOT_HELD: dict = {FIELD: {"$ne": MANUAL}}
 HELD: dict = {FIELD: MANUAL}
-# Steps of the "full" job a held question may still lack when it is released: the
-# rephrase is optional, and its check is only about the rephrase.
-OPTIONAL_STAGES = frozenset({"rephrase", "check"})
+# Steps of the "full" job a held question may still lack when it is released: none. Its
+# last step composes the game document (`compose.py`), which needs every other one.
+OPTIONAL_STAGES: frozenset[str] = frozenset()
 
 
 def is_held(doc: dict) -> bool:

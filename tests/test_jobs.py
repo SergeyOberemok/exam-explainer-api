@@ -23,6 +23,7 @@ from pymongo import AsyncMongoClient
 from claude_exam.api import batch
 from claude_exam.api.batch import new_job, run_simplification_job
 from claude_exam.api.dependencies import (
+    get_async_game_question_collection,
     get_async_collection,
     get_async_decomposition_collection,
     get_async_jobs_collection,
@@ -122,6 +123,11 @@ class Coll:
         if doc is not None:
             self._apply(doc, update)
 
+    async def delete_one(self, query):
+        doc = self._first(query)
+        if doc is not None:
+            self.docs.remove(doc)
+
     async def find_one_and_update(self, query, update, upsert=False, return_document=None):
         doc = self._first(query)
         if doc is None:
@@ -142,6 +148,7 @@ class FakeMongo:
             "question_objectives": Coll(),
             "question_story": Coll(),
             "question_decomposition": Coll(),
+            "game_question": Coll(),
             "simplification_jobs": Coll(),
         }
 
@@ -283,7 +290,15 @@ def resolution_reply(n_answers=2, correct=(1,)):
             "edges": [_edge("n1", "n2"), _edge("n2", "n4", added=True), _edge("n4", "n5", added=True)],
         },
         "options": [
-            {"index": i, "verdict": "correct" if i in correct else "incorrect", "supported_requirements": [], "gaps": [], "reason": "Because."}
+            {
+                "index": i,
+                "verdict": "correct" if i in correct else "incorrect",
+                "supported_requirements": [],
+                "gaps": [],
+                "reason": "Because.",
+                "consequence": "The review goes well." if i in correct else "The edits land unreviewed.",
+                "impact": "success" if i in correct else "failure",
+            }
             for i in range(n_answers)
         ],
         "rule": "Plan first when edits need review.",
@@ -706,6 +721,7 @@ def client_for(mongo, ica, lock=None):
     app.dependency_overrides[get_async_objectives_collection] = lambda: db["question_objectives"]
     app.dependency_overrides[get_async_story_collection] = lambda: db["question_story"]
     app.dependency_overrides[get_async_decomposition_collection] = lambda: db["question_decomposition"]
+    app.dependency_overrides[get_async_game_question_collection] = lambda: db["game_question"]
     app.dependency_overrides[get_async_jobs_collection] = lambda: db["simplification_jobs"]
     app.dependency_overrides[get_async_mongo_client] = lambda: mongo
     app.dependency_overrides[get_ica_client] = lambda: ica
@@ -724,7 +740,7 @@ def upload(client, item=None, **params):
 @pytest.mark.parametrize(
     ("params", "calls"),
     [
-        ({}, ["objectives", "story", "decompose", "beat", "icons", "flow", "resolve", "rephrase", "check"]),
+        ({}, ["objectives", "story", "decompose", "beat", "icons", "flow", "resolve"]),
         ({"simplify": "false"}, []),
     ],
 )
@@ -778,13 +794,28 @@ def test_a_held_question_stays_held_while_a_required_step_is_missing():
     assert mongo.get_default_database()["examination"].docs[0]["pipeline_mode"] == "manual"
 
 
-def test_a_held_question_is_released_without_the_optional_rephrase():
+def test_a_held_question_waits_for_its_resolution():
+    # Without a resolution there is no game document, so releasing it would serve nothing.
     held = in_chapter(section=TAGGABLE, pipeline_mode="manual")
-    ica = ScriptedIca(rephrase=[HTTPException(status_code=400, detail="x")])
+    ica = ScriptedIca(resolve=[HTTPException(status_code=400, detail="x")])
     mongo = FakeMongo([held])
     client = client_for(mongo, ica)
     client.post("/examination/pipeline/backfill", params={"include_manual": "true"})
-    assert "pipeline_mode" not in mongo.get_default_database()["examination"].docs[0]
+    db = mongo.get_default_database()
+    assert db["examination"].docs[0]["pipeline_mode"] == "manual"
+    assert db["game_question"].docs == []
+
+
+def test_a_held_question_is_released_without_a_rephrase_once_composed():
+    held = in_chapter(section=TAGGABLE, pipeline_mode="manual")
+    mongo, ica = FakeMongo([held]), ScriptedIca()
+    client = client_for(mongo, ica)
+    client.post("/examination/pipeline/backfill", params={"include_manual": "true"})
+    db = mongo.get_default_database()
+    assert "pipeline_mode" not in db["examination"].docs[0]
+    assert "rephrase" not in ica.calls and db["examination_simplified"].docs == []
+    # Composed while held, then released: the game document follows the hold.
+    assert [d["held"] for d in db["game_question"].docs] == [False]
 
 
 def test_the_icons_backfill_skips_held_questions():

@@ -570,13 +570,16 @@ class EntitiesBackfill(BaseModel):
 
 
 # Job modes (`batch.STAGES` lists the steps of each):
-# "full": everything for a question, in the order objectives -> story -> decompose
-# (with its parts and entities) -> icons -> flow -> resolve -> rephrase -> check. This
-# is what an import starts. With `only_missing` each step is skipped where its result is
-# current, so the same job resumes a broken one.
+# "full": everything the game needs for a question, in the order objectives -> story ->
+# decompose (with its parts and entities) -> beat -> icons -> flow -> resolve -> compose
+# (the `game_question` document the game serves, `compose.py`). This is what an import
+# starts. With `only_missing` each step is skipped where its result is current, so the
+# same job resumes a broken one.
 # "decompose": the decomposition and what is built on it (icons, flow, resolution).
 # "icons", "flow", "resolve": one step of those (the flow also redoes its resolution).
-# "rephrase": write the rephrase and check it; "check": only check stored rephrases.
+# "compose": only the game document, from the stored records.
+# "rephrase": write the rephrase and check it; "check": only check stored rephrases
+# (study use; the game no longer reads them).
 # "objectives", "story": tag questions with learning objectives, or place them in their
 # chapter's stages; each writes its own collection and needs its catalog first.
 JobMode = Literal[
@@ -590,10 +593,20 @@ JobMode = Literal[
     "decompose",
     "flow",
     "resolve",
+    "compose",
 ]
 # Which step a per-question job error comes from.
 JobStage = Literal[
-    "objectives", "story", "beat", "decompose", "icons", "flow", "resolve", "rephrase", "check"
+    "objectives",
+    "story",
+    "beat",
+    "decompose",
+    "icons",
+    "flow",
+    "resolve",
+    "rephrase",
+    "check",
+    "compose",
 ]
 
 
@@ -857,12 +870,20 @@ class DecisionFlow(BaseModel):
     edges: list[FlowEdge]
 
 
+Impact = Literal["success", "partial", "failure"]
+
+
 class OptionEvaluation(BaseModel):
     index: int
     verdict: Literal["correct", "incorrect"]
     supported_requirements: list[str]
     gaps: list[str]
     reason: str
+    # What happens in the story if the player picks this option (one line), and how
+    # well it goes: "success" for the correct one, "partial" for a wrong one that would
+    # partly work, else "failure". Defaults read resolutions stored before they existed.
+    consequence: str = ""
+    impact: Impact = "failure"
 
 
 class Resolution(BaseModel):
@@ -936,6 +957,135 @@ class GameResolution(BaseModel):
     flow: GameFlow = GameFlow()
     options: list[OptionEvaluation] = []
     rule: str = ""
+
+
+# ---------- /v2/game: the composed question (`compose.py`, collection `game_question`) ----------
+# One document per question, built once by the pipeline's last step and served as it is.
+# `GameCard` is everything shown before answering; `GameCardKey` is the answer key, kept
+# in the round entry and sent only in the answer result. Flat and null-free (JsonUtility).
+
+
+class GameCastMember(BaseModel):
+    """One entity of the question's decomposition (concepts included), referenced by
+    `ref` from the briefing, the ask, the tools and the map."""
+
+    ref: str
+    name: str
+    # The decomposition type: actor, system, object, knowledge_source, artifact,
+    # external_service or concept.
+    type: str
+    aliases: list[str] = []
+    # Icon key from `icon_catalog.ICONS`; "" when the client should draw its default.
+    icon: str = ""
+    # Whether the scenario or the stem names it (False: only an answer does, so a client
+    # should show it only on that answer's tool).
+    scene: bool = True
+
+
+class GameAsk(BaseModel):
+    text: str
+    entity_ids: list[str] = []
+
+
+class GameTool(BaseModel):
+    """One answer as a tool the player can use: its text, what it proposes in a few
+    words (`label`, unjudged) and the cast members it is made of."""
+
+    index: int
+    text: str
+    label: str = ""
+    icon: str = ""
+    components: list[str] = []
+
+
+class GameCard(BaseModel):
+    """What the game shows before the question is answered, in the order a player meets
+    it: the beat, the briefing item by item, the ask, the tools, and the map."""
+
+    id: str
+    section: str
+    assessment_type: str
+    scenario: str = ""
+    stage: str = ""
+    objectives: list[str] = []
+    difficulty: int = 0
+    icon: str = ""
+    beat: str = ""
+    # The full original text (a fallback); `stem` is it without the scenario paragraph.
+    question: str
+    stem: str = ""
+    # The question's semantic parts without the ask: context, current state, constraint,
+    # problem, consequence and goal, in that order.
+    briefing: list[GamePart] = []
+    ask: GameAsk
+    cast: list[GameCastMember] = []
+    tools: list[GameTool] = []
+    map: GameFlow = Field(default_factory=lambda: GameFlow())
+
+
+class GameOutcome(BaseModel):
+    """What one answer leads to. Part of the answer key."""
+
+    index: int
+    verdict: Literal["correct", "incorrect"]
+    impact: Impact
+    # One line of story: what happens if the player uses this tool.
+    consequence: str = ""
+    # What picking it suggests the player got wrong ("" for the correct answer).
+    misconception: str = ""
+    reason: str = ""
+    gaps: list[str] = []
+
+
+class GameCardKey(BaseModel):
+    """The answer key of a composed question (never sent before answering)."""
+
+    correct: int
+    review: GameReview
+    outcomes: list[GameOutcome]
+    rule: str = ""
+    answer_requirements: list[str] = []
+    # The chapter's story lines after a correct / wrong answer ("" without them).
+    win: str = ""
+    fail: str = ""
+    # The map continued with the correct mechanism (nodes and edges marked `added`).
+    resolution_flow: GameFlow = Field(default_factory=lambda: GameFlow())
+
+
+class GameCardList(BaseModel):
+    items: list[GameCard]
+    total: int
+
+
+class GameCardRound(BaseModel):
+    round_id: str
+    items: list[GameCard]
+    total: int
+    fifty_fifty_charges: int
+
+
+class GameCardBatch(BaseModel):
+    batch_index: int
+    items: list[GameCard]
+    remaining: int
+
+
+class GameCardRoundQuestion(BaseModel):
+    item: GameCard
+
+
+class GameCardAnswerResult(BaseModel):
+    question_id: str
+    answer_index: int
+    is_correct: bool
+    correct_index: int
+    # The outcome of the answer given, and the story line that follows it.
+    outcome: GameOutcome
+    story_line: str = ""
+    review: GameReview
+    rule: str = ""
+    answer_requirements: list[str] = []
+    resolution_flow: GameFlow = Field(default_factory=lambda: GameFlow())
 
 
 GameQuestion.model_rebuild()

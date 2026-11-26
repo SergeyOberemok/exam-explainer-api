@@ -132,10 +132,32 @@ def test_entities_read_the_catalog_shape():
     assert q.entities.answers[0].entities[0].name == "Subagent"
 
 
-def client_with(exam=(), simple=(), rounds=None, tags=(), story=()):
+def placeholder_rephrase(original):
+    """A rephrase record the game never offers (its check found it `changed`): the
+    question is served, since the game serves only questions with a record, but plays as
+    its original."""
+    return {
+        "_id": ObjectId(),
+        "question_id": str(original["_id"]),
+        "section": original.get("section", ""),
+        "prompt": original.get("prompt") or {},
+        "check": {"verdict": "changed"},
+    }
+
+
+def with_records(exam, simple):
+    """`simple` plus a placeholder rephrase record for every question without one."""
+    covered = {d.get("question_id") for d in simple}
+    return [*simple, *(placeholder_rephrase(d) for d in exam if str(d["_id"]) not in covered)]
+
+
+def client_with(exam=(), simple=(), rounds=None, tags=(), story=(), rephrased=True):
+    """`rephrased=False` gives the questions in `exam` no rephrase record but those in
+    `simple`."""
+    simple = with_records(exam, list(simple)) if rephrased else list(simple)
     app.dependency_overrides[get_async_story_collection] = lambda: FakeCollection(list(story))
     app.dependency_overrides[get_async_collection] = lambda: FakeCollection(list(exam))
-    app.dependency_overrides[get_async_simplified_collection] = lambda: FakeCollection(list(simple))
+    app.dependency_overrides[get_async_simplified_collection] = lambda: FakeCollection(simple)
     app.dependency_overrides[get_async_objectives_collection] = lambda: FakeCollection(list(tags))
     rounds = rounds or FakeRounds()
     app.dependency_overrides[get_async_rounds_collection] = lambda: rounds
@@ -168,7 +190,8 @@ def test_bad_object_id_is_404():
 
 
 def test_sections_simplified_flag():
-    c = client_with(exam=[doc(section="A")], simple=[doc(section="B")])
+    a = doc(section="A")
+    c = client_with(exam=[a], simple=[doc(section="B", question_id=str(a["_id"]))])
     assert c.get("/v1/game/sections").json() == {"items": ["A"]}
     assert c.get("/v1/game/sections?simplified=true").json() == {"items": ["B"]}
 
@@ -251,7 +274,7 @@ def test_round_for_an_objective_without_questions_is_404():
 
 def test_added_question_carries_its_objectives():
     a, b = doc(), doc()
-    c, body = start_round([a], tags=[tags_of(b)])
+    c, body = start_round([a], simple=[placeholder_rephrase(b)], tags=[tags_of(b)])
     c.app.dependency_overrides[get_async_collection] = lambda: FakeCollection([a, b])
     added = c.post(f"/v1/game/rounds/{body['round_id']}/questions", json={"question_id": str(b["_id"])}).json()
     assert added["item"]["objectives"] == ["tools-errors"]
@@ -609,6 +632,44 @@ def test_a_question_held_for_manual_processing_is_not_played():
     assert only_held.status_code == 404 and only_held.json()["code"] == "no_questions"
 
 
+def test_only_questions_with_a_rephrase_record_are_played():
+    with_record, bare = doc(), doc()
+    simple = [placeholder_rephrase(with_record)]
+    c = client_with(exam=[bare, with_record], simple=simple, rephrased=False,
+                    tags=[tags_of(bare), tags_of(with_record)])
+    items = c.get("/v1/game/questions").json()["items"]
+    assert [q["id"] for q in items] == [str(with_record["_id"])]
+    counts = {o["key"]: o["count"] for o in c.get("/v1/game/objectives").json()["items"]}
+    assert counts["tools-errors"] == 1
+    body = c.post("/v1/game/rounds", json={"count": 10}).json()
+    assert [q["id"] for q in body["items"]] == [str(with_record["_id"])] and body["total"] == 1
+    # A record the check found `changed` still makes it playable, as the original only.
+    assert body["simplified"] == []
+    added = c.post(
+        f"/v1/game/rounds/{body['round_id']}/questions", json={"question_id": str(bare["_id"])}
+    )
+    assert added.status_code == 422 and added.json()["code"] == "question_not_playable"
+    batch = c.post(f"/v1/game/rounds/{body['round_id']}/batches", json={"batch_index": 1}).json()
+    assert batch["items"] == [] and batch["remaining"] == 0
+    none = client_with(exam=[bare], rephrased=False).post("/v1/game/rounds", json={"count": 10})
+    assert none.status_code == 404 and none.json()["code"] == "no_questions"
+
+
+def test_story_counts_only_questions_with_a_rephrase_record():
+    with_record, bare = story_doc("one?"), story_doc("two?")
+    c = client_with(exam=[with_record, bare], simple=[placeholder_rephrase(with_record)],
+                    story=[story_of_doc(with_record), story_of_doc(bare)], rephrased=False)
+    chapters = c.get("/v1/game/story").json()["chapters"]
+    assert sum(ch["count"] for ch in chapters) == 1
+
+
+def test_rephrase_browse_leaves_out_held_questions():
+    good, held = doc(), doc(pipeline_mode="manual")
+    c = client_with(exam=[good, held], simple=[simplified_of(good), simplified_of(held)])
+    items = c.get("/v1/game/simplified-questions").json()["items"]
+    assert [q["id"] for q in items] == [str(good["_id"])]
+
+
 def test_simplified_question_by_id():
     a = doc()
     c = client_with(simple=[simplified_of(a)])
@@ -738,7 +799,7 @@ def test_ordered_round_and_its_batches_follow_the_story():
 
 def test_added_question_carries_its_story():
     a, b = doc(), story_doc("added?")
-    c, body = start_round([a], story=[story_of_doc(b)])
+    c, body = start_round([a], simple=[placeholder_rephrase(b)], story=[story_of_doc(b)])
     c.app.dependency_overrides[get_async_collection] = lambda: FakeCollection([a, b])
     added = c.post(f"/v1/game/rounds/{body['round_id']}/questions", json={"question_id": str(b["_id"])}).json()
     assert (added["item"]["stage"], added["item"]["stem"]) == ("incident", "added?")

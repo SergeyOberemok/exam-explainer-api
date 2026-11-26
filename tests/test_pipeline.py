@@ -44,8 +44,8 @@ from claude_exam.api.story import ICA_ORDER, _build_system_message as story_syst
 
 pytestmark = pytest.mark.anyio
 # The ICA calls of a "full" job (the parts and entities are built from the
-# decomposition in code, so they make no call).
-FULL = ["objectives", "story", "decompose", "beat", "icons", "flow", "resolve", "rephrase", "check"]
+# decomposition in code and the game document is composed in code, so they make no call).
+FULL = ["objectives", "story", "decompose", "beat", "icons", "flow", "resolve"]
 
 
 @pytest.fixture
@@ -73,10 +73,10 @@ async def test_full_job_runs_every_step_in_order_and_stores_the_keys():
     assert ica.calls == FULL
     assert (job.mode, job.status, job.succeeded, job.failed) == ("full", "completed", 1, 0)
 
-    record = await stored(mongo, q)
-    assert record["input_key"]
-    assert record["check"]["verdict"] == "same" and record["check"]["picked"] == 1
-    assert record["check"]["input_key"]
+    # No rephrase any more; the last step composed the game document.
+    assert await stored(mongo, q) is None
+    game = mongo.get_default_database()["game_question"].docs
+    assert [d["question_id"] for d in game] == [str(q["_id"])] and game[0]["input_key"]
     record = await decomposed(mongo, q)
     assert record["icons_ica"] is not None and record["parts"] and record["flow"]
     # The story is ordered after the seeded records, by the difficulty just tagged.
@@ -87,10 +87,13 @@ async def test_full_job_run_again_does_only_what_is_missing():
     q = ready()
     mongo, ica = FakeMongo([q]), ScriptedIca(icons=[HTTPException(status_code=400, detail="x")])
     first = await run_job(mongo, ica, [q["_id"]], "full")
-    # The icon step failed; the check does not need it and ran.
+    # The icon step failed; the flow and resolution do not need it and ran, and the
+    # game document could not be composed without the icons.
     assert ica.calls == FULL and (first.failed, first.icons_failed) == (1, 1)
-    assert first.stages_failed == {"icons": 1} and first.errors[0].stage == "icons"
-    assert (await stored(mongo, q))["check"]["verdict"] == "same"
+    assert first.stages_failed == {"icons": 1, "compose": 1}
+    assert [e.stage for e in first.errors] == ["icons", "compose"]
+    assert "icons" in first.errors[1].detail
+    assert mongo.get_default_database()["game_question"].docs == []
 
     ica.calls.clear()
     again = await run_job(mongo, ica, [q["_id"]], "full", only_missing=True)
@@ -107,11 +110,12 @@ async def test_a_new_prompt_or_story_frame_redoes_the_rephrase_and_what_hangs_on
     q = ready()
     mongo, ica = FakeMongo([q]), ScriptedIca()
     await run_job(mongo, ica, [q["_id"]], "full")
+    await run_job(mongo, ica, [q["_id"]], "rephrase")
     # The company's intro changed (the frame the rephrase is written in; nothing bumped).
     monkeypatch.setattr(rephrase, "COMPANY_INTRO", rephrase.COMPANY_INTRO + " Now also in Lisbon.")
     ica.calls.clear()
     # Same text comes back, so its check still fits and is kept.
-    await run_job(mongo, ica, [q["_id"]], "full", only_missing=True)
+    await run_job(mongo, ica, [q["_id"]], "rephrase", only_missing=True)
     assert ica.calls == ["rephrase"]
 
     # The prompt changed, and another text comes back: it is checked again.
@@ -119,29 +123,30 @@ async def test_a_new_prompt_or_story_frame_redoes_the_rephrase_and_what_hangs_on
     ica.calls.clear()
     text = "Which mode, plan mode or acceptEdits mode, never edits?"
     ica.queues["rephrase"].append(reply({**SIMPLE, "question": text}))
-    await run_job(mongo, ica, [q["_id"]], "full", only_missing=True)
+    await run_job(mongo, ica, [q["_id"]], "rephrase", only_missing=True)
     assert ica.calls == ["rephrase", "check"]
     assert (await stored(mongo, q))["prompt"]["question"] == text
 
 
 async def test_a_failed_step_does_not_stop_the_steps_that_do_not_need_it():
     # No objectives for the section and no chapter for the paragraph: both are refused
-    # without a call, and everything else is still done (the rephrase in the company only).
+    # without a call, and everything else is still done (the resolution in the company
+    # only); the game document cannot be composed without them.
     q = outsider()
     mongo, ica = FakeMongo([q]), ScriptedIca()
     job = await run_job(mongo, ica, [q["_id"]], "full")
-    assert ica.calls == ["decompose", "icons", "flow", "resolve", "rephrase", "check"]
+    assert ica.calls == ["decompose", "icons", "flow", "resolve"]
     assert (job.status, job.failed) == ("completed", 1)
-    assert job.stages_failed == {"objectives": 1, "story": 1}
-    assert [e.status_code for e in job.errors] == [422, 422]
+    assert job.stages_failed == {"objectives": 1, "story": 1, "compose": 1}
+    assert [e.status_code for e in job.errors] == [422, 422, 422]
 
-    # Without a decomposition there are no icons, flow or resolution; the rephrase does
-    # not need one.
+    # Without a decomposition there are no icons, flow or resolution; the beat does not
+    # need one.
     q2 = ready()
     mongo, ica = FakeMongo([q2]), ScriptedIca(decompose=[HTTPException(status_code=400, detail="x")])
     job = await run_job(mongo, ica, [q2["_id"]], "full")
-    assert ica.calls == ["objectives", "story", "decompose", "beat", "rephrase", "check"]
-    assert job.stages_failed == {"decompose": 1} and job.status == "completed"
+    assert ica.calls == ["objectives", "story", "decompose", "beat"]
+    assert job.stages_failed == {"decompose": 1, "compose": 1} and job.status == "completed"
 
 
 async def test_questions_are_processed_side_by_side_and_all_counted():
@@ -398,7 +403,8 @@ async def run_check(*answers):
     q = ready()
     mongo = FakeMongo([q])
     ica = ScriptedIca(check=[reply({"reason": "r", "answer": a}) for a in answers])
-    job = await run_job(mongo, ica, [q["_id"]], "full")
+    await run_job(mongo, ica, [q["_id"]], "story")
+    job = await run_job(mongo, ica, [q["_id"]], "rephrase")
     return q, ica, job, (await stored(mongo, q))
 
 

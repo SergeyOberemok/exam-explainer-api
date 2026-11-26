@@ -125,8 +125,8 @@ class FakeCollection:
     def find(self, query=None, projection=None):
         return FakeCursor([d for d in self.docs if matches(d, query or {})])
 
-    async def distinct(self, field):
-        return sorted({d[field] for d in self.docs})
+    async def distinct(self, field, query=None):
+        return sorted({d[field] for d in self.docs if field in d and matches(d, query or {})})
 
 
 class FakeRounds:

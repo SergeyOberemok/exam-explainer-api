@@ -56,6 +56,9 @@ CHECK_SAME, CHECK_CHANGED, CHECK_HARD = "same", "changed", "hard"
 
 # Pre-filter for pick-one questions the game can show; `is_playable` has the final say.
 # A question held for manual processing (`hold.py`) is left out until it is released.
+# The game also serves only questions with a rephrase record (`examination_simplified`);
+# that lives in another collection, so the service adds it as an id filter
+# (`QuestionRepository.rephrased_ids`, `playable_query(only_ids=...)`).
 PLAYABLE_QUERY: dict = {
     "correct_response": {"$size": 1},
     "prompt.answers.1": {"$exists": True},
@@ -373,6 +376,12 @@ def filter_query(section: str | None, assessment_type: str | None) -> dict:
     return query
 
 
+def ids_filter(question_ids) -> dict:
+    """`{"$in": [...]}` on examination `_id` for question ids given as strings (invalid
+    ones left out)."""
+    return {"$in": [ObjectId(i) for i in question_ids if ObjectId.is_valid(i)]}
+
+
 def playable_query(
     section: str | None,
     assessment_type: str | None,
@@ -384,7 +393,7 @@ def playable_query(
     query = {**filter_query(section, assessment_type), **PLAYABLE_QUERY}
     ids: dict = {}
     if only_ids is not None:
-        ids["$in"] = [ObjectId(i) for i in only_ids if ObjectId.is_valid(i)]
+        ids.update(ids_filter(only_ids))
     if exclude_ids:
         ids["$nin"] = [ObjectId(i) for i in exclude_ids]
     if ids:

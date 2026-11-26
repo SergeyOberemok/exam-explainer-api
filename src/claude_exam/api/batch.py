@@ -10,6 +10,7 @@ from pymongo import AsyncMongoClient
 from claude_exam.api import hold, pipeline_keys
 from claude_exam.api.beat import beat_and_store
 from claude_exam.api.check import check_and_store
+from claude_exam.api.compose import compose_and_store, set_held
 from claude_exam.api.decompose import decompose_and_store, read_decomposition
 from claude_exam.api.flow import flow_and_store, resolve_and_store
 from claude_exam.api.game.domain import difficulty_of, story_of
@@ -38,9 +39,10 @@ DEFAULT_CONCURRENCY = 3
 # (with its parts and entities, built in code) comes before what is built on it: the
 # icons of its entities, the pre-answer flow and the resolution that continues it. The
 # beat (key-free, the line before the question) needs the story's stage and comes after
-# the decomposition, whose answer-only entities its leak check uses. The rephrase is
-# optional and comes last, set in the question's chapter, stage and beat; the check
-# tests it.
+# the decomposition, whose answer-only entities its leak check uses. The resolution sets
+# its per-answer consequences in the story, so it comes after the story. The last step
+# composes the game document (`compose.py`) from all of them. The rephrase and its check
+# are no longer part of it (the game does not read them); their own modes remain.
 STAGES: dict[JobMode, tuple[JobStage, ...]] = {
     "full": (
         "objectives",
@@ -50,9 +52,9 @@ STAGES: dict[JobMode, tuple[JobStage, ...]] = {
         "icons",
         "flow",
         "resolve",
-        "rephrase",
-        "check",
+        "compose",
     ),
+    "compose": ("compose",),
     "decompose": ("decompose", "icons", "flow", "resolve"),
     "icons": ("icons",),
     "flow": ("flow", "resolve"),
@@ -84,6 +86,8 @@ class Stores(NamedTuple):
     objectives: object
     story: object
     decomposition: object = None
+    # `game_question`, the composed documents the game serves (`compose.py`).
+    game_question: object = None
 
 
 def _now() -> datetime:
@@ -165,6 +169,7 @@ async def load_records(stores: Stores, doc: dict) -> Records:
         story=await find(stores.story),
         decomposition=await find(stores.decomposition),
         simplified=await find(stores.simplified),
+        game_question=await find(stores.game_question),
     )
 
 
@@ -183,9 +188,10 @@ async def missing_stages(mode: JobMode, stores: Stores, doc: dict) -> list[JobSt
 
 async def release_if_ready(stores: Stores, doc: dict) -> bool:
     """Releases a question held for manual processing (`hold.py`) into the game once no
-    required step of the "full" job is missing or outdated (the rephrase and its check
-    are optional). Returns whether it was released. Needs every store: a job of another
-    mode, whose `Stores` lack some, releases nothing."""
+    step of the "full" job is missing or outdated (the last of them composes the game
+    document, so the game has everything it serves). Returns whether it was released.
+    Needs every store: a job of another mode, whose `Stores` lack some, releases
+    nothing."""
     if not hold.is_held(doc) or None in stores:
         return False
     missing = await missing_stages("full", stores, doc)
@@ -194,6 +200,7 @@ async def release_if_ready(stores: Stores, doc: dict) -> bool:
     await stores.examination.update_one(
         {"_id": doc["_id"], **hold.HELD}, {"$unset": {hold.FIELD: ""}}
     )
+    await set_held(stores.game_question, str(doc["_id"]), False)
     return True
 
 
@@ -216,7 +223,15 @@ def _step(stage: JobStage, ica: IcaClient, stores: Stores, doc: dict, model_id: 
         await flow_and_store(ica, stores.decomposition, doc, model_id)
 
     async def resolved():
-        await resolve_and_store(ica, stores.decomposition, doc, model_id)
+        await resolve_and_store(
+            ica, stores.decomposition, doc, model_id, place=await _story(stores, doc)
+        )
+
+    async def composed():
+        records = await load_records(stores, doc)
+        await compose_and_store(
+            stores.game_question, doc, records.objectives, records.story, records.decomposition
+        )
 
     async def icons():
         await assign_and_store(ica, stores.decomposition, doc, model_id)
@@ -251,6 +266,7 @@ def _step(stage: JobStage, ica: IcaClient, stores: Stores, doc: dict, model_id: 
         "check": checked,
         "flow": drawn,
         "resolve": resolved,
+        "compose": composed,
     }[stage]
 
 
@@ -365,6 +381,7 @@ async def run_simplification_job(
         db["question_objectives"],
         db["question_story"],
         db["question_decomposition"],
+        db["game_question"],
     )
     jobs = db["simplification_jobs"]
 

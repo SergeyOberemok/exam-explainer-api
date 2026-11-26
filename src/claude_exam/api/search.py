@@ -6,10 +6,17 @@ from claude_exam.api.game.domain import (
     PLAYABLE_QUERY,
     answers_of,
     correct_indices,
+    ids_filter,
     is_playable,
     to_game_question,
 )
-from claude_exam.api.schemas import GameQuestionList, SearchHit, SearchResponse
+from claude_exam.api.schemas import (
+    GameCard,
+    GameCardList,
+    GameQuestionList,
+    SearchHit,
+    SearchResponse,
+)
 
 # Ranking is done by MongoDB: a weighted text index (`TEXT_INDEX_*`, created in the
 # app lifespan) scored with `$meta: "textScore"`.
@@ -87,15 +94,44 @@ async def search_questions(
 
 async def search_game_questions(
     collection: AsyncCollection,
+    simplified: AsyncCollection,
     query: str,
     *,
     section: str = "",
     assessment_type: str = "",
     limit: int = 5,
 ) -> GameQuestionList:
-    """Like `search_questions`, but only questions the game can play, in the /game
-    format: no answer key, so the player still has to answer them in a round."""
-    flt = {**build_filter(query, section, assessment_type), **PLAYABLE_QUERY}
+    """Like `search_questions`, but only questions the game can play (with a rephrase
+    record in `simplified`), in the /game format: no answer key, so the player still has
+    to answer them in a round."""
+    rephrased = await simplified.distinct("question_id")
+    flt = {
+        **build_filter(query, section, assessment_type),
+        **PLAYABLE_QUERY,
+        "_id": ids_filter(str(i) for i in rephrased),
+    }
     docs = await find_ranked(collection, flt, limit)
     items = [to_game_question(d) for d in docs if is_playable(d)]
     return GameQuestionList(items=items, total=len(items))
+
+
+async def search_game_cards(
+    collection: AsyncCollection,
+    cards: AsyncCollection,
+    query: str,
+    *,
+    section: str = "",
+    assessment_type: str = "",
+    limit: int = 5,
+) -> GameCardList:
+    """The `/v2` game search: the text is matched against `examination` (its text
+    index), only for questions the game serves (a `game_question` document, not held),
+    and the hits come back as their composed cards, best first, without the key."""
+    served = await cards.distinct("question_id", {"held": False})
+    flt = {**build_filter(query, section, assessment_type), "_id": ids_filter(served)}
+    docs = await find_ranked(collection, flt, limit)
+    ids = [str(d["_id"]) for d in docs]
+    found = await cards.find({"question_id": {"$in": ids}}, {"key": 0}).to_list()
+    by_id = {d["question_id"]: d for d in found}
+    items = [GameCard.model_validate(by_id[i]["public"]) for i in ids if i in by_id]
+    return GameCardList(items=items, total=len(items))

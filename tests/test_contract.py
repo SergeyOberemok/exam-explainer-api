@@ -245,11 +245,22 @@ V2_SEMANTIC["answer_options"] = [
     {"index": 1, "mechanism": "Send the key in its own header", "entity_ids": ["e1", "e3"]},
     {"index": 2, "mechanism": "Send the key in a custom header", "entity_ids": ["e1"]},
 ]
+V2_SEMANTIC["events"] = [
+    {"id": "v1", "name": "sends a request with the key", "actor_id": None, "target_id": "e1", "input_ids": [],
+     "output_ids": [], "sequence": 1, "source_status": "inferred", "evidence": ""}
+]
+V2_ICONS = {
+    "question": "api",
+    "answers": ["credential", "parameter", "tags"],
+    "entities": {"e1": "credential", "e2": "idea", "e3": "parameter"},
+    "actions": {"v1": "send"},
+}
 V2_RESOLUTION = resolution_reply(3, (1,))
 V2_RESOLUTION["options"][2]["impact"] = "partial"
 V2_DECOMPOSITION = {
     **DECOMPOSITION[0],
     "semantic": V2_SEMANTIC,
+    "icons": V2_ICONS,
     "icons_ica": {"model_id": "claude-haiku-5-5", "finish_reason": "stop", "total_tokens": 1, "attempts": 1},
     "flow": flow_reply(),
     "resolution": V2_RESOLUTION,

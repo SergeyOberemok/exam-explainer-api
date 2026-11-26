@@ -204,3 +204,47 @@ def test_the_resolution_is_set_in_the_question_s_place_in_the_story():
     assert flow.resolve_input_key(q, d, drawn, {"scenario": "pipeline", "stage": "build"}) != (
         flow.resolve_input_key(q, d, drawn, {"scenario": "pipeline", "stage": "scale"})
     )
+
+
+async def test_the_cast_and_the_actions_carry_the_icons_the_model_picked():
+    d = decomposition_with_plan_mode()
+    d["entities"].append(
+        {"id": "e5", "name": "Claude Code", "type": "actor", "aliases": [], "description": "Runs in CI",
+         "source_status": "inferred", "evidence": ""}
+    )
+
+    def event(id, name, sequence, **refs):
+        return {"id": id, "name": name, "actor_id": refs.get("actor"), "target_id": refs.get("target"),
+                "input_ids": refs.get("inputs", []), "output_ids": [], "sequence": sequence,
+                "source_status": "inferred", "evidence": ""}
+
+    d["events"] = [
+        event("v2", "applies the edits", 2, actor="e5", target="e3", inputs=["e5", "e3"]),
+        event("v1", "starts the job", 1, actor="e5"),
+        event("v9", "waits for a review", None, actor="e5"),
+    ]
+    picks = {"entities": {"e2": "rule", "e3": "plan", "e5": "terminal"}, "actions": {"v1": "run", "v2": "write"},
+             "question": "mode", "answers": ["write", "plan"]}
+    q = in_chapter(section=TAGGABLE)
+    mongo = FakeMongo([q])
+    job = await run_job(mongo, ScriptedIca(decompose=[reply(d)], icons=[reply(picks)]), [q["_id"]], "full")
+    assert (job.failed, job.errors) == (0, [])
+    card = GameCard.model_validate(mongo.get_default_database()["game_question"].docs[0]["public"])
+
+    cast = {c.ref: c.icon for c in card.cast}
+    # The concept has the model's icon now, not the lightbulb; e1 got no pick: its type's.
+    assert (cast["e2"], cast["e3"], cast["e5"], cast["e1"]) == ("rule", "plan", "terminal", "actor")
+    # The actions that happened, in order, with their verbs' icons; plan mode is only
+    # answer B's, so the action does not point at it.
+    assert [(a.ref, a.sequence, a.icon) for a in card.actions] == [("v1", 1, "run"), ("v2", 2, "write")]
+    assert (card.actions[1].actor, card.actions[1].target, card.actions[1].inputs) == ("e5", "", ["e5"])
+    assert [t.icon for t in card.tools] == ["write", "plan"] and card.icon == "mode"
+
+
+async def test_icons_stored_only_on_the_visual_entities_are_not_enough():
+    # Picked before the icon step stored its picks by id: the backfill picks them again.
+    q, mongo, _ = await composed()
+    db = mongo.get_default_database()
+    record = db["question_decomposition"].docs[0]
+    record.pop("icons")
+    assert compose.missing(q, *[db[c].docs[0] for c in ("question_objectives", "question_story")], record) == ["icons"]

@@ -241,6 +241,10 @@ def show(doc: dict, result: Result) -> None:
             print(f"  {part['role']:<14}{part['text']}")
         print(f"  {'ask':<14}{card['ask']['text']}")
         names = {c["ref"]: f"{c['name']}<{c['icon']}>" for c in card["cast"]}
+        for action in card.get("actions", []):
+            who = f" (by {names.get(action['actor'], action['actor'])})" if action["actor"] else ""
+            on = f" on {names.get(action['target'], action['target'])}" if action["target"] else ""
+            print(f"  action {action['sequence']} <{action['icon']}> {action['name']}{who}{on}")
         for tool in card["tools"]:
             parts = ", ".join(names.get(r, r) for r in tool["components"])
             print(f"  tool {chr(65 + tool['index'])} <{tool['icon']}> {tool['label']}  [{parts}]")

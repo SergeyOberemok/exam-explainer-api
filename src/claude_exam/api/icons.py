@@ -1,11 +1,14 @@
 """Icon picking for a question (an ICA call, after its decomposition).
 
 The model chooses, from the closed list in `icon_catalog.py`, one icon key for every
-entity of the decomposition (`entities.derive_entities`), one for the question and one
-for each answer. It reads the question through `KeyFreeQuestion`: icons are shown before
-the player answers. Only keys are stored, on the `question_decomposition` record (the
-`icon` fields inside `entities`, and `icons_ica`), so the picture a client draws for a
-key can change without touching the data; a new decomposition clears them.
+entity of the decomposition (concepts included), one for every action (the events of
+the scenario, `listed_actions`), one for the question and one for each answer. It picks
+by decomposition id. It reads the question through `KeyFreeQuestion` and the
+decomposition, which was written without the key: icons are shown before the player
+answers. Only keys are stored, on the `question_decomposition` record (`icons`, by id;
+the same keys in the `icon` fields inside `entities`, which /v1 reads; `icons_ica`), so
+the picture a client draws for a key can change without touching the data; a new
+decomposition clears them.
 """
 
 import logging
@@ -16,17 +19,26 @@ from fastapi import HTTPException
 from pymongo import ReturnDocument
 from pymongo.asynchronous.collection import AsyncCollection
 
-from claude_exam.api.decompose import matches
+from claude_exam.api.decompose import matches, read_decomposition, scenario_view
 from claude_exam.api.ica import IcaClient
-from claude_exam.api.icon_catalog import ICONS, KIND_FALLBACK, known
 from claude_exam.api.ica_json import ask_json
+from claude_exam.api.icon_catalog import (
+    ACTION_FALLBACK,
+    ICONS,
+    KIND_FALLBACK,
+    TYPE_FALLBACK,
+    known,
+)
 from claude_exam.api.question_view import KeyFreeQuestion, key_free
 from claude_exam.api.schemas import (
     AnswerEntities,
+    DecompEvent,
     DecompositionRecord,
     IcaMeta,
     IcaModelId,
     PromptEntities,
+    QuestionDecomposition,
+    QuestionIcons,
     VisualEntity,
 )
 from claude_exam.api.step_key import step_key
@@ -35,7 +47,7 @@ logger = logging.getLogger(__name__)
 
 # Bump when `parse_icons` changes what is stored from the same reply (the prompt and
 # the catalog are in the input key, `step_key.py`).
-CODE_VERSION = "2"
+CODE_VERSION = "3"
 
 _SYSTEM_MESSAGE = """\
 You choose icons from an icon catalog for one multiple-choice exam question, so a quiz \
@@ -48,13 +60,19 @@ ICON CATALOG - "key: what it stands for". Use ONLY these keys, spelled exactly.
 
 WHAT TO CHOOSE
 1. For every entity in the ENTITIES list: the key that best shows that thing. The \
-entity's kind (actor, object, action) and its other wordings are hints. Give the same \
-entity one key; give different entities different keys where the catalog allows it. \
-Use "actor", "object" or "action" only when no other key fits.
-2. For the QUESTION: the key for what the scenario is mainly about (the system or \
+entity's type (actor, system, object, knowledge_source, artifact, external_service, \
+concept) and its other wordings are hints. A concept (an option, a flag, a kind of \
+state, a property) gets the key of what it is, not a generic idea: a resume option is \
+"session", a --continue flag "cli-flag", state kept on a server "state". Give \
+different entities different keys where the catalog allows it: the icons are what \
+tells the answer cards apart. Use "actor", "object", "action" or "idea" only when no \
+other key fits.
+2. For every action in the ACTIONS list: the key of its verb, what is done (run, send, \
+write, retry, review, ...), not of who does it.
+3. For the QUESTION: the key for what the scenario is mainly about (the system or \
 situation being built or fixed) - never the key of something only an answer mentions, \
 and not the key of an answer card.
-3. For EACH ANSWER: the key for what THAT answer proposes to use or do - the thing \
+4. For EACH ANSWER: the key for what THAT answer proposes to use or do - the thing \
 that makes it different from the other answers, not the scenario they all share. \
 If all answers mention the subagent but one changes a prompt, one adds a hook and one \
 changes a setting, the icons are prompt, hook and settings. Answers of one question \
@@ -68,13 +86,15 @@ OUTPUT FORMAT - respond with ONLY a single valid JSON object and nothing else - 
 markdown fences, no prose, no comments. Exactly this schema:
 
 {
-  "entities": {"<entity name exactly as listed>": "<key>"},
+  "entities": {"<entity id as listed>": "<key>"},
+  "actions": {"<action id as listed>": "<key>"},
   "question": "<key>",
   "answers": [{{ANSWERS_SCHEMA}}]
 }
 
 Rules:
-- "entities" has one item per listed entity (an empty object when none are listed).
+- "entities" has one item per listed entity, "actions" one per listed action (an empty \
+object when none are listed), keyed by the id before the colon.
 - "answers" has exactly {{N}} keys, index-aligned with the answers (A is index 0).
 - Every value is a key from the catalog.
 - Output valid JSON only.\
@@ -91,6 +111,15 @@ def _build_system_message(n_answers: int) -> str:
     )
 
 
+def listed_actions(decomposition: QuestionDecomposition, q: KeyFreeQuestion) -> list[DecompEvent]:
+    """The actions a question is drawn with: the events of the scenario as the pre-answer
+    flow may use them (`decompose.scenario_view`: no reference to an entity only an
+    answer names) that happened (with a `sequence`; one without is what should happen,
+    left out as in `flow.flow_from`), in order."""
+    events = [e for e in scenario_view(decomposition, q).events if e.sequence is not None]
+    return sorted(events, key=lambda e: e.sequence)
+
+
 def _distinct(entities: PromptEntities) -> list[VisualEntity]:
     """Every entity once (by lower-cased name), in order of first mention."""
     seen: dict[str, VisualEntity] = {}
@@ -99,17 +128,37 @@ def _distinct(entities: PromptEntities) -> list[VisualEntity]:
     return list(seen.values())
 
 
-def _build_user_message(q: KeyFreeQuestion, entities: PromptEntities) -> str:
+def _also(aliases: list[str]) -> str:
+    return f" - also: {', '.join(aliases)}" if aliases else ""
+
+
+def _build_user_message(
+    q: KeyFreeQuestion, entities: PromptEntities, decomposition: QuestionDecomposition | None = None
+) -> str:
+    """The question, its answers, and what to pick for: every decomposition entity and
+    action by id (without a decomposition, the visual entities, by name)."""
     answers = "\n".join(f"  {chr(65 + i)}. {a}" for i, a in enumerate(q.answers))
-    listed = "\n".join(
-        f"- {e.name} ({e.kind})" + (f" - also: {', '.join(e.aliases)}" if e.aliases else "")
-        for e in _distinct(entities)
-    )
+    if decomposition is None:
+        listed = "\n".join(f"- {e.name}: {e.name} ({e.kind}){_also(e.aliases)}" for e in _distinct(entities))
+        actions = ""
+    else:
+        names = {e.id: e.name for e in decomposition.entities}
+        listed = "\n".join(f"- {e.id}: {e.name} ({e.type}){_also(e.aliases)}" for e in decomposition.entities)
+
+        def who(event: DecompEvent) -> str:
+            by = names.get(event.actor_id or "")
+            on = names.get(event.target_id or "")
+            return ", ".join([*([f"by {by}"] if by else []), *([f"on {on}"] if on else [])])
+
+        actions = "\n".join(
+            f"- {e.id}: {e.name}" + (f" ({who(e)})" if who(e) else "") for e in listed_actions(decomposition, q)
+        )
     return (
         f"Section: {q.section}\n\n"
         f"QUESTION:\n{q.stem or q.question}\n\n"
         f"ANSWERS:\n{answers}\n\n"
-        f"ENTITIES:\n{listed or '(none)'}"
+        f"ENTITIES:\n{listed or '(none)'}\n\n"
+        f"ACTIONS:\n{actions or '(none)'}"
     )
 
 
@@ -139,35 +188,72 @@ def _answer_only_icon(key: str, q: KeyFreeQuestion) -> bool:
 
 
 def parse_icons(
-    parsed: dict, entities: PromptEntities, n_answers: int, q: KeyFreeQuestion | None = None
+    parsed: dict,
+    entities: PromptEntities,
+    n_answers: int,
+    q: KeyFreeQuestion | None = None,
+    decomposition: QuestionDecomposition | None = None,
 ) -> PromptEntities:
+    """The visual entities with their icons (see `parse_picks`)."""
+    return parse_picks(parsed, entities, n_answers, q, decomposition)[0]
+
+
+def parse_picks(
+    parsed: dict,
+    entities: PromptEntities,
+    n_answers: int,
+    q: KeyFreeQuestion | None = None,
+    decomposition: QuestionDecomposition | None = None,
+) -> tuple[PromptEntities, QuestionIcons]:
     """
-    Validate the model's reply and return `entities` with the icons filled in.
-    A reply of the wrong shape raises 502. A single bad pick does not: an entity
-    without a known key gets the icon of its kind; an answer without one gets the icon
-    of its least shared entity, the question that of its first entity (None when it
-    has no entities, and the client then draws its default). The question's icon is
-    shown before answering, so one that is also an answer card's, or (with `q`) that
-    shows what only an answer talks about (`_answer_only_icon`), is replaced the same
-    way.
+    Validate the model's reply and return `entities` with the icons filled in, and the
+    picks by id (`QuestionIcons`: every entity of `decomposition`, and with `q` every
+    action). A reply of the wrong shape raises 502. A single bad pick does not: a
+    decomposition entity without a known key gets the icon of its type
+    (`TYPE_FALLBACK`), an action "action", a visual entity its decomposition entity's
+    icon (by `ref`), else its pick by name, else the icon of its kind; an answer
+    without one gets the icon of its least shared entity, the question that of its
+    first entity (None when it has no entities, and the client then draws its
+    default). The question's icon is shown before answering, so one that is also an
+    answer card's, or (with `q`) that shows what only an answer talks about
+    (`_answer_only_icon`), is replaced the same way.
     """
 
     def bad(msg: str) -> HTTPException:
         return HTTPException(status_code=502, detail=f"Icon output rejected: {msg}")
 
-    by_name = parsed.get("entities")
-    if not isinstance(by_name, dict):
-        raise bad("'entities' must be an object of entity name -> key")
+    by_id = parsed.get("entities")
+    if not isinstance(by_id, dict):
+        raise bad("'entities' must be an object of entity id -> key")
+    raw_actions = parsed.get("actions") or {}
+    if not isinstance(raw_actions, dict):
+        raise bad("'actions' must be an object of action id -> key")
     raw_answers = parsed.get("answers")
     if not isinstance(raw_answers, list) or len(raw_answers) != n_answers:
         got = len(raw_answers) if isinstance(raw_answers, list) else type(raw_answers).__name__
         raise bad(f"'answers' must be a list of {n_answers} keys, got {got}")
 
-    picks = {str(name).strip().lower(): known(key) for name, key in by_name.items()}
+    picks = {str(name).strip().lower(): known(key) for name, key in by_id.items()}
+    action_picks = {str(name).strip().lower(): known(key) for name, key in raw_actions.items()}
+
+    by_ref: dict[str, str] = {}
+    by_name: dict[str, str] = {}
+    actions: dict[str, str] = {}
+    if decomposition is not None:
+        for e in decomposition.entities:
+            key = picks.get(e.id.lower()) or picks.get(e.name.lower())
+            if key is None:
+                logger.info("no icon picked for entity %r; using its type", e.name)
+            by_ref[e.id] = key or TYPE_FALLBACK.get(e.type, KIND_FALLBACK["object"])
+            by_name.setdefault(e.name.lower(), by_ref[e.id])
+        if q is not None:
+            for event in listed_actions(decomposition, q):
+                actions[event.id] = action_picks.get(event.id.lower()) or ACTION_FALLBACK
+
     result = _aligned(entities, n_answers)
 
     def assign(entity: VisualEntity) -> None:
-        key = picks.get(entity.name.lower())
+        key = by_ref.get(entity.ref) or picks.get(entity.name.lower()) or by_name.get(entity.name.lower())
         if key is None:
             logger.info("no icon picked for entity %r; using its kind", entity.name)
         entity.icon = key or KIND_FALLBACK[entity.kind]
@@ -199,7 +285,13 @@ def parse_icons(
         result.question_icon = None
     if result.question_icon is None and result.question:
         result.question_icon = result.question[0].icon
-    return result
+    picked = QuestionIcons(
+        question=result.question_icon,
+        answers=[a.icon for a in result.answers],
+        entities=by_ref,
+        actions=actions,
+    )
+    return result, picked
 
 
 async def pick_icons(
@@ -208,25 +300,31 @@ async def pick_icons(
     entities: PromptEntities,
     model_id: IcaModelId,
     max_tokens: int | None = None,
-) -> tuple[PromptEntities, IcaMeta]:
-    """Ask the ICA chat model for the icons of one question and its entities; returns
-    the entities with `icon` fields set."""
-    system, user = messages(q, entities)
+    decomposition: QuestionDecomposition | None = None,
+) -> tuple[PromptEntities, QuestionIcons, IcaMeta]:
+    """Ask the ICA chat model for the icons of one question, its entities and actions;
+    returns the entities with `icon` fields set and the picks by id."""
+    system, user = messages(q, entities, decomposition)
     parsed, meta = await ask_json(
         ica, model_id, user, system=system, what="icons", max_tokens=max_tokens
     )
-    return parse_icons(parsed, entities, len(q.answers), q), meta
+    with_icons, picked = parse_picks(parsed, entities, len(q.answers), q, decomposition)
+    return with_icons, picked, meta
 
 
-def messages(q: KeyFreeQuestion, entities: PromptEntities) -> tuple[str, str]:
+def messages(
+    q: KeyFreeQuestion, entities: PromptEntities, decomposition: QuestionDecomposition | None = None
+) -> tuple[str, str]:
     """The (system, user) messages that pick the icons of a question. The entities'
     own icons are not in them, so the key is the same before and after picking."""
-    return _build_system_message(len(q.answers)), _build_user_message(q, entities)
+    return _build_system_message(len(q.answers)), _build_user_message(q, entities, decomposition)
 
 
-def input_key(q: KeyFreeQuestion, entities: PromptEntities) -> str:
-    """The input key of the icons of a question and its entities (`step_key.py`)."""
-    return step_key(CODE_VERSION, *messages(q, entities))
+def input_key(
+    q: KeyFreeQuestion, entities: PromptEntities, decomposition: QuestionDecomposition | None = None
+) -> str:
+    """The input key of the icons of a question, its entities and actions (`step_key.py`)."""
+    return step_key(CODE_VERSION, *messages(q, entities, decomposition))
 
 
 def stored_entities(record: dict | None) -> PromptEntities:
@@ -245,7 +343,7 @@ async def assign_and_store(
     max_tokens: int | None = None,
 ) -> DecompositionRecord:
     """Pick icons for the entities of a decomposed question and store them on its
-    `question_decomposition` record (the `icon` fields inside `entities`, and
+    `question_decomposition` record (`icons`, the `icon` fields inside `entities`, and
     `icons_ica`). 404 without a decomposition; errors propagate."""
     existing = await store.find_one({"question_id": str(doc["_id"])})
     # A record written for an earlier text of the question names other entities.
@@ -253,7 +351,8 @@ async def assign_and_store(
         raise HTTPException(status_code=404, detail="question has no current decomposition")
     q = key_free(doc)
     entities = stored_entities(existing)
-    with_icons, meta = await pick_icons(ica, q, entities, model_id, max_tokens)
+    decomposition = read_decomposition(existing, doc)
+    with_icons, picked, meta = await pick_icons(ica, q, entities, model_id, max_tokens, decomposition)
     # Conditional: the icons belong to the entities that were sent, so they must not
     # land on a record rewritten meanwhile (a new decomposition has new entities).
     stored = await store.find_one_and_update(
@@ -261,8 +360,9 @@ async def assign_and_store(
         {
             "$set": {
                 "entities": with_icons.model_dump(),
+                "icons": picked.model_dump(),
                 "icons_ica": meta.model_dump(),
-                "icons_input_key": input_key(q, entities),
+                "icons_input_key": input_key(q, entities, decomposition),
                 "updated_at": datetime.now(timezone.utc),
             }
         },

@@ -50,6 +50,7 @@ def test_no_pre_answer_prompt_carries_the_key():
     assert leaks(*decompose.messages(q)) == []
     assert leaks(*flow.flow_messages(q, d)) == []
     assert leaks(*icons.messages(q, PromptEntities())) == []
+    assert leaks(*icons.messages(q, PromptEntities(), d)) == []
     assert leaks(*rephrase.messages(q, PLACE)) == []
     assert leaks(*beat.messages(q, PLACE)) == []
     assert leaks(*check.messages(q, rephrased, PLACE)) == []

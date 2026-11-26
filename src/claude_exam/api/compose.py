@@ -56,16 +56,25 @@ from claude_exam.api.game.domain import (
     to_review,
     usable_story,
 )
+from claude_exam.api.icon_catalog import (
+    ACTION_FALLBACK,
+    KIND_FALLBACK,
+    TYPE_FALLBACK,
+    known,
+)
+from claude_exam.api.icons import listed_actions
 from claude_exam.api.leaks import answer_only_entities
 from claude_exam.api.question_view import key_free, the_ask
 from claude_exam.api.scenario_catalog import text_hash
 from claude_exam.api.schemas import (
+    GameAction,
     GameAsk,
     GameCard,
     GameCardKey,
     GameCastMember,
     GameOutcome,
     GameTool,
+    QuestionIcons,
     Resolution,
 )
 from claude_exam.api.step_key import step_key
@@ -76,10 +85,15 @@ CODE_VERSION = "1"
 # The order of the briefing: where the player is, what holds, what they may not change,
 # what goes wrong and what it costs, then what they want. The ask comes last, apart.
 BRIEFING_ORDER = ("context", "current_state", "constraint", "problem", "consequence", "goal")
-# An entity the icon step drew keeps its icon; the others (concepts, which it does not
-# draw) get one by type.
-_TYPE_ICON = {"actor": "actor", "concept": "idea"}
-_DEFAULT_ICON = "object"
+
+
+def _icons(record: dict | None) -> QuestionIcons | None:
+    """The icon step's picks by id (None before it ran, or when it stored icons only
+    the earlier way, on the visual entities)."""
+    try:
+        return QuestionIcons.model_validate((record or {})["icons"])
+    except (ValidationError, KeyError, TypeError):
+        return None
 
 
 def _resolution(doc: dict, record: dict) -> Resolution | None:
@@ -114,7 +128,7 @@ def missing(
     if semantic is None:
         lacks.append("decomposition")
     else:
-        if not (decomposition or {}).get("icons_ica"):
+        if _icons(decomposition) is None:
             lacks.append("icons")
         if not has_flow(decomposition):
             lacks.append("flow")
@@ -146,10 +160,7 @@ def compose(
     record = usable_story(doc, story) or {}
 
     entities = entities_of(decomposition, count)
-    icon_by_ref: dict[str, str] = {}
-    for entity in [*entities.question, *(e for a in entities.answers for e in a.entities)]:
-        if entity.ref and entity.icon:
-            icon_by_ref.setdefault(entity.ref, entity.icon)
+    picked = _icons(decomposition)
     answer_only = {e.id for e in answer_only_entities(semantic, q)}
     cast = [
         GameCastMember(
@@ -157,12 +168,29 @@ def compose(
             name=e.name,
             type=e.type,
             aliases=list(e.aliases),
-            icon=icon_by_ref.get(e.id) or _TYPE_ICON.get(e.type, _DEFAULT_ICON),
+            icon=known(picked.entities.get(e.id)) or TYPE_FALLBACK.get(e.type, KIND_FALLBACK["object"]),
             scene=e.id not in answer_only,
         )
         for e in semantic.entities
     ]
     refs = {member.ref for member in cast}
+
+    def ref(value: str | None) -> str:
+        return value if value in refs else ""
+
+    actions = [
+        GameAction(
+            ref=event.id,
+            name=event.name,
+            sequence=event.sequence or 0,
+            actor=ref(event.actor_id),
+            target=ref(event.target_id),
+            inputs=[i for i in event.input_ids if i in refs],
+            outputs=[i for i in event.output_ids if i in refs],
+            icon=known(picked.actions.get(event.id)) or ACTION_FALLBACK,
+        )
+        for event in listed_actions(semantic, q)
+    ]
 
     parts = parts_of(decomposition)
     asks = [p for p in parts if p.role == "ask"]
@@ -185,7 +213,9 @@ def compose(
                 index=i,
                 text=text or "",
                 label=option.mechanism if option else "",
-                icon=entities.answers[i].icon or "",
+                icon=known(picked.answers[i] if i < len(picked.answers) else None)
+                or entities.answers[i].icon
+                or "",
                 components=[r for r in (option.entity_ids if option else []) if r in refs],
             )
         )
@@ -198,13 +228,14 @@ def compose(
         stage=place["stage"],
         objectives=objectives_of(objectives),
         difficulty=difficulty_of(objectives),
-        icon=entities.question_icon or "",
+        icon=known(picked.question) or entities.question_icon or "",
         beat=place["beat"],
         question=(doc.get("prompt") or {}).get("question") or "",
         stem=place["stem"],
         briefing=briefing,
         ask=ask,
         cast=cast,
+        actions=actions,
         tools=tools,
         map=flow_of(doc, decomposition),
     )

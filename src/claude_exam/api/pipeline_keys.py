@@ -107,7 +107,7 @@ def expected_key(stage: JobStage, doc: dict, records: Records) -> str | None:
     if found is None:
         return None
     if stage == "icons":
-        return icons.input_key(key_free(doc), icons.stored_entities(records.decomposition))
+        return icons.input_key(key_free(doc), icons.stored_entities(records.decomposition), found)
     if stage == "flow":
         return flow.flow_input_key(doc, found)
     drawn = _flow(records)

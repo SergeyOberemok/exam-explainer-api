@@ -896,6 +896,20 @@ class Resolution(BaseModel):
     rule: str
 
 
+class QuestionIcons(BaseModel):
+    """The icon step's picks by decomposition id (`icons.py`): every entity of the
+    decomposition (concepts included) and every scenario event (an action), plus the
+    question's and each answer's. Keys from `icon_catalog.ICONS`."""
+
+    question: str | None = None
+    # One per answer, index-aligned.
+    answers: list[str | None] = []
+    # Decomposition entity id -> key, for every entity.
+    entities: dict[str, str] = {}
+    # Decomposition event id -> key, for the events of the scenario with a sequence.
+    actions: dict[str, str] = {}
+
+
 class DecompositionRecord(BaseModel):
     """A `question_decomposition` document: the decomposition and everything built on
     it, so all of it names the same entity ids. Writing the decomposition clears the
@@ -909,6 +923,9 @@ class DecompositionRecord(BaseModel):
     # `entities.derive_entities`); the icons are the `icon` fields inside `entities`.
     parts: list[SemanticPart] = []
     entities: PromptEntities = PromptEntities()
+    # The icon picks by id (None before the icon step ran, or on a record written
+    # before they were stored this way); `entities` carries the same keys for /v1.
+    icons: QuestionIcons | None = None
     icons_ica: IcaMeta | None = None
     icons_input_key: str | None = None
     # `step_key.py` input keys of the decomposition, the flow and the resolution.
@@ -982,6 +999,21 @@ class GameCastMember(BaseModel):
     scene: bool = True
 
 
+class GameAction(BaseModel):
+    """One event of the scenario, in the order it happened: who (`actor`) does what
+    (`name`) to what (`target`), with what it reads and makes. The refs are cast refs
+    ("" or empty when none)."""
+
+    ref: str
+    name: str
+    sequence: int = 0
+    actor: str = ""
+    target: str = ""
+    inputs: list[str] = []
+    outputs: list[str] = []
+    icon: str = ""
+
+
 class GameAsk(BaseModel):
     text: str
     entity_ids: list[str] = []
@@ -1019,6 +1051,8 @@ class GameCard(BaseModel):
     briefing: list[GamePart] = []
     ask: GameAsk
     cast: list[GameCastMember] = []
+    # What happened in the scenario, step by step (the decomposition's events).
+    actions: list[GameAction] = []
     tools: list[GameTool] = []
     map: GameFlow = Field(default_factory=lambda: GameFlow())
 

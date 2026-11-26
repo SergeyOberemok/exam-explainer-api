@@ -107,16 +107,17 @@ def test_system_message_lists_the_catalog_and_the_answer_count():
 
 def test_user_message_lists_each_entity_once_and_hides_the_answer_key():
     message = _build_user_message(VIEW, entities(answers=((CODE, EDITS), (PLAN,))))
-    assert message.count("- Claude Code (actor) - also: the CLI") == 1
-    assert "- plan mode (object)\n" in message + "\n"
+    assert message.count("- Claude Code: Claude Code (actor) - also: the CLI") == 1
+    assert "- plan mode: plan mode (object)\n" in message
     assert "A. acceptEdits mode" in message and "B. plan mode" in message
     assert DOC["prompt"]["explanation"] not in message and "Section: Domain 3" in message
 
 
 async def test_pick_icons_returns_entities_with_icons_and_meta():
     ica = FakeIca(reply(GOOD_ICONS))
-    result, meta = await pick_icons(ica, VIEW, entities(), "claude-haiku-5-5")
+    result, picked, meta = await pick_icons(ica, VIEW, entities(), "claude-haiku-5-5")
     assert result.answers[1].icon == "plan" and meta.total_tokens == 42
+    assert picked.answers == ["write", "plan"] and picked.question == "mode"
     assert "icon catalog" in ica.calls[0]["system"]
 
 
@@ -162,3 +163,80 @@ def test_the_question_icon_may_not_point_at_an_answer():
     assert parse_icons(reply_, entities(), 2, key_free(DOC)).question_icon == "terminal"
     # A key the stem itself names stays.
     assert parse_icons(GOOD_ICONS, entities(), 2, key_free(DOC)).question_icon == "mode"
+
+
+# --- picking by decomposition id: every entity (concepts too) and every action ---------
+
+
+def _decomposed():
+    from test_jobs import TAGGABLE, decomposition_with_plan_mode, in_chapter
+
+    from claude_exam.api.question_view import key_free
+    from claude_exam.api.schemas import QuestionDecomposition
+
+    d = decomposition_with_plan_mode()
+    d["entities"].append(
+        {"id": "e4", "name": "Review Gate", "type": "system", "aliases": [], "description": "Holds edits",
+         "source_status": "inferred", "evidence": ""}
+    )
+    # The one entity the scenario paragraph names.
+    d["entities"].append(
+        {"id": "e5", "name": "Claude Code", "type": "actor", "aliases": [], "description": "Runs in CI",
+         "source_status": "inferred", "evidence": ""}
+    )
+
+    def event(id, name, sequence, actor=None, target=None):
+        return {"id": id, "name": name, "actor_id": actor, "target_id": target, "input_ids": [],
+                "output_ids": [], "sequence": sequence, "source_status": "inferred", "evidence": ""}
+
+    d["events"] = [
+        event("v2", "applies the edits", 2, actor="e5", target="e3"),
+        event("v1", "opens the pull request", 1, actor="e5"),
+        event("v3", "reviews before editing", None, actor="e4"),
+    ]
+    return key_free(in_chapter(section=TAGGABLE)), QuestionDecomposition.model_validate(d)
+
+
+def test_the_prompt_lists_every_entity_and_the_actions_that_happened_by_id():
+    from claude_exam.api.icons import listed_actions
+
+    q, d = _decomposed()
+    message = _build_user_message(q, PromptEntities(), d)
+    assert "- e2: Ambiguity (concept)" in message and "- e3: plan mode (object)" in message
+    # In order; the one without a sequence (what should happen) is left out, and a
+    # reference to an entity only an answer names is gone (plan mode is answer B's).
+    assert "- v1: opens the pull request (by Claude Code)\n- v2: applies the edits (by Claude Code)" in message
+    assert "v3" not in message
+    assert [e.id for e in listed_actions(d, q)] == ["v1", "v2"]
+
+
+def test_concepts_and_actions_get_the_picked_keys_or_fall_back_by_type():
+    from claude_exam.api.icons import parse_picks
+
+    q, d = _decomposed()
+    reply_ = {
+        "entities": {"e1": "agent", "e2": "rule", "e3": "plan", "e4": "nope"},
+        "actions": {"v1": "pull-request", "v2": 5},
+        "question": "mode",
+        "answers": ["write", "plan"],
+    }
+    derived = PromptEntities.model_validate(
+        {"question": [{"name": "Agent", "kind": "actor", "ref": "e1"}],
+         "answers": [{"entities": []}, {"entities": [{"name": "plan mode", "kind": "object", "ref": "e3"}]}]}
+    )
+    with_icons, picked = parse_picks(reply_, derived, 2, q, d)
+    # The concept gets the model's pick, the system with an unknown one its type's.
+    assert picked.entities == {"e1": "agent", "e2": "rule", "e3": "plan", "e4": "server", "e5": "actor"}
+    assert picked.actions == {"v1": "pull-request", "v2": "action"}
+    # /v1's visual entities carry the same keys, by ref.
+    assert with_icons.question[0].icon == "agent" and with_icons.answers[1].entities[0].icon == "plan"
+    # Without a pick at all a concept is drawn as an idea.
+    _, bare = parse_picks({"entities": {}, "question": "mode", "answers": ["write", "plan"]}, derived, 2, q, d)
+    assert bare.entities["e2"] == "idea" and bare.actions == {"v1": "action", "v2": "action"}
+
+
+def test_actions_must_be_an_object():
+    q, d = _decomposed()
+    with pytest.raises(HTTPException) as exc:
+        parse_icons({**GOOD_ICONS, "actions": ["run"]}, entities(), 2, q, d)
+    assert exc.value.status_code == 502

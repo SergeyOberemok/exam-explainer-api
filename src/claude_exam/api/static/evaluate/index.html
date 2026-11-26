@@ -469,6 +469,14 @@ function iconsView(e) {
     (e.question || []).flatMap((x) => [`· ${x.name}`, x.icon ?? "—"]));
 }
 
+// The icon step's picks by decomposition id (entities, concepts included, and actions).
+function pickedIconsView(i) {
+  const pairs = (o) => Object.entries(o || {}).flatMap(([k, v]) => [k, v]);
+  return h("div", {},
+    h("h3", {}, "Entities"), h("div", { class: "kv" }, ...pairs(i.entities)),
+    h("h3", {}, "Actions"), Object.keys(i.actions || {}).length ? h("div", { class: "kv" }, ...pairs(i.actions)) : h("p", { class: "muted" }, "none"));
+}
+
 function decompositionView(d) {
   const sub = (title, body) => h("details", { open: true }, h("summary", {}, h("strong", {}, title)), body);
   const g = d.goals_and_requirements || {};
@@ -565,6 +573,12 @@ function gameView(g) {
       t.components.map(member).join(", "), t.text])),
     h("h3", {}, `Cast (${card.cast.length})`),
     table(["ref", "name", "type", "icon", "in the scene"], card.cast.map((c) => [c.ref, c.name, chip(c.type), c.icon, c.scene ? "yes" : "answer only"])),
+    h("h3", {}, `Actions (${(card.actions || []).length})`),
+    (card.actions || []).length
+      ? table(["#", "icon", "action", "by", "on", "reads", "makes"], card.actions.map((a) => [a.sequence, a.icon, a.name,
+        a.actor ? member(a.actor) : "—", a.target ? member(a.target) : "—", a.inputs.map(member).join(", ") || "—",
+        a.outputs.map(member).join(", ") || "—"]))
+      : h("p", { class: "muted" }, "no actions"),
     h("h3", {}, "4. Outcomes (after answering)"),
     table(["", "impact", "consequence", "misconception"], key.outcomes.map((o) => [h("strong", {}, LETTER(o.index), o.index === key.correct ? " ✓" : ""),
       chip(o.impact, IMPACT[o.impact]), o.consequence, o.misconception || "—"])),
@@ -592,6 +606,7 @@ function renderResults(r, source, steps, planned) {
     panel("parts", "Parts", source, r.parts?.length ? r.parts : null, partsView),
     panel("entities", "Actors / entities", source, r.entities, entitiesView),
     panel("icons", "Icons", source, r.entities, iconsView),
+    panel("picked_icons", "Icons by id (entities and actions)", source, r.icons, pickedIconsView),
     panel("decomposition", "Decomposition", source, r.decomposition, decompositionView),
     panel("beat", "Beat (before the question)", r.beat == null ? "stored" : source,
       (r.beat ?? current?.original?.story?.beat) || null, beatView),

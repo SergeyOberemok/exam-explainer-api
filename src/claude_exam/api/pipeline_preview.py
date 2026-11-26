@@ -41,11 +41,17 @@ from claude_exam.api.ica import IcaClient
 from claude_exam.api.icons import pick_icons, stored_entities
 from claude_exam.api.question_view import key_free
 from claude_exam.api.rephrase import quality_warnings, rephrase_item
-from claude_exam.api.scenario_catalog import scenario_of, split_scenario, stem_of, text_hash
+from claude_exam.api.scenario_catalog import (
+    scenario_of,
+    split_scenario,
+    stem_of,
+    text_hash,
+)
 from claude_exam.api.schemas import (
     DecisionFlow,
     IcaMeta,
     PromptEntities,
+    QuestionIcons,
     Rephrase,
     Resolution,
     SemanticPart,
@@ -62,6 +68,8 @@ class Result:
         self.decomposition = None
         self.parts: list[SemanticPart] = []
         self.entities: PromptEntities | None = None
+        # The icon picks by id (entities and actions), as the icon step stores them.
+        self.icons: QuestionIcons | None = None
         self.flow: DecisionFlow | None = None
         self.resolution: Resolution | None = None
         self.rephrase: Rephrase | None = None
@@ -79,15 +87,14 @@ class Result:
         if self.decomposition is None:
             return None
         entities = self.entities or PromptEntities()
-        drawn = entities.question_icon or any(
-            e.icon for e in [*entities.question, *(x for a in entities.answers for x in a.entities)]
-        )
+        drawn = self.icons is not None
         return {
             "question_id": str(doc["_id"]),
             "text_hash": text_hash(doc),
             "semantic": self.decomposition.model_dump(),
             "parts": [p.model_dump() for p in self.parts],
             "entities": entities.model_dump(),
+            "icons": self.icons.model_dump() if drawn else None,
             "icons_ica": {"dry": True} if drawn else None,
             "flow": self.flow.model_dump() if self.flow is not None else None,
             "resolution": self.resolution.model_dump() if self.resolution is not None else None,
@@ -118,6 +125,10 @@ class Result:
             except ValueError:
                 result.parts = []
             result.entities = stored_entities(decomposition)
+            try:
+                result.icons = QuestionIcons.model_validate(decomposition["icons"]) if decomposition.get("icons") else None
+            except ValueError:
+                result.icons = None
             if has_flow(decomposition):
                 result.flow = DecisionFlow.model_validate(decomposition["flow"])
             if has_resolution(decomposition):
@@ -138,6 +149,7 @@ class Result:
             "decomposition": dump(self.decomposition),
             "parts": [p.model_dump(mode="json") for p in self.parts],
             "entities": dump(self.entities),
+            "icons": dump(self.icons),
             "flow": dump(self.flow),
             "resolution": dump(self.resolution),
             "rephrase": dump(self.rephrase),
@@ -185,6 +197,7 @@ async def run_dry(
             result.decomposition, meta = await decompose_item(ica, doc, model)
             result.parts = parts_from(result.decomposition, q)
             result.entities = derive_entities(result.decomposition, q)
+            result.icons = None
             result.flow = result.resolution = None
             return meta
         if stage == "beat":
@@ -196,8 +209,8 @@ async def run_dry(
             return meta
         if stage == "icons":
             need(result.decomposition, "a decomposition")
-            result.entities, meta = await pick_icons(
-                ica, q, result.entities or PromptEntities(), model
+            result.entities, result.icons, meta = await pick_icons(
+                ica, q, result.entities or PromptEntities(), model, decomposition=result.decomposition
             )
             return meta
         if stage == "flow":

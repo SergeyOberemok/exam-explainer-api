@@ -514,6 +514,7 @@ async def store_decomposition(
                 "semantic_ica": meta.model_dump(),
                 "parts": [p.model_dump() for p in parts_from(decomposition, q)],
                 "entities": derive_entities(decomposition, q).model_dump(),
+                "icons": None,
                 "icons_ica": None,
                 "icons_input_key": None,
                 "input_key": input_key(doc),

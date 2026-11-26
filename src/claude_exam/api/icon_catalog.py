@@ -25,6 +25,19 @@ KEY_PATTERN = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 # The icon of an entity whose pick is missing or unknown, by its kind.
 KIND_FALLBACK = {"actor": "actor", "object": "object", "action": "action"}
 
+# The icon of a decomposition entity whose pick is missing or unknown, by its type
+# (`schemas.DecompEntityType`); an event (an action) gets "action".
+TYPE_FALLBACK = {
+    "actor": "actor",
+    "system": "server",
+    "object": "object",
+    "knowledge_source": "documentation",
+    "artifact": "file",
+    "external_service": "api",
+    "concept": "idea",
+}
+ACTION_FALLBACK = "action"
+
 ICONS: tuple[IconDef, ...] = (
     # --- fallbacks, one per entity kind ---
     IconDef("actor", "someone or something that acts, when nothing below fits", "circle-user-round"),
@@ -46,6 +59,7 @@ ICONS: tuple[IconDef, ...] = (
     # --- software and platforms ---
     IconDef("terminal", "Claude Code, CLI, shell, bash, a command line", "square-terminal"),
     IconDef("command", "a slash command, a named command, a menu of commands", "square-slash"),
+    IconDef("cli-flag", "a command-line flag or option such as --continue or -p", "flag-triangle-right"),
     IconDef("api", "an API, endpoint, integration, interface", "plug"),
     IconDef("sdk", "an SDK, library, package, framework", "boxes"),
     IconDef("server", "a server, MCP server, backend, host, service", "server"),
@@ -99,6 +113,7 @@ ICONS: tuple[IconDef, ...] = (
     IconDef("prompt", "a prompt, message, instruction, reply", "message-square"),
     IconDef("conversation", "conversation, chat, thread, message history", "messages-square"),
     IconDef("session", "a session, resumable state, history of one run", "history"),
+    IconDef("state", "saved state, progress or status kept between steps or runs", "save"),
     IconDef("context", "context window, layers of context", "layers"),
     IconDef("cache", "cache, prompt caching, stored copy for reuse", "hard-drive"),
     IconDef("memory", "memory, remembered facts", "memory-stick"),
@@ -164,6 +179,7 @@ ICONS: tuple[IconDef, ...] = (
     IconDef("escalate", "escalate, raise to a higher level", "circle-arrow-up"),
     IconDef("route", "route, routing, dispatch to the right place", "route"),
     IconDef("split", "split, run in parallel, fork", "split"),
+    IconDef("concurrency", "runs at the same time that can collide, race, shared resource", "shuffle"),
     IconDef("filter", "filter, classify, narrow down", "funnel"),
     IconDef("compress", "compact, summarize, shrink", "shrink"),
     IconDef("validate", "validate, verify, check against rules", "check-check"),
@@ -177,6 +193,7 @@ ICON_KEYS: frozenset[str] = frozenset(icon.key for icon in ICONS)
 assert len(ICON_KEYS) == len(ICONS), "icon keys must be unique"
 assert all(KEY_PATTERN.match(icon.key) for icon in ICONS), "icon keys are kebab-case"
 assert set(KIND_FALLBACK.values()) <= ICON_KEYS
+assert {*TYPE_FALLBACK.values(), ACTION_FALLBACK} <= ICON_KEYS
 
 
 def known(key: object) -> str | None:

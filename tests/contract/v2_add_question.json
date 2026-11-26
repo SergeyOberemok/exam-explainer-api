@@ -10,7 +10,7 @@
       "tools-errors"
     ],
     "difficulty": 2,
-    "icon": "credential",
+    "icon": "api",
     "beat": "The first API call of the support agent is refused.",
     "question": "SCENARIO: You are building a customer support resolution agent.\n\nQUESTION: Which header carries the API key?",
     "stem": "Which header carries the API key?",
@@ -53,8 +53,20 @@
         "name": "x-api-key",
         "type": "concept",
         "aliases": [],
-        "icon": "idea",
+        "icon": "parameter",
         "scene": false
+      }
+    ],
+    "actions": [
+      {
+        "ref": "v1",
+        "name": "sends a request with the key",
+        "sequence": 1,
+        "actor": "",
+        "target": "e1",
+        "inputs": [],
+        "outputs": [],
+        "icon": "send"
       }
     ],
     "tools": [
@@ -62,7 +74,7 @@
         "index": 0,
         "text": "Authorization",
         "label": "Send the key as a bearer token",
-        "icon": "permission",
+        "icon": "credential",
         "components": [
           "e1"
         ]
@@ -71,7 +83,7 @@
         "index": 1,
         "text": "x-api-key",
         "label": "Send the key in its own header",
-        "icon": "",
+        "icon": "parameter",
         "components": [
           "e1",
           "e3"

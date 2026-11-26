@@ -80,26 +80,27 @@ async def test_a_changed_upstream_result_outdates_what_was_built_from_it():
     db = mongo.get_default_database()
     question_id = {"question_id": str(q["_id"])}
 
-    # Other entities: the icons were picked for the old ones.
+    # Another name for an entity: the icons were picked for the old one; the resolution
+    # shows the decomposition and the game document the cast, so they are outdated too.
     record = await db["question_decomposition"].find_one(question_id)
-    entities = record["entities"]
-    entities["question"] = [{"name": "Another thing", "kind": "object", "aliases": []}]
-    await db["question_decomposition"].update_one(question_id, {"$set": {"entities": entities}})
-    assert await outdated(mongo, q) == ["icons"]
+    record["semantic"]["entities"][0]["name"] = "Another thing"
+    await db["question_decomposition"].update_one(question_id, {"$set": {"semantic": record["semantic"]}})
+    assert await outdated(mongo, q) == ["icons", "resolve", "compose"]
 
     # Another rephrase: its check, not the rephrase itself (its own inputs did not change).
     await db["examination_simplified"].update_one(
         question_id, {"$set": {"prompt.question": "Which mode never edits?"}}
     )
-    assert await outdated(mongo, q) == ["icons", "check"]
+    assert await outdated(mongo, q) == ["icons", "resolve", "compose", "check"]
 
 
 async def test_another_decomposition_outdates_the_flow_and_its_resolution():
     q, mongo, _ = await done()
     record = mongo.get_default_database()["question_decomposition"].docs[0]
     record["semantic"]["context"]["description"] = "Another reading."
-    # The flow's messages show the decomposition; the icons read the stored entities and
-    # the decomposition was asked from the same messages, so both stay current.
+    # The flow's messages show the decomposition; the icons read its entities and
+    # actions (not the context) and the decomposition was asked from the same messages,
+    # so both stay current.
     assert await outdated(mongo, q) == ["flow", "resolve"]
 
 

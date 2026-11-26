@@ -743,6 +743,61 @@
       "title": "FlowNode",
       "type": "object"
     },
+    "GameAction": {
+      "description": "One event of the scenario, in the order it happened: who (`actor`) does what\n(`name`) to what (`target`), with what it reads and makes. The refs are cast refs\n(\"\" or empty when none).",
+      "properties": {
+        "actor": {
+          "default": "",
+          "title": "Actor",
+          "type": "string"
+        },
+        "icon": {
+          "default": "",
+          "title": "Icon",
+          "type": "string"
+        },
+        "inputs": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Inputs",
+          "type": "array"
+        },
+        "name": {
+          "title": "Name",
+          "type": "string"
+        },
+        "outputs": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Outputs",
+          "type": "array"
+        },
+        "ref": {
+          "title": "Ref",
+          "type": "string"
+        },
+        "sequence": {
+          "default": 0,
+          "title": "Sequence",
+          "type": "integer"
+        },
+        "target": {
+          "default": "",
+          "title": "Target",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ref",
+        "name"
+      ],
+      "title": "GameAction",
+      "type": "object"
+    },
     "GameAnswerRequest": {
       "properties": {
         "answer_index": {
@@ -787,6 +842,14 @@
     "GameCard": {
       "description": "What the game shows before the question is answered, in the order a player meets\nit: the beat, the briefing item by item, the ask, the tools, and the map.",
       "properties": {
+        "actions": {
+          "default": [],
+          "items": {
+            "$ref": "#/components/schemas/GameAction"
+          },
+          "title": "Actions",
+          "type": "array"
+        },
         "ask": {
           "$ref": "#/components/schemas/GameAsk"
         },

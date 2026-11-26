@@ -167,7 +167,6 @@ def objectives_reply():
 def story_reply():
     return {
         "stage": "build",
-        "beat": "The team cannot agree on a working mode.",
         "win": "Reviews happen before edits.",
         "fail": "Edits land unreviewed.",
     }
@@ -288,6 +287,7 @@ class ScriptedIca:
         "icons": icons_reply,
         "objectives": objectives_reply,
         "story": lambda: story_reply(),
+        "beat": lambda: {"beat": "The team cannot agree on a working mode."},
         "check": lambda: {"reason": "It blocks edits.", "answer": "B"},
     }
 
@@ -298,6 +298,7 @@ class ScriptedIca:
         objectives=(),
         story=(),
         check=(),
+        beat=(),
         decompose=(),
         flow=(),
         resolve=(),
@@ -308,11 +309,13 @@ class ScriptedIca:
             "objectives": list(objectives),
             "story": list(story),
             "check": list(check),
+            "beat": list(beat),
             "decompose": list(decompose),
             "flow": list(flow),
             "resolve": list(resolve),
         }
         self.calls = []
+        self.prompts = []
         self.max_tokens = []
         self.formats = []
 
@@ -342,10 +345,12 @@ class ScriptedIca:
             else "icons" if "icon catalog" in system
             else "objectives" if "learning objective" in system
             else "story" if "story of a quiz game" in system
+            else "beat" if "the line shown just BEFORE" in system
             else "check" if "You answer one multiple-choice question" in system
             else "rephrase"
         )
         self.calls.append(kind)
+        self.prompts.append(prompt)
         self.max_tokens.append(max_tokens)
         item = self.queues[kind].pop(0) if self.queues[kind] else None
         if isinstance(item, Exception):
@@ -621,17 +626,19 @@ async def test_story_job_writes_a_record_and_skips_what_is_done(monkeypatch):
     q, plain = in_chapter(), outsider()
     mongo, ica = FakeMongo([q, plain]), ScriptedIca()
     job = await run_job(mongo, ica, [q["_id"], plain["_id"]], "story")
-    assert ica.calls == ["story"]  # none for the question of an unknown scenario
+    # The story, then its key-free beat; none for the question of an unknown scenario.
+    assert ica.calls == ["story", "beat"]
     assert (job.mode, job.succeeded, job.failed) == ("story", 1, 1)
     assert (job.errors[0].stage, job.errors[0].status_code) == ("story", 422)
     record = await story_record(mongo, q)
     assert (record["scenario"], record["stage"], record["origin"]) == ("pipeline", "build", "ica")
     assert (record["order"], record["text_hash"]) == (STORY_ORDER, text_hash(q))
     assert record["beat"] and record["ica"]["total_tokens"] == 7
+    assert record["beat_ica"]["total_tokens"] == 7 and record["beat_input_key"]
     assert await story_record(mongo, plain) is None
 
     job = await run_job(mongo, ica, [q["_id"]], "story", only_missing=True)
-    assert (job.skipped, job.succeeded) == (1, 0) and ica.calls == ["story"]
+    assert (job.skipped, job.succeeded) == (1, 0) and ica.calls == ["story", "beat"]
 
     # A changed prompt: redone, unless the record is a hand-written seed one.
     from claude_exam.api import story
@@ -639,13 +646,14 @@ async def test_story_job_writes_a_record_and_skips_what_is_done(monkeypatch):
     db = mongo.get_default_database()
     monkeypatch.setattr(story, "_SYSTEM_MESSAGE", story._SYSTEM_MESSAGE + "\nNew rule.")
     job = await run_job(mongo, ica, [q["_id"]], "story", only_missing=True)
-    assert (job.skipped, job.succeeded) == (0, 1) and ica.calls == ["story"] * 2
+    # The new story clears the beat, written for the old one: it is written again.
+    assert (job.skipped, job.succeeded) == (0, 1) and ica.calls == ["story", "beat"] * 2
     monkeypatch.setattr(story, "_SYSTEM_MESSAGE", story._SYSTEM_MESSAGE + "\nAnother rule.")
     await db["question_story"].update_one(
         {"question_id": str(q["_id"])}, {"$set": {"origin": "seed"}}
     )
     job = await run_job(mongo, ica, [q["_id"]], "story", only_missing=True)
-    assert job.skipped == 1 and ica.calls == ["story"] * 2
+    assert job.skipped == 1 and ica.calls == ["story", "beat"] * 2
 
 
 async def test_story_job_retries_a_rejected_reply():
@@ -653,7 +661,7 @@ async def test_story_job_retries_a_rejected_reply():
     bad = reply({**story_reply(), "stage": "finale"})
     mongo, ica = FakeMongo([q]), ScriptedIca(story=[bad])
     job = await run_job(mongo, ica, [q["_id"]], "story")
-    assert ica.calls == ["story", "story"] and job.succeeded == 1
+    assert ica.calls == ["story", "story", "beat"] and job.succeeded == 1
 
 
 def test_story_backfill_and_single_question_route():
@@ -703,7 +711,7 @@ def upload(client, item=None, **params):
 @pytest.mark.parametrize(
     ("params", "calls"),
     [
-        ({}, ["objectives", "story", "decompose", "icons", "flow", "resolve", "rephrase", "check"]),
+        ({}, ["objectives", "story", "decompose", "beat", "icons", "flow", "resolve", "rephrase", "check"]),
         ({"simplify": "false"}, []),
     ],
 )

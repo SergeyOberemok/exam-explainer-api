@@ -23,7 +23,6 @@ on the previous one (icons, flow, resolution).
 """
 
 import logging
-import re
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
@@ -35,6 +34,14 @@ from claude_exam.api.entities import derive_entities
 from claude_exam.api.exam_terms import lost_numbers
 from claude_exam.api.ica import IcaClient
 from claude_exam.api.ica_json import ask_validated, schema_skeleton
+from claude_exam.api.leaks import (
+    answer_only,
+    answer_only_entities,
+    leak,
+    leak_errors,
+    names_entity,
+    normalize,
+)
 from claude_exam.api.question_view import KeyFreeQuestion, as_view, key_free, the_ask
 from claude_exam.api.scenario_catalog import text_hash
 from claude_exam.api.schemas import (
@@ -54,7 +61,7 @@ logger = logging.getLogger(__name__)
 # decomposition is stored, so no key of their own covers how they are built. Bumping it
 # asks the model for every decomposition again. The flow and resolution's code versions
 # live in `flow.py`.
-CODE_VERSION = "1"
+CODE_VERSION = "2"
 MAX_ATTEMPTS = 3
 # A question is a short scenario; more means the model is listing nouns.
 MAX_ENTITIES = 12
@@ -166,16 +173,6 @@ def _build_user_message(q: KeyFreeQuestion) -> str:
         f"ANSWER OPTIONS (candidates, not facts - do not judge them):\n{choices}",
     ]
     return "\n\n".join(parts)
-
-
-_QUOTES = str.maketrans({"‘": "'", "’": "'", "“": '"', "”": '"', "`": ""})
-
-
-def normalize(text: str) -> str:
-    """Text as an evidence check compares it: lower case, straight quotes without
-    backticks or double quotes, whitespace collapsed, no trailing punctuation."""
-    text = text.translate(_QUOTES).replace('"', "").lower()
-    return re.sub(r"\s+", " ", text).strip(" .,;:")
 
 
 def _texts(decomposition: QuestionDecomposition) -> list[str]:
@@ -319,24 +316,19 @@ def decomposition_errors(doc: dict, parsed: dict) -> list[str]:
     # The scenario may not name what only an answer proposes, whatever its source
     # status: an inferred desired state "use a separate review instance" is the answer.
     # (Only entities an answer names: one no text names at all is the model's own word.)
-    answer_text = normalize(" ".join(answers))
-    answer_only = [
-        e for e in answer_only_entities(d, doc) if _in_scenario(e, answer_text)
-    ]
+    terms = answer_only(doc, d).narrow()
     scenario_texts = [
         ("context.description", d.context.description),
         *((f"{name}[{i}]", fact.text) for name, facts in groups.items() for i, fact in enumerate(facts)),
         *((f"event {e.id}", e.name) for e in d.events),
         *((f"condition {c.id}", c.description) for c in d.conditions),
     ]
-    for where, text in scenario_texts:
-        named = names_entity(text, answer_only)
-        if named:
-            errors.append(
-                f"{where} names {named!r}, which only an answer option mentions: what "
-                "the answers propose is not part of the scenario. Describe only what the "
-                "SCENARIO and QUESTION say"
-            )
+    errors += leak_errors(
+        scenario_texts,
+        terms,
+        "what the answers propose is not part of the scenario. Describe only what the "
+        "SCENARIO and QUESTION say",
+    )
 
     numbers = invented_numbers(source, _texts(d))
     if numbers:
@@ -389,40 +381,14 @@ def matches(record: dict | None, doc: dict) -> bool:
     return record is not None and record.get("text_hash") == text_hash(doc)
 
 
-def _in_scenario(entity, scenario: str) -> bool:
-    """Whether the scenario paragraph or the stem names this entity (by its evidence,
-    its name or one of its aliases)."""
-    terms = [entity.evidence, entity.name, *entity.aliases]
-    return any(len(normalize(t)) >= 3 and normalize(t) in scenario for t in terms)
-
-
-def names_entity(text: str, entities: list) -> str:
-    """The first name or alias of `entities` that `text` contains ("" when none); terms
-    under 4 characters are ignored, they match inside other words."""
-    normalized = normalize(text)
-    for entity in entities:
-        for term in (entity.name, *entity.aliases):
-            if len(normalize(term)) >= 4 and normalize(term) in normalized:
-                return term
-    return ""
-
-
-def answer_only_entities(decomposition: QuestionDecomposition, doc: KeyFreeQuestion | dict) -> list:
-    """The entities only an answer option names: what the answers propose (a separate
-    instance, a personal skills folder). Shown before answering they point at one."""
-    paragraph, stem, _answers = source_parts(doc)
-    scenario = normalize("\n".join([paragraph, stem]))
-    return [e for e in decomposition.entities if not _in_scenario(e, scenario)]
-
-
 def scenario_view(
     decomposition: QuestionDecomposition, doc: KeyFreeQuestion | dict
 ) -> QuestionDecomposition:
     """The decomposition as the pre-answer flow may use it: without the answer options,
     the entities only they name (and the references to those), and the open questions
     and success criteria that name such an entity."""
-    answer_only = answer_only_entities(decomposition, doc)
-    gone = {e.id for e in answer_only}
+    only = answer_only_entities(decomposition, doc)
+    gone = {e.id for e in only}
     view = decomposition.model_copy(deep=True)
     view.answer_options = []
     view.entities = [e for e in view.entities if e.id not in gone]
@@ -436,10 +402,10 @@ def scenario_view(
     ]
     view.problem.affected_entities = [i for i in view.problem.affected_entities if i not in gone]
     view.ambiguities_and_unknowns = [
-        a for a in view.ambiguities_and_unknowns if not names_entity(a, answer_only)
+        a for a in view.ambiguities_and_unknowns if not names_entity(a, only)
     ]
     view.question_intent.success_criteria = [
-        s for s in view.question_intent.success_criteria if not names_entity(s, answer_only)
+        s for s in view.question_intent.success_criteria if not names_entity(s, only)
     ]
     return view
 
@@ -462,9 +428,13 @@ def parts_from(decomposition: QuestionDecomposition, question: KeyFreeQuestion) 
     answering (`scenario_view`: no answer option and no entity only an answer names):
     the context, the current state, the symptoms, the consequences, the goals and the
     explicit conditions, in that order, then the question's own ask, word for word, as
-    the last part. Each part names the ids of the entities its text mentions. At most
-    `MAX_PARTS`: the ask always stays, the rest is cut from the end."""
+    the last part. Each part names the ids of the entities its text mentions. A part
+    that gives an answer away (`leaks.leak`) is dropped: built in code, it cannot be
+    sent back. At most `MAX_PARTS`: the ask always stays, the rest is cut from the end."""
     view = scenario_view(decomposition, question)
+    # What an answer names (as the decomposition gate): a part that names the model's
+    # own word for something is still the scenario.
+    terms = answer_only(question, decomposition).narrow()
     found: list[tuple[str, str]] = []
     if view.context.description.strip():
         found.append(("context", view.context.description))
@@ -479,7 +449,7 @@ def parts_from(decomposition: QuestionDecomposition, question: KeyFreeQuestion) 
     parts = [
         SemanticPart(role=role, text=text.strip(), entity_ids=_mentioned(text, view.entities))
         for role, text in found
-        if text.strip()
+        if text.strip() and not leak(text, terms)
     ][: MAX_PARTS - 1]
     parts.append(SemanticPart(role="ask", text=ask, entity_ids=_mentioned(ask, view.entities)))
     return parts

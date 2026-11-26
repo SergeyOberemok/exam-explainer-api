@@ -540,7 +540,9 @@ class QuestionStory(BaseModel):
     stage: str
     # Position inside the stage, lowest first.
     order: int
-    beat: str
+    # Shown before the question: hand-written in a seed record, else written by the
+    # key-free beat step (`beat.py`); "" until then (writing the story clears it).
+    beat: str = ""
     win: str
     fail: str
     origin: Literal["seed", "ica"]
@@ -548,6 +550,9 @@ class QuestionStory(BaseModel):
     input_key: str | None = None
     # None for a seed record.
     ica: IcaMeta | None = None
+    # The beat step's call and input key (None for a seed beat and before it ran).
+    beat_ica: IcaMeta | None = None
+    beat_input_key: str | None = None
     created_at: datetime
     updated_at: datetime
 
@@ -576,6 +581,7 @@ JobMode = Literal[
     "icons",
     "objectives",
     "story",
+    "beat",
     "check",
     "decompose",
     "flow",
@@ -583,7 +589,7 @@ JobMode = Literal[
 ]
 # Which step a per-question job error comes from.
 JobStage = Literal[
-    "objectives", "story", "decompose", "icons", "flow", "resolve", "rephrase", "check"
+    "objectives", "story", "beat", "decompose", "icons", "flow", "resolve", "rephrase", "check"
 ]
 
 

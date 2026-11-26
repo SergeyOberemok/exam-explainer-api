@@ -332,10 +332,15 @@ def test_parts_name_no_answer_only_entity_and_keep_the_ask_when_cut():
     d["entities"].append(
         {"id": "e3", "name": "plan mode", "type": "object", "aliases": [], "description": "", "source_status": "inferred", "evidence": ""}
     )
-    d["problem"]["symptoms"] = [_fact(f"Symptom {i} with plan mode.") for i in range(9)]
+    d["problem"]["symptoms"] = [
+        *(_fact(f"Symptom {i} with plan mode.") for i in range(3)),
+        *(_fact(f"Symptom {i} as it is.") for i in range(9)),
+    ]
     parts = parts_from(QuestionDecomposition.model_validate(d), key_free(q))
     assert len(parts) == MAX_PARTS and parts[-1].role == "ask"
-    # "plan mode" is what an answer proposes: no part points at it.
+    # "plan mode" is what an answer proposes: a part naming it gives that answer away,
+    # so it is dropped (not only its entity id).
+    assert all("plan mode" not in p.text for p in parts)
     assert all("e3" not in p.entity_ids for p in parts)
 
 

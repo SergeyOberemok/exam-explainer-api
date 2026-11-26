@@ -22,7 +22,7 @@ sent back with its faults. Stored on the question's `question_decomposition` rec
 
 import json
 import logging
-import re
+
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -32,10 +32,9 @@ from pymongo import ReturnDocument
 from pymongo.asynchronous.collection import AsyncCollection
 
 from claude_exam.api.decompose import (
-    answer_only_entities,
+    _mentioned,
     has_flow,
     invented_numbers,
-    names_entity,
     read_decomposition,
     scenario_view,
     source_parts,
@@ -43,14 +42,18 @@ from claude_exam.api.decompose import (
 from claude_exam.api.game.domain import correct_indices
 from claude_exam.api.ica import IcaClient
 from claude_exam.api.ica_json import ask_validated, schema_skeleton
+from claude_exam.api.leaks import answer_only, leak, leak_errors, points_at_correct
 from claude_exam.api.question_view import KeyFreeQuestion, key_free, the_ask
 from claude_exam.api.schemas import (
     DecisionFlow,
     DecompositionRecord,
+    FlowEdge,
+    FlowNode,
     IcaMeta,
     IcaModelId,
     QuestionDecomposition,
     Resolution,
+    Visualization,
 )
 from claude_exam.api.step_key import key_or_none, step_key
 from claude_exam.html_clean import clean_plain
@@ -364,19 +367,16 @@ def flow_errors(doc: dict, decomposition: QuestionDecomposition, parsed: dict) -
         return errors
     view = scenario_view(decomposition, doc)
     errors = graph_errors(flow, view, _source(doc), pre_answer=True)
-    answer_only = answer_only_entities(decomposition, doc)
     texts = [
         ("the trigger", flow.trigger),
         *((f"node {n.id}", n.label) for n in flow.nodes),
         *((f"edge {e.source}->{e.target}", e.label) for e in flow.edges),
     ]
-    for where, text in texts:
-        named = names_entity(text, answer_only)
-        if named:
-            errors.append(
-                f"{where} names {named!r}, which only an answer option mentions: the "
-                "flow before answering shows the scenario, not what the answers propose"
-            )
+    errors += leak_errors(
+        texts,
+        answer_only(doc, decomposition),
+        "the flow before answering shows the scenario, not what the answers propose",
+    )
     return errors
 
 
@@ -414,28 +414,12 @@ def resolution_errors(
     return errors
 
 
-_WORD = re.compile(r"[a-z][a-z0-9_-]{3,}")
-
-
 def leak_warning(doc: dict, flow: DecisionFlow) -> str:
-    """A soft check of a pre-answer flow (never rejects): when the flow's labels share
-    clearly more words with the correct answer than with any other, the flow may point
-    at it. "" when nothing stands out."""
-    labels = set(_WORD.findall(" ".join(n.label for n in flow.nodes).lower()))
-    answers = source_parts(doc)[2]
-    stem = set(_WORD.findall(source_parts(doc)[1].lower()))
-    overlap = [len((set(_WORD.findall(a.lower())) - stem) & labels) for a in answers]
-    correct = correct_indices(doc)
-    if len(correct) != 1 or len(overlap) < 2:
-        return ""
-    best = overlap[correct[0]]
-    others = max(o for i, o in enumerate(overlap) if i != correct[0])
-    if best >= 2 and best >= 2 * max(others, 1):
-        return (
-            f"the flow shares {best} words with the correct answer "
-            f"{chr(65 + correct[0])} and at most {others} with the others"
-        )
-    return ""
+    """A soft check of a pre-answer flow (never rejects): `leaks.points_at_correct` over
+    its node labels. "" when nothing stands out."""
+    return points_at_correct(
+        [n.label for n in flow.nodes], doc, correct_indices(doc), what="the flow"
+    )
 
 
 def prune_after_question(parsed: dict) -> dict:
@@ -507,9 +491,83 @@ def with_question_label(flow: DecisionFlow, doc: dict) -> DecisionFlow:
     return flow
 
 
+CODE_FLOW_REASON = "built in code from the decomposition"
+
+
+def _short(text: str) -> str:
+    """A label of at most `LABEL_WORD_LIMIT` words that does not ask (only the question
+    node asks)."""
+    words = " ".join(text.split()).rstrip("?").split()
+    return " ".join(words[:LABEL_WORD_LIMIT])
+
+
+def flow_from(decomposition: QuestionDecomposition, question: KeyFreeQuestion | dict) -> DecisionFlow:
+    """An EXPERIMENT (shown next to the model's flow on the evaluation page, never
+    stored or served): the pre-answer flow built in code from the decomposition's
+    `scenario_view`. A start node (the first event by `sequence`, else the context),
+    process nodes for the other events in order, output nodes for the symptoms, then the
+    question node labelled with the question's own ask; `next` edges in that order. A
+    text that gives an answer away (`leaks.leak`) is left out, so it should pass
+    `flow_errors` with nothing to repair."""
+    q = key_free(question) if isinstance(question, dict) else question
+    view = scenario_view(decomposition, q)
+    terms = answer_only(q, decomposition)
+    events = sorted(view.events, key=lambda e: (e.sequence is None, e.sequence or 0))
+    found = [("process", e.name, e.source_status) for e in events]
+    found += [("output", f.text, f.source_status) for f in view.problem.symptoms]
+    steps = [
+        (kind, _short(text), status)
+        for kind, text, status in found
+        if _short(text) and not leak(text, terms)
+    ]
+    # The first event starts the flow; without one, the context does.
+    if not steps or steps[0][0] != "process":
+        context = view.context.description
+        label = "" if leak(context, terms) else _short(context)
+        steps.insert(0, ("start", label or "The situation", "inferred"))
+    steps = [("start", *steps[0][1:]), *steps[1 : MAX_NODES - 1]]
+
+    nodes = [
+        FlowNode(
+            id=f"n{i + 1}",
+            type=kind,
+            label=label,
+            entity_ids=_mentioned(label, view.entities),
+            condition_id="",
+            source_status=status,
+            is_question=False,
+            added=False,
+        )
+        for i, (kind, label, status) in enumerate(steps)
+    ]
+    ask = the_ask(q) or q.stem
+    nodes.append(
+        FlowNode(
+            id=f"n{len(nodes) + 1}",
+            type="decision",
+            label=ask,
+            entity_ids=_mentioned(ask, view.entities),
+            condition_id="",
+            source_status="explicit",
+            is_question=True,
+            added=False,
+        )
+    )
+    edges = [
+        FlowEdge(source=a.id, target=b.id, type="next", label="", source_status="inferred", added=False)
+        for a, b in zip(nodes, nodes[1:])
+    ]
+    return DecisionFlow(
+        visualization=Visualization(primary="process_flow", secondary=[], reason=CODE_FLOW_REASON),
+        trigger=nodes[0].label,
+        nodes=nodes,
+        edges=edges,
+    )
+
+
 # Bump when the gates, `prune_after_question` or `with_question_label` change what is
 # stored from the same reply (the prompts are in the input keys, `step_key.py`).
-FLOW_CODE_VERSION = "1"
+FLOW_CODE_VERSION = "2"
 RESOLVE_CODE_VERSION = "1"
 
 

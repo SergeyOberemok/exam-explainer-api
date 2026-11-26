@@ -443,6 +443,21 @@ function resolutionView(r, source) {
     h("h3", {}, "Resolved flow"), diagram(source));
 }
 
+// An experiment: the pre-answer flow built in code from the decomposition (never stored
+// or served), with what the flow gate says about it, next to the model's flow.
+function codeFlowView(f, source, errors) {
+  return h("div", {},
+    errors.length
+      ? h("div", {}, h("h3", {}, "Flow gate"), h("ul", {}, errors.map((x) => h("li", { class: "error" }, x))))
+      : h("p", {}, chip("passes the flow gate", "ok")),
+    flowView(f, source));
+}
+
+// The line shown before the question (key-free beat step).
+function beatView(b) {
+  return h("p", {}, b);
+}
+
 function checkView(c) {
   return h("div", { class: "kv" }, "verdict", chip(c.verdict, c.verdict === "same" ? "ok" : c.verdict === "changed" ? "bad" : "warn"),
     "picked", c.picked ?? "—", "picked on original", c.picked_original ?? "—", "input key", c.input_key ?? "");
@@ -456,7 +471,11 @@ function renderResults(r, source, steps, planned) {
     panel("entities", "Actors / entities", source, r.entities, entitiesView),
     panel("icons", "Icons", source, r.entities, iconsView),
     panel("decomposition", "Decomposition", source, r.decomposition, decompositionView),
+    panel("beat", "Beat (before the question)", r.beat == null ? "stored" : source,
+      (r.beat ?? current?.original?.story?.beat) || null, beatView),
     panel("flow", "Flow (before answering)", source, r.flow, (f) => flowView(f, m.flow)),
+    panel("code_flow", "Flow built in code (experiment)", source, r.code_flow,
+      (f) => codeFlowView(f, m.code_flow, r.code_flow_errors || [])),
     panel("resolution", "Resolution", source, r.resolution, (x) => resolutionView(x, m.resolution)),
     panel("rephrase", "Rephrase", source, r.rephrase, rephraseView),
     panel("check", "Check of the rephrase", source, r.check, checkView),

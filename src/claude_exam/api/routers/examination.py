@@ -35,7 +35,7 @@ from claude_exam.api.dependencies import (
     QuestionObjectIdDep,
     SimplificationLockDep,
 )
-from claude_exam.api.decompose import decompose_and_store
+from claude_exam.api.decompose import decompose_and_store, read_decomposition
 from claude_exam.api.flow import flow_and_store, resolve_and_store
 from claude_exam.api.game.domain import story_of
 from claude_exam.api.icons import assign_and_store
@@ -54,6 +54,7 @@ from claude_exam.api.schemas import (
     SimplifiedQuestion,
 )
 from claude_exam.api.security import require_api_key
+from claude_exam.api.beat import beat_and_store
 from claude_exam.api.story import story_and_store
 
 # Study/admin routes: they need the API key when one is configured.
@@ -451,9 +452,11 @@ async def write_question_story(
 ) -> QuestionStory:
     """
     (Re)write the story of one question through ICA: the stage of its chapter and the
-    lines shown before and after it (and the chapter itself for a question without a
+    lines shown after it (and the chapter itself for a question without a
     scenario paragraph), replacing its `question_story` record (also a hand-written
-    seed record; load the seed again to restore that). 422 when the question's scenario
+    seed record; load the seed again to restore that). It clears the beat, written for
+    the old stage: write it again with `POST /examination/{id}/beat` (a story job does
+    both). 422 when the question's scenario
     paragraph is not in the scenario catalog. Answers 409 while a job runs, like the
     entity route.
     """
@@ -463,6 +466,33 @@ async def write_question_story(
     _refuse_while_a_job_runs(lock)
     async with lock:
         return await story_and_store(ica, story, doc, model_id, max_tokens)
+
+
+@router.post("/{question_id}/beat")
+async def write_question_beat(
+    question_id: QuestionObjectIdDep,
+    collection: AsyncCollectionDep,
+    story: AsyncStoryCollectionDep,
+    decomposition: AsyncDecompositionCollectionDep,
+    ica: IcaClientDep,
+    lock: SimplificationLockDep,
+    model_id: ModelIdQuery = "claude-haiku-5-5",
+    max_tokens: MaxTokensQuery = None,
+) -> QuestionStory:
+    """
+    (Re)write the beat of one question through ICA, key-free: the line shown before it,
+    stored on its `question_story` record (a seed's hand-written beat too). 404 without
+    a current story record (the stage comes from it); 409 while a job runs.
+    """
+    doc = await collection.find_one({"_id": question_id})
+    if doc is None:
+        raise HTTPException(status_code=404, detail="question not found")
+    _refuse_while_a_job_runs(lock)
+    async with lock:
+        record = await decomposition.find_one({"question_id": str(question_id)})
+        return await beat_and_store(
+            ica, story, doc, model_id, max_tokens, read_decomposition(record, doc)
+        )
 
 
 @router.post("/story/backfill", status_code=202)
@@ -491,7 +521,7 @@ async def backfill_story(
     question_ids: list[ObjectId] = []
     stores = Stores(collection, None, None, story)
     async for doc in collection.find({}):
-        if only_missing and await is_current("story", stores, doc):
+        if only_missing and not await missing_stages("story", stores, doc):
             continue
         question_ids.append(doc["_id"])
         if limit is not None and len(question_ids) >= limit:

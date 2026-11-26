@@ -28,16 +28,23 @@ from pymongo.asynchronous.collection import AsyncCollection
 from claude_exam.api.exam_terms import lost_identifiers, lost_names, lost_numbers
 from claude_exam.api.ica import IcaClient
 from claude_exam.api.ica_json import ask_validated
+from claude_exam.api.leaks import answer_only, leak
 from claude_exam.api.question_view import KeyFreeQuestion, as_view, key_free
 from claude_exam.api.scenario_catalog import BY_KEY, COMPANY, COMPANY_INTRO, STAGES
-from claude_exam.api.schemas import IcaMeta, IcaModelId, Rephrase, SimplifiedQuestion
+from claude_exam.api.schemas import (
+    IcaMeta,
+    IcaModelId,
+    QuestionDecomposition,
+    Rephrase,
+    SimplifiedQuestion,
+)
 from claude_exam.api.step_key import key_or_none, step_key
 
 logger = logging.getLogger(__name__)
 
-# Bump when the gates (`fidelity_errors`, `_validate_shape`) change what is stored from
-# the same reply (the prompt itself is in the input key, `step_key.py`).
-CODE_VERSION = "1"
+# Bump when the gates (`fidelity_errors`, `leak_errors`, `_validate_shape`) change what
+# is stored from the same reply (the prompt itself is in the input key, `step_key.py`).
+CODE_VERSION = "2"
 # How much longer than its original a rewritten answer may be before it is rejected.
 MAX_ANSWER_GROWTH = 1.25
 ANSWER_SLACK_CHARS = 15
@@ -254,6 +261,23 @@ def fidelity_errors(question: "KeyFreeQuestion | dict", parsed: dict) -> list[st
     return errors
 
 
+def leak_errors(
+    question: "KeyFreeQuestion | dict",
+    parsed: dict,
+    decomposition: QuestionDecomposition | None = None,
+) -> list[str]:
+    """The rephrased question is read before answering, so it must not give an answer
+    away (`leaks.leak`: name what only an answer proposes, with a decomposition, or
+    repeat an answer). Its answers are the answers and are not tested."""
+    reason = leak(parsed["question"], answer_only(question, decomposition).narrow())
+    if not reason:
+        return []
+    return [
+        f"the question {reason}: the question may not say what any answer proposes; "
+        "keep that in the answers only"
+    ]
+
+
 def quality_warnings(question: "KeyFreeQuestion | dict", parsed: dict) -> list[str]:
     """
     Everything a report should show about a shape-valid reply: the hard problems of
@@ -307,17 +331,19 @@ async def rephrase_item(
     model_id: IcaModelId,
     max_tokens: int | None = None,
     place: dict | None = None,
+    decomposition: QuestionDecomposition | None = None,
 ) -> tuple[Rephrase, IcaMeta]:
     """Rephrase one examination question and return the validated text plus the call
     metadata (counting the tokens of every attempt). A reply that breaks
-    `fidelity_errors` is sent back with what was wrong; when the last of `MAX_ATTEMPTS`
-    replies still breaks it the call raises 502."""
+    `fidelity_errors` or `leak_errors` (which knows the answer-only entities when
+    `decomposition` is given) is sent back with what was wrong; when the last of
+    `MAX_ATTEMPTS` replies still breaks it the call raises 502."""
     q = key_free(doc)
     system, user = messages(q, place)
 
     def validate(parsed: dict) -> list[str]:
         _validate_shape(parsed, len(q.answers))
-        return fidelity_errors(q, parsed)
+        return fidelity_errors(q, parsed) + leak_errors(q, parsed, decomposition)
 
     parsed, meta = await ask_validated(
         ica,
@@ -342,11 +368,12 @@ async def rephrase_and_store(
     model_id: IcaModelId,
     max_tokens: int | None = None,
     place: dict | None = None,
+    decomposition: QuestionDecomposition | None = None,
 ) -> SimplifiedQuestion:
     """Rephrase one examination question and upsert it into `examination_simplified`
     (keyed by `question_id`; an existing record keeps its `created_at`). A check of an
     earlier text goes with it unless the text came back the same."""
-    rephrase, meta = await rephrase_item(ica, doc, model_id, max_tokens, place)
+    rephrase, meta = await rephrase_item(ica, doc, model_id, max_tokens, place, decomposition)
     question_id = str(doc["_id"])
     existing = await simplified.find_one({"question_id": question_id})
     old = (existing or {}).get("prompt") or {}

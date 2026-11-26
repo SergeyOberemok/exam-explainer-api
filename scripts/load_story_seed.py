@@ -53,7 +53,7 @@ def seed_updates(items: list[dict], docs: list[dict]) -> tuple[list[tuple[str, d
             )
             continue
         try:
-            fields = parse_story(item, answers_of(doc), max_words=SEED_LINE_WORDS)
+            fields = parse_story(item, answers_of(doc), max_words=SEED_LINE_WORDS, with_beat=True)
         except HTTPException as exc:
             problems.append(f"{name}: {exc.detail}")
             continue

@@ -42,10 +42,11 @@ DOC = {
 }
 GOOD = {
     "stage": "incident",
-    "beat": "Support leads complain that easy cases keep landing on their desks.",
     "win": "Escalations follow the case.",
     "fail": "Easy cases keep landing on the wrong desk.",
 }
+# A seed item also carries its hand-written beat.
+SEED = {**GOOD, "beat": "Support leads complain that easy cases keep landing on their desks."}
 
 
 @pytest.fixture
@@ -90,7 +91,11 @@ def test_text_hash_follows_the_text_not_the_id_or_the_spacing():
 
 
 def test_parse_returns_the_fields_to_store():
-    assert parse_story({**GOOD, "beat": "  two   spaces  ", "extra": 1}, DOC["prompt"]["answers"]) == {
+    answers = DOC["prompt"]["answers"]
+    # The model writes no beat (`beat.py` does, key-free); a beat in a reply is ignored.
+    assert parse_story({**GOOD, "beat": "x", "extra": 1}, answers) == GOOD
+    # A seed item carries its hand-written beat.
+    assert parse_story({**GOOD, "beat": "  two   spaces  "}, answers, with_beat=True) == {
         **GOOD, "beat": "two spaces",
     }
 
@@ -100,19 +105,30 @@ def test_parse_returns_the_fields_to_store():
     [
         {"stage": "finale"},
         {"stage": None},
-        {"beat": ""},
         {"win": None},
         {"fail": 5},
         {"fail": " ".join(["word"] * (MAX_LINE_WORDS + 1))},
         {"win": "x" * 300},
-        # The beat must not give an answer away.
-        {"beat": "Someone suggests: write explicit  ESCALATION criteria."},
-        {"beat": "Someone suggests to lower the temperature."},
     ],
 )
 def test_parse_rejects_what_would_break_the_story(changes):
     with pytest.raises(HTTPException) as exc:
         parse_story({**GOOD, **changes}, DOC["prompt"]["answers"], correct=[1])
+    assert exc.value.status_code == 502
+
+
+@pytest.mark.parametrize(
+    "beat",
+    [
+        "",
+        # A seed beat must not give an answer away.
+        "Someone suggests: write explicit  ESCALATION criteria.",
+        "Someone suggests to lower the temperature.",
+    ],
+)
+def test_parse_rejects_a_seed_beat_that_is_empty_or_names_an_answer(beat):
+    with pytest.raises(HTTPException) as exc:
+        parse_story({**GOOD, "beat": beat}, DOC["prompt"]["answers"], correct=[1], with_beat=True)
     assert exc.value.status_code == 502
 
 
@@ -138,10 +154,10 @@ def test_messages_carry_the_chapter_and_the_stem_only():
 
 
 def test_record_fields_identify_the_question():
-    fields = record_fields(DOC, GOOD, "seed", 3)
+    fields = record_fields(DOC, SEED, "seed", 3)
     assert (fields["scenario"], fields["order"], fields["origin"]) == ("support", 3, "seed")
     assert fields["text_hash"] == text_hash(DOC) and fields["scenario_origin"] == "text"
-    assert fields["beat"] == GOOD["beat"]
+    assert fields["beat"] == SEED["beat"]
 
 
 async def test_write_story_returns_fields_and_meta():
@@ -190,10 +206,10 @@ def test_seed_updates_order_items_inside_a_stage_and_report_problems():
     first, second = DOC, with_question(f"SCENARIO: {PARAGRAPH} QUESTION: Another one?")
     second = {**second, "_id": ObjectId()}
     items = [
-        {**GOOD, "hash": text_hash(second), "scenario": "support"},
-        {**GOOD, "hash": text_hash(first), "scenario": "support"},
-        {**GOOD, "hash": text_hash(first), "scenario": "support"},
-        {**GOOD, "hash": "nobody", "scenario": "support"},
+        {**SEED, "hash": text_hash(second), "scenario": "support"},
+        {**SEED, "hash": text_hash(first), "scenario": "support"},
+        {**SEED, "hash": text_hash(first), "scenario": "support"},
+        {**SEED, "hash": "nobody", "scenario": "support"},
     ]
     updates, problems = loader().seed_updates(items, [first, second])
     assert [(qid, f["order"], f["origin"]) for qid, f in updates] == [
@@ -201,8 +217,8 @@ def test_seed_updates_order_items_inside_a_stage_and_report_problems():
     ]
     assert len(problems) == 2 and "listed twice" in problems[0] and "no question" in problems[1]
 
-    wrong_chapter = [{**GOOD, "hash": text_hash(first), "scenario": "research"}]
-    bad_line = [{**GOOD, "hash": text_hash(first), "scenario": "support", "beat": ""}]
+    wrong_chapter = [{**SEED, "hash": text_hash(first), "scenario": "research"}]
+    bad_line = [{**SEED, "hash": text_hash(first), "scenario": "support", "beat": ""}]
     for seed in (wrong_chapter, bad_line):
         updates, problems = loader().seed_updates(seed, [first])
         assert updates == [] and len(problems) == 1

@@ -45,7 +45,7 @@ from claude_exam.api.story import ICA_ORDER, _build_system_message as story_syst
 pytestmark = pytest.mark.anyio
 # The ICA calls of a "full" job (the parts and entities are built from the
 # decomposition in code, so they make no call).
-FULL = ["objectives", "story", "decompose", "icons", "flow", "resolve", "rephrase", "check"]
+FULL = ["objectives", "story", "decompose", "beat", "icons", "flow", "resolve", "rephrase", "check"]
 
 
 @pytest.fixture
@@ -140,7 +140,7 @@ async def test_a_failed_step_does_not_stop_the_steps_that_do_not_need_it():
     q2 = ready()
     mongo, ica = FakeMongo([q2]), ScriptedIca(decompose=[HTTPException(status_code=400, detail="x")])
     job = await run_job(mongo, ica, [q2["_id"]], "full")
-    assert ica.calls == ["objectives", "story", "decompose", "rephrase", "check"]
+    assert ica.calls == ["objectives", "story", "decompose", "beat", "rephrase", "check"]
     assert job.stages_failed == {"decompose": 1} and job.status == "completed"
 
 

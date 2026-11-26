@@ -4,8 +4,12 @@ chained in memory, each step's result feeding the next, and NOTHING is written.
 Used by `scripts/run_pipeline.py --dry-run` and the prompt evaluation page
 (`routers/evaluate.py`). A step that is not run uses what is stored (`stages=("flow",)`
 draws the flow of the stored decomposition). The objectives and story steps have no dry
-form: their stored records are used. A dry decomposition also builds its parts and
-entities, as storing it would.
+form: their stored records are used (the beat is written on the stored story's stage).
+A dry decomposition also builds its parts and entities, as storing it would.
+
+With a decomposition the result also carries `code_flow`, an experiment: the pre-answer
+flow built in code (`flow.flow_from`) with what the flow gate says about it, shown next
+to the model's flow and never stored.
 """
 
 import time
@@ -13,6 +17,7 @@ from collections.abc import AsyncIterator, Sequence
 
 from fastapi import HTTPException
 
+from claude_exam.api.beat import beat_item
 from claude_exam.api.check import check_item
 from claude_exam.api.decompose import (
     decompose_item,
@@ -22,7 +27,14 @@ from claude_exam.api.decompose import (
     read_decomposition,
 )
 from claude_exam.api.entities import derive_entities
-from claude_exam.api.flow import flow_item, leak_warning, mermaid, resolve_item
+from claude_exam.api.flow import (
+    flow_errors,
+    flow_from,
+    flow_item,
+    leak_warning,
+    mermaid,
+    resolve_item,
+)
 from claude_exam.api.game.domain import answers_of, correct_indices, story_of
 from claude_exam.api.ica import IcaClient
 from claude_exam.api.icons import pick_icons, stored_entities
@@ -38,7 +50,7 @@ from claude_exam.api.schemas import (
 )
 from claude_exam.html_clean import clean_plain, clean_question
 
-DRY_STAGES = ("decompose", "icons", "flow", "resolve", "rephrase", "check")
+DRY_STAGES = ("decompose", "beat", "icons", "flow", "resolve", "rephrase", "check")
 
 
 class Result:
@@ -52,7 +64,16 @@ class Result:
         self.resolution: Resolution | None = None
         self.rephrase: Rephrase | None = None
         self.check: dict | None = None
+        # The beat written by a dry run (None: the stored story's beat is used).
+        self.beat: str | None = None
         self.steps: list[dict] = []
+
+    def code_flow(self, doc: dict) -> tuple[DecisionFlow | None, list[str]]:
+        """The experiment: the flow built in code and the flow gate's verdict on it."""
+        if self.decomposition is None:
+            return None, []
+        built = flow_from(self.decomposition, doc)
+        return built, flow_errors(doc, self.decomposition, built.model_dump())
 
     @classmethod
     def from_records(cls, doc: dict, simplified: dict | None, decomposition: dict | None) -> "Result":
@@ -88,12 +109,17 @@ class Result:
             "resolution": dump(self.resolution),
             "rephrase": dump(self.rephrase),
             "check": _plain(self.check),
+            "beat": self.beat,
         }
         if doc is not None:
             answers = [clean_plain(a) for a in answers_of(doc)]
+            built, errors = self.code_flow(doc)
+            out["code_flow"] = dump(built)
+            out["code_flow_errors"] = errors
             out["mermaid"] = {
                 "flow": mermaid(self.flow, answers) if self.flow is not None else "",
                 "resolution": mermaid(self.resolution.flow) if self.resolution is not None else "",
+                "code_flow": mermaid(built, answers) if built is not None else "",
             }
         return out
 
@@ -125,6 +151,13 @@ async def run_dry(
             result.entities = derive_entities(result.decomposition, q)
             result.flow = result.resolution = None
             return meta
+        if stage == "beat":
+            result.beat, meta = await beat_item(
+                ica, doc, story, model, decomposition=result.decomposition
+            )
+            # The rephrase and the check are set after it, as in a job.
+            story["beat"] = result.beat
+            return meta
         if stage == "icons":
             need(result.decomposition, "a decomposition")
             result.entities, meta = await pick_icons(
@@ -144,7 +177,9 @@ async def run_dry(
             result.resolution, meta = await resolve_item(ica, doc, result.decomposition, result.flow, model)
             return meta
         if stage == "rephrase":
-            result.rephrase, meta = await rephrase_item(ica, doc, model, place=story)
+            result.rephrase, meta = await rephrase_item(
+                ica, doc, model, place=story, decomposition=result.decomposition
+            )
             result.check = None
             warnings.extend(quality_warnings(q, result.rephrase.model_dump()))
             return meta

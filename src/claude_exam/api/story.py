@@ -3,9 +3,11 @@ before and after it (an ICA call of its own, or the hand-written seed).
 
 The chapter comes from the question's text (`scenario_catalog.scenario_of`); for a
 question without a scenario paragraph the model picks one of the chapters. This step
-adds the rest: the `stage` of the chapter, a `beat` shown before the question, and the
-`win` / `fail` line shown after the answer. The question and its answers are never
-changed. Records live in `question_story`, one per question.
+adds the `stage` of the chapter and the `win` / `fail` line shown after the answer; it
+reads the key, which those lines need. The `beat` shown before the question is written
+by its own key-free step (`beat.py`) onto the same record, and writing the story clears
+it. The question and its answers are never changed. Records live in `question_story`,
+one per question.
 
 A record has an `origin`. "seed" records come from `data/story_seed.json`
 (`scripts/load_story_seed.py`) and a backfill leaves them alone; "ica" records are
@@ -23,6 +25,7 @@ from pymongo.asynchronous.collection import AsyncCollection
 from claude_exam.api.game.domain import answers_of, correct_indices
 from claude_exam.api.ica import IcaClient
 from claude_exam.api.ica_json import ask_json
+from claude_exam.api.leaks import MIN_ANSWER_CHARS
 from claude_exam.api.scenario_catalog import (
     COMPANY,
     COMPANY_INTRO,
@@ -44,7 +47,7 @@ logger = logging.getLogger(__name__)
 
 # Bump when `parse_story` / `record_fields` change what is stored from the same reply
 # (the prompt itself is in the input key, `step_key.py`).
-CODE_VERSION = "1"
+CODE_VERSION = "2"
 # The prompt asks for less than the parser allows: a model counts words loosely.
 PROMPT_LINE_WORDS = 16
 MAX_LINE_WORDS = 20
@@ -52,14 +55,14 @@ MAX_LINE_WORDS = 20
 SEED_LINE_WORDS = 30
 MAX_LINE_CHARS = 220
 # An answer this long found inside a line means the line gives the answer away.
-MIN_LEAK_CHARS = 20
+MIN_LEAK_CHARS = MIN_ANSWER_CHARS
 # Seed records are ordered by hand from 1. Records written by the model come after them,
 # easier questions first: `ICA_ORDER` plus the question's difficulty (0 when untagged).
 ICA_ORDER = 1000
 
 _SYSTEM_MESSAGE = """\
 You place one multiple-choice exam question into the story of a quiz game and write \
-three short story lines for it. The exam is about Claude Code, the Claude Agent SDK, \
+the two short story lines shown after it is answered. The exam is about Claude Code, the Claude Agent SDK, \
 the Claude API, MCP, prompt engineering, tool use and agent design.
 
 THE STORY
@@ -73,10 +76,6 @@ STAGES OF A CHAPTER - "key: when a question belongs to it"
 WHAT TO WRITE
 {{PICK}}"stage": the one stage key that fits what happens in the question. Decide from \
 the situation the question describes, not from its topic.
-- "beat": shown BEFORE the question: what lands on the player's desk. State the \
-problem or the decision as the team sees it, with the one or two concrete facts that \
-make it real (a number, a symptom). It must not hint at the correct answer, name any \
-answer, or say what should be done.
 - "win": shown AFTER a correct answer: what is better in the project now, as an \
 observable result. Do not restate the answer.
 - "fail": shown AFTER a wrong answer: what keeps going wrong, as an observable \
@@ -92,15 +91,15 @@ for the chapter, by first name. Most lines need no person at all.
 summary.
 
 EXAMPLES OF THE STYLE - from other questions; never reuse their content.
-- beat: "In 9% of runs the report is written before synthesis has finished, and \
-citations are missing."
+- situation (for context, not to write): "In 9% of runs the report is written before \
+synthesis has finished, and citations are missing."
   win: "The report writer cannot start until synthesis has delivered."
   fail: "The ordering still slips now and then, and reports go out incomplete."
-- beat: "On pull requests with 40 files the reviewer contradicts itself and misses \
+- situation: "On pull requests with 40 files the reviewer contradicts itself and misses \
 changes that span files."
   win: "Each file gets full attention, and what spans files is caught as well."
   fail: "The reviewer still flags a pattern in one file and approves it in the next."
-- beat: "Omar wants every pull request on the refund tools reviewed by Claude in CI, \
+- situation: "Omar wants every pull request on the refund tools reviewed by Claude in CI, \
 with a script deciding pass or fail."
   win: "The pipeline reads the review and fails the build on critical findings, with \
 nobody involved."
@@ -112,14 +111,13 @@ markdown fences, no prose, no comments. Exactly this schema:
 
 {
 {{SCENARIO_FIELD}}  "stage": {{STAGE_KEYS}},
-  "beat": "<one line>",
   "win": "<one line>",
   "fail": "<one line>"
 }\
 """
 
 
-def _people(scenario: ScenarioDef) -> str:
+def people(scenario: ScenarioDef) -> str:
     return ", ".join(f"{name} ({role})" for name, role in scenario.cast) or "(none named)"
 
 
@@ -134,12 +132,12 @@ def _build_system_message(doc: dict) -> str:
     if scenario is not None:
         chapter = (
             f'THIS QUESTION\'S CHAPTER - "{scenario.title}"\n{scenario.intro}\n'
-            f"People: {_people(scenario)}"
+            f"People: {people(scenario)}"
         )
         pick, field = "- ", ""
     else:
         chapter = 'CHAPTERS - "key: what the team builds. People"\n' + "\n".join(
-            f"- {s.key}: {s.intro} People: {_people(s)}" for s in SCENARIOS
+            f"- {s.key}: {s.intro} People: {people(s)}" for s in SCENARIOS
         )
         pick = (
             '- "scenario": the key of the one chapter whose system the question is '
@@ -180,13 +178,15 @@ def parse_story(
     correct: list[int] = (),
     max_words: int = MAX_LINE_WORDS,
     pick_chapter: bool = False,
+    with_beat: bool = False,
 ) -> dict:
     """
     Validate a story reply (or a seed item) and return the fields to store: `stage`,
-    `beat`, `win`, `fail`, and with `pick_chapter` the `scenario` the model chose.
-    Anything wrong rejects it (502, so a job retries it): an unknown stage or chapter,
-    an empty or over-long line, a beat that repeats an answer, or a `win` / `fail`
-    line that repeats a correct one (`correct`: the indices of the correct answers).
+    `win`, `fail`, with `pick_chapter` the `scenario` the model chose and with
+    `with_beat` (the hand-written seed) the `beat`. Anything wrong rejects it (502, so a
+    job retries it): an unknown stage or chapter, an empty or over-long line, a `win` /
+    `fail` line that repeats a correct answer (`correct`: their indices), or a seed beat
+    that repeats any answer.
     """
 
     def bad(msg: str) -> HTTPException:
@@ -202,7 +202,8 @@ def parse_story(
         if scenario is None:
             raise bad(f"'scenario' must be a chapter key, got {parsed.get('scenario')!r}")
         fields["scenario"] = scenario
-    for name in ("beat", "win", "fail"):
+    names = ("beat", "win", "fail") if with_beat else ("win", "fail")
+    for name in names:
         text = parsed.get(name)
         text = " ".join(text.split()) if isinstance(text, str) else ""
         if not text:
@@ -212,7 +213,7 @@ def parse_story(
         fields[name] = text
 
     squashed = [_squash(a) if isinstance(a, str) else "" for a in answers]
-    for name in ("beat", "win", "fail"):
+    for name in names:
         line = _squash(fields[name])
         for i, answer in enumerate(squashed):
             # The beat is read before answering, so no answer may be in it; the lines
@@ -308,6 +309,10 @@ async def story_and_store(
             {
                 **record_fields(doc, fields, "ica", ICA_ORDER + difficulty),
                 "input_key": input_key(doc),
+                # The beat was written for the old stage: `beat.py` writes it again.
+                "beat": "",
+                "beat_ica": None,
+                "beat_input_key": None,
             },
             meta,
             datetime.now(timezone.utc),

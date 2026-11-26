@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from claude_exam.api.dependencies import (
     AsyncCollectionDep,
+    AsyncDecompositionCollectionDep,
     AsyncSimplifiedCollectionDep,
     AsyncStoryCollectionDep,
     IcaClientDep,
@@ -11,6 +12,7 @@ from claude_exam.api.dependencies import (
     QuestionFiltersDep,
     QuestionObjectIdDep,
 )
+from claude_exam.api.decompose import read_decomposition
 from claude_exam.api.game.domain import story_of
 from claude_exam.api.schemas import (
     Question,
@@ -89,6 +91,7 @@ async def rephrase_question(
     collection: AsyncCollectionDep,
     simplified: AsyncSimplifiedCollectionDep,
     story: AsyncStoryCollectionDep,
+    decomposition: AsyncDecompositionCollectionDep,
     ica: IcaClientDep,
     body: SimplifyRequest | None = None,
     force: bool = False,
@@ -112,6 +115,13 @@ async def rephrase_question(
 
     # The text is set where the question stands in the game's story, when it has a place.
     record = await story.find_one({"question_id": question_id})
+    decomposed = await decomposition.find_one({"question_id": question_id})
     return await rephrase_and_store(
-        ica, simplified, doc, body.model_id, body.max_tokens, place=story_of(doc, record)
+        ica,
+        simplified,
+        doc,
+        body.model_id,
+        body.max_tokens,
+        place=story_of(doc, record),
+        decomposition=read_decomposition(decomposed, doc),
     )

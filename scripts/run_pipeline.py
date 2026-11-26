@@ -13,7 +13,11 @@ one question by hand.
 - `--dry-run`: calls the steps' compute functions only, feeding each step's result to the
   next in memory, and writes NOTHING. A step that is not run uses what is stored
   (`--stages flow` draws the flow of the stored decomposition). The objectives and story
-  steps have no dry form: their stored records are used.
+  steps have no dry form: their stored records are used (a dry beat is written on the
+  stored story's stage).
+
+With a decomposition, `--show` and `--mermaid` also print the pre-answer flow built in
+code (`flow.flow_from`, an experiment that is never stored) with the flow gate's verdict.
 
 Usage:
   uv run python scripts/run_pipeline.py QUESTION_ID [DATABASE_URL]
@@ -23,8 +27,8 @@ Usage:
   --stages    comma-separated steps, run in the given order (default: those of --mode)
   --mode      a job mode (`batch.STAGES`), default "full"
   --force     a real run redoes every chosen step, current or not
-  --show      print the question, its decomposition, parts (with their roles), entities
-              with their icons, the resolution and the rephrase
+  --show      print the question, its beat, decomposition, parts (with their roles),
+              entities with their icons, the resolution and the rephrase
   --mermaid   print the flows as Mermaid `flowchart TD`, to paste into any Mermaid viewer
   --out FILE  write everything as JSON
 
@@ -92,6 +96,8 @@ async def dry_run(args, ica: IcaClient, db, doc: dict) -> Result:
     story = await db["question_story"].find_one({"question_id": question_id})
     async for step in run_dry(ica, doc, result, story, args.stage_list, args.model):
         print_step(step)
+    if result.beat is None:
+        result.beat = (story or {}).get("beat") or ""
     return result
 
 
@@ -122,6 +128,8 @@ async def real_run(args, ica: IcaClient, mongo: AsyncMongoClient, db, doc: dict)
         await db["examination_simplified"].find_one({"question_id": question_id}),
         await db["question_decomposition"].find_one({"question_id": question_id}),
     )
+    story = await db["question_story"].find_one({"question_id": question_id})
+    result.beat = (story or {}).get("beat") or ""
     failed = {e.stage: e for e in job.errors}
     for stage in args.stage_list:
         error = failed.get(stage)
@@ -157,6 +165,8 @@ def show(doc: dict, result: Result) -> None:
     print("  " + " ".join(clean_question(prompt.get("question", "")).split()))
     for i, answer in enumerate(answers_of(doc)):
         print(f"  {'*' if i in correct else ' '}{chr(65 + i)}. {clean_plain(answer)}")
+    if result.beat:
+        print(f"\nBEAT (shown before the question)\n  {result.beat}")
 
     d = result.decomposition
     if d is not None:
@@ -203,6 +213,13 @@ def show(doc: dict, result: Result) -> None:
     if result.flow is not None:
         v = result.flow.visualization
         print(f"\nFLOW: {v.primary} (+{', '.join(v.secondary) or 'none'}) - {v.reason}")
+    built, errors = result.code_flow(doc)
+    if built is not None:
+        print(f"\nFLOW BUILT IN CODE (experiment, not stored): {len(built.nodes)} nodes")
+        for node in built.nodes:
+            print(f"  {node.id:<4}{node.type:<9}{node.label}")
+        for error in errors or ["passes the flow gate"]:
+            print(f"  gate: {error}")
     if result.resolution is not None:
         r = result.resolution
         print("\nRESOLUTION")
@@ -245,9 +262,12 @@ async def main(argv: list[str]) -> int:
                 print("\nFLOW BEFORE ANSWERING (Mermaid)\n" + mermaid(result.flow, answers))
             if result.resolution is not None:
                 print("\nRESOLVED FLOW (Mermaid)\n" + mermaid(result.resolution.flow))
+            built, _errors = result.code_flow(doc)
+            if built is not None:
+                print("\nFLOW BUILT IN CODE, experiment (Mermaid)\n" + mermaid(built, answers))
         if args.out:
             with open(args.out, "w", encoding="utf-8") as handle:
-                json.dump(result.as_json(), handle, ensure_ascii=False, indent=1, default=str)
+                json.dump(result.as_json(doc), handle, ensure_ascii=False, indent=1, default=str)
             print(f"\nwritten to {args.out}")
         return 1 if any(s["status"].startswith("failed") for s in result.steps) else 0
     finally:

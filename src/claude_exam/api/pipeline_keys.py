@@ -13,7 +13,7 @@ from typing import Literal, NamedTuple
 
 from pydantic import ValidationError
 
-from claude_exam.api import check, decompose, flow, icons, objectives, rephrase, story
+from claude_exam.api import beat, check, decompose, flow, icons, objectives, rephrase, story
 from claude_exam.api.game.domain import story_of
 from claude_exam.api.question_view import key_free
 from claude_exam.api.schemas import DecisionFlow, JobStage
@@ -42,6 +42,7 @@ def _flow(records: Records) -> DecisionFlow | None:
 KEY_FIELD: dict[str, tuple[str, str]] = {
     "objectives": ("objectives", "input_key"),
     "story": ("story", "input_key"),
+    "beat": ("story", "beat_input_key"),
     "decompose": ("decomposition", "input_key"),
     "icons": ("decomposition", "icons_input_key"),
     "flow": ("decomposition", "flow_input_key"),
@@ -58,6 +59,7 @@ def _has_result(stage: JobStage, records: Records) -> bool:
         {
             "objectives": records.objectives,
             "story": records.story,
+            "beat": (records.story or {}).get("beat"),
             "decompose": records.decomposition,
             "icons": decomposition.get("icons_ica"),
             "flow": decomposition.get("flow"),
@@ -88,6 +90,8 @@ def expected_key(stage: JobStage, doc: dict, records: Records) -> str | None:
         return story.input_key(doc)
     if stage == "decompose":
         return decompose.input_key(doc)
+    if stage == "beat":
+        return beat.input_key(doc, records.story)
     place = story_of(doc, records.story)
     if stage == "rephrase":
         return rephrase.input_key(doc, place)
@@ -108,8 +112,9 @@ def expected_key(stage: JobStage, doc: dict, records: Records) -> str | None:
 
 def is_current(stage: JobStage, doc: dict, records: Records) -> bool:
     """Whether `stage`'s stored result was written from today's inputs. A seed story
-    record is current as it is (it was written by hand)."""
-    if stage == "story" and (records.story or {}).get("origin") == "seed":
+    record and its beat are current as they are (they were written by hand)."""
+    seed = (records.story or {}).get("origin") == "seed"
+    if stage == "story" and seed or stage == "beat" and seed and _has_result(stage, records):
         return True
     stored = stored_key(stage, records)
     return stored is not None and stored == expected_key(stage, doc, records)

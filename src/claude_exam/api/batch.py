@@ -8,8 +8,9 @@ from fastapi import HTTPException
 from pymongo import AsyncMongoClient
 
 from claude_exam.api import pipeline_keys
+from claude_exam.api.beat import beat_and_store
 from claude_exam.api.check import check_and_store
-from claude_exam.api.decompose import decompose_and_store
+from claude_exam.api.decompose import decompose_and_store, read_decomposition
 from claude_exam.api.flow import flow_and_store, resolve_and_store
 from claude_exam.api.game.domain import difficulty_of, story_of
 from claude_exam.api.ica import IcaClient
@@ -36,13 +37,16 @@ DEFAULT_CONCURRENCY = 3
 # first because the story step orders a question by its difficulty. The decomposition
 # (with its parts and entities, built in code) comes before what is built on it: the
 # icons of its entities, the pre-answer flow and the resolution that continues it. The
-# rephrase is optional and comes last, set in the question's chapter and stage; the
-# check tests it.
+# beat (key-free, the line before the question) needs the story's stage and comes after
+# the decomposition, whose answer-only entities its leak check uses. The rephrase is
+# optional and comes last, set in the question's chapter, stage and beat; the check
+# tests it.
 STAGES: dict[JobMode, tuple[JobStage, ...]] = {
     "full": (
         "objectives",
         "story",
         "decompose",
+        "beat",
         "icons",
         "flow",
         "resolve",
@@ -56,12 +60,14 @@ STAGES: dict[JobMode, tuple[JobStage, ...]] = {
     "rephrase": ("rephrase", "check"),
     "check": ("check",),
     "objectives": ("objectives",),
-    "story": ("story",),
+    "story": ("story", "beat"),
+    "beat": ("beat",),
 }
 # A step that needs what another step of the same job stores: when that one fails (or
 # could not run), this one is not tried. Steps not listed here run whatever happened
 # before them, so a question without objectives still gets its decomposition.
 _NEEDS: dict[JobStage, JobStage] = {
+    "beat": "story",
     "icons": "decompose",
     "flow": "decompose",
     "resolve": "flow",
@@ -140,6 +146,14 @@ async def _story(stores: Stores, doc: dict) -> dict:
     return story_of(doc, record)
 
 
+async def _decomposition(stores: Stores, doc: dict):
+    """The question's current decomposition (None without one), for the leak checks."""
+    if stores.decomposition is None:
+        return None
+    record = await stores.decomposition.find_one({"question_id": str(doc["_id"])})
+    return read_decomposition(record, doc)
+
+
 async def load_records(stores: Stores, doc: dict) -> Records:
     """The question's stored records, as `pipeline_keys` reads them."""
     query = {"question_id": str(doc["_id"])}
@@ -191,9 +205,19 @@ def _step(stage: JobStage, ica: IcaClient, stores: Stores, doc: dict, model_id: 
     async def icons():
         await assign_and_store(ica, stores.decomposition, doc, model_id)
 
+    async def written():
+        await beat_and_store(
+            ica, stores.story, doc, model_id, decomposition=await _decomposition(stores, doc)
+        )
+
     async def rephrased():
         await rephrase_and_store(
-            ica, stores.simplified, doc, model_id, place=await _story(stores, doc)
+            ica,
+            stores.simplified,
+            doc,
+            model_id,
+            place=await _story(stores, doc),
+            decomposition=await _decomposition(stores, doc),
         )
 
     async def checked():
@@ -204,6 +228,7 @@ def _step(stage: JobStage, ica: IcaClient, stores: Stores, doc: dict, model_id: 
     return {
         "objectives": objectives,
         "story": story,
+        "beat": written,
         "decompose": decomposed,
         "icons": icons,
         "rephrase": rephrased,

@@ -10,6 +10,7 @@ from test_decompose import review_question
 from test_jobs import FakeMongo, ScriptedIca, client_for, question
 
 from claude_exam.api import batch, ica_json
+from claude_exam.api.scenario_catalog import text_hash
 
 
 @pytest.fixture(autouse=True)
@@ -70,6 +71,34 @@ def test_a_dry_run_streams_one_line_per_step_and_writes_nothing():
     assert result["decomposition"] and result["parts"][-1]["role"] == "ask"
     assert result["resolution"]["rule"] and result["rephrase"]["answers"]
     assert result["entities"]["question_icon"] and result["mermaid"]["flow"].startswith("flowchart")
+    # The experiment: the flow built in code, with the flow gate's verdict.
+    assert result["code_flow"]["nodes"][-1]["is_question"] and result["code_flow_errors"] == []
+    assert result["mermaid"]["code_flow"].startswith("flowchart")
+    assert written(mongo) == before
+
+
+def test_a_dry_beat_needs_the_stored_story_and_feeds_the_rephrase():
+    q = question()
+    q["prompt"]["question"] = (
+        "SCENARIO: You are integrating Claude Code into your Continuous Integration pipeline. "
+        "QUESTION: Which mode?"
+    )
+    mongo, ica = FakeMongo([q]), ScriptedIca()
+    client = client_for(mongo, ica)
+    run = lambda: lines(client.post(f"/evaluate/questions/{q['_id']}/run", json={"stages": ["beat", "rephrase"]}))  # noqa: E731
+    # No story record: no stage to write the beat for.
+    assert run()[0]["status"] == "failed 422"
+    db = mongo.get_default_database()
+    db["question_story"].docs.append(
+        {"question_id": str(q["_id"]), "text_hash": text_hash(q), "scenario": "pipeline", "stage": "build",
+         "order": 1, "beat": "", "win": "w", "fail": "f", "origin": "ica"}
+    )
+    before = written(mongo)
+    events = run()
+    assert [e["status"] for e in events[:2]] == ["ok", "ok"]
+    assert events[-1]["result"]["beat"] == "The team cannot agree on a working mode."
+    rephrase_prompt = [p for kind, p in zip(ica.calls, ica.prompts) if kind == "rephrase"][-1]
+    assert "The team cannot agree on a working mode." in rephrase_prompt
     assert written(mongo) == before
 
 

@@ -7,7 +7,8 @@ description: Use when the user wants to add practice-exam questions to the game'
 
 One upload does everything for a new question: learning objectives, its place in the
 game's story, its decomposition (with semantic parts and visual entities built from it),
-icons, the flow shown before answering and the resolution shown after, a rephrase (the
+the story line shown before it (the beat, written without the key), icons, the flow
+shown before answering and the resolution shown after, a rephrase (the
 question in plain words, set in the company, written without the key) and a check that
 the rephrase still has the same right answer. Your
 job is to run it, read the report, and fix what the report names. Do not hand-write

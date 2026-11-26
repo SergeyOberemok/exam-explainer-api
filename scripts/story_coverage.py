@@ -48,6 +48,11 @@ def main() -> int:
     questions = {str(d["_id"]): d for d in db["examination"].find() if is_playable(d)}
     records = {r["question_id"]: r for r in db["question_story"].find()}
     tags = {t["question_id"]: t for t in db["question_objectives"].find()}
+    # The beat's key covers the answer-only entities of the decomposition.
+    decompositions = {
+        d["question_id"]: d
+        for d in db["question_decomposition"].find({}, {"semantic": 1, "text_hash": 1, "question_id": 1})
+    }
 
     nodes: Counter = Counter()
     origins: Counter = Counter()
@@ -55,6 +60,7 @@ def main() -> int:
     unclaimed: Counter = Counter()
     no_story: list[str] = []
     outdated: list[str] = []
+    no_beat: list[str] = []
     picked = 0
 
     for question_id, doc in questions.items():
@@ -77,6 +83,10 @@ def main() -> int:
         picked += record.get("scenario_origin") == "model"
         if not pipeline_keys.is_current("story", doc, Records(story=record)):
             outdated.append(question_id)
+        elif not pipeline_keys.is_current(
+            "beat", doc, Records(story=record, decomposition=decompositions.get(question_id))
+        ):
+            no_beat.append(question_id)
 
     print(
         f"{len(questions)} playable "
@@ -101,13 +111,14 @@ def main() -> int:
     for question_id in no_story[:20]:
         print(f"    {question_id}")
     print(f"  written with an older catalog or prompt: {len(outdated)}")
+    print(f"  current story without a current beat: {len(no_beat)}")
 
     print("\nMAIN OBJECTIVES PER CHAPTER")
     for scenario in SCENARIOS:
         listed = ", ".join(f"{k} {c}" for k, c in objectives[scenario.key].most_common())
         print(f"  {scenario.key}: {listed or '(no tagged questions)'}")
 
-    needs_work = bool(unclaimed or thin or no_story or outdated)
+    needs_work = bool(unclaimed or thin or no_story or outdated or no_beat)
     return 1 if needs_work and "--check" in argv else 0
 
 

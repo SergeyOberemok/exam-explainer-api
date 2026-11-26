@@ -9,12 +9,14 @@ key can change without touching the data; a new decomposition clears them.
 """
 
 import logging
+import re
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
 from pymongo import ReturnDocument
 from pymongo.asynchronous.collection import AsyncCollection
 
+from claude_exam.api.decompose import matches
 from claude_exam.api.ica import IcaClient
 from claude_exam.api.icon_catalog import ICONS, KIND_FALLBACK, known
 from claude_exam.api.ica_json import ask_json
@@ -33,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 # Bump when `parse_icons` changes what is stored from the same reply (the prompt and
 # the catalog are in the input key, `step_key.py`).
-CODE_VERSION = "1"
+CODE_VERSION = "2"
 
 _SYSTEM_MESSAGE = """\
 You choose icons from an icon catalog for one multiple-choice exam question, so a quiz \
@@ -50,7 +52,8 @@ entity's kind (actor, object, action) and its other wordings are hints. Give the
 entity one key; give different entities different keys where the catalog allows it. \
 Use "actor", "object" or "action" only when no other key fits.
 2. For the QUESTION: the key for what the scenario is mainly about (the system or \
-situation being built or fixed).
+situation being built or fixed) - never the key of something only an answer mentions, \
+and not the key of an answer card.
 3. For EACH ANSWER: the key for what THAT answer proposes to use or do - the thing \
 that makes it different from the other answers, not the scenario they all share. \
 If all answers mention the subagent but one changes a prompt, one adds a hook and one \
@@ -121,13 +124,32 @@ def _aligned(entities: PromptEntities, n_answers: int) -> PromptEntities:
     )
 
 
-def parse_icons(parsed: dict, entities: PromptEntities, n_answers: int) -> PromptEntities:
+def _answer_only_icon(key: str, q: KeyFreeQuestion) -> bool:
+    """Whether the question icon `key` shows what only an answer talks about: a word of
+    the key ("escalate") starts a word of an answer ("escalation criteria") and of no
+    word of the scenario or stem."""
+    stems = [w[:6] for w in key.split("-") if len(w) >= 4]
+    if not stems:
+        return False
+
+    def says(text: str) -> bool:
+        return any(re.search(rf"\b{re.escape(s)}", text, re.IGNORECASE) for s in stems)
+
+    return not says(q.question) and any(says(a) for a in q.answers)
+
+
+def parse_icons(
+    parsed: dict, entities: PromptEntities, n_answers: int, q: KeyFreeQuestion | None = None
+) -> PromptEntities:
     """
     Validate the model's reply and return `entities` with the icons filled in.
     A reply of the wrong shape raises 502. A single bad pick does not: an entity
     without a known key gets the icon of its kind; an answer without one gets the icon
     of its least shared entity, the question that of its first entity (None when it
-    has no entities, and the client then draws its default).
+    has no entities, and the client then draws its default). The question's icon is
+    shown before answering, so one that is also an answer card's, or (with `q`) that
+    shows what only an answer talks about (`_answer_only_icon`), is replaced the same
+    way.
     """
 
     def bad(msg: str) -> HTTPException:
@@ -168,6 +190,13 @@ def parse_icons(parsed: dict, entities: PromptEntities, n_answers: int) -> Promp
             answer.icon = min(answer.entities, key=lambda e: shared[e.name.lower()]).icon
 
     result.question_icon = known(parsed.get("question"))
+    answer_icons = {a.icon for a in result.answers}
+    if result.question_icon is not None and (
+        result.question_icon in answer_icons
+        or (q is not None and _answer_only_icon(result.question_icon, q))
+    ):
+        logger.info("question icon %r points at an answer; using its first entity's", result.question_icon)
+        result.question_icon = None
     if result.question_icon is None and result.question:
         result.question_icon = result.question[0].icon
     return result
@@ -186,7 +215,7 @@ async def pick_icons(
     parsed, meta = await ask_json(
         ica, model_id, user, system=system, what="icons", max_tokens=max_tokens
     )
-    return parse_icons(parsed, entities, len(q.answers)), meta
+    return parse_icons(parsed, entities, len(q.answers), q), meta
 
 
 def messages(q: KeyFreeQuestion, entities: PromptEntities) -> tuple[str, str]:
@@ -219,8 +248,9 @@ async def assign_and_store(
     `question_decomposition` record (the `icon` fields inside `entities`, and
     `icons_ica`). 404 without a decomposition; errors propagate."""
     existing = await store.find_one({"question_id": str(doc["_id"])})
-    if existing is None:
-        raise HTTPException(status_code=404, detail="question has no decomposition")
+    # A record written for an earlier text of the question names other entities.
+    if not matches(existing, doc):
+        raise HTTPException(status_code=404, detail="question has no current decomposition")
     q = key_free(doc)
     entities = stored_entities(existing)
     with_icons, meta = await pick_icons(ica, q, entities, model_id, max_tokens)

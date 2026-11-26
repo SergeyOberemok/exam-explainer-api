@@ -453,6 +453,8 @@ class IcaMeta(BaseModel):
     model_id: IcaModelId
     finish_reason: str | None
     total_tokens: int
+    # Replies asked for (the first one plus repairs, `ica_json.ask_validated`).
+    attempts: int = 1
 
 
 class SimplifiedCheck(BaseModel):

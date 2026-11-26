@@ -114,9 +114,9 @@ class QuestionRepository:
         """The `question_decomposition` records of the given questions, by question id."""
         if self.decomposition is None or not question_ids:
             return {}
-        # The game reads the flow, the resolution and what tells whether they are
-        # current (versions, `text_hash`, `fingerprint`), never `semantic`, the largest
-        # part.
+        # The game reads the parts, entities, flow and resolution and the `text_hash`
+        # that tells whether they were written for the question's text as it is, never
+        # `semantic`, the largest part.
         cursor = self.decomposition.find(
             {"question_id": {"$in": list(question_ids)}},
             {"semantic": 0, "semantic_ica": 0, "flow_ica": 0, "resolution_ica": 0},

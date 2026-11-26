@@ -125,3 +125,40 @@ async def test_pick_icons_rejects_a_truncated_reply():
     with pytest.raises(HTTPException) as exc:
         await pick_icons(ica, VIEW, entities(), "claude-haiku-5-5")
     assert exc.value.status_code == 502
+
+
+def test_icons_are_not_picked_for_a_decomposition_of_an_earlier_text():
+    import asyncio
+
+    from fastapi import HTTPException
+
+    from claude_exam.api.icons import assign_and_store
+
+    class Store:
+        async def find_one(self, query):
+            return {"question_id": query["question_id"], "text_hash": "old", "entities": {}}
+
+    class Ica:
+        calls = 0
+
+    doc = {"_id": "q1", "prompt": {"question": "Which mode?", "answers": ["a", "b"]}}
+    try:
+        asyncio.run(assign_and_store(Ica(), Store(), doc, "claude-haiku-5-5"))
+    except HTTPException as exc:
+        assert exc.status_code == 404
+    else:
+        raise AssertionError("expected 404")
+
+
+def test_the_question_icon_may_not_point_at_an_answer():
+    from claude_exam.api.question_view import key_free
+
+    # The same key as an answer card: the question's picture would favour that answer.
+    result = parse_icons({**GOOD_ICONS, "question": "plan"}, entities(), 2)
+    assert result.question_icon == "terminal"
+    # A key only an answer talks about ("plan" for "plan mode"; the stem says "mode").
+    reply_ = {**GOOD_ICONS, "question": "plan", "answers": ["write", "checklist"]}
+    assert parse_icons(reply_, entities(), 2).question_icon == "plan"
+    assert parse_icons(reply_, entities(), 2, key_free(DOC)).question_icon == "terminal"
+    # A key the stem itself names stays.
+    assert parse_icons(GOOD_ICONS, entities(), 2, key_free(DOC)).question_icon == "mode"

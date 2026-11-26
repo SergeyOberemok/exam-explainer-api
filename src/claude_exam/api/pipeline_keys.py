@@ -90,14 +90,14 @@ def expected_key(stage: JobStage, doc: dict, records: Records) -> str | None:
         return story.input_key(doc)
     if stage == "decompose":
         return decompose.input_key(doc)
+    found = decompose.read_decomposition(records.decomposition, doc)
     if stage == "beat":
-        return beat.input_key(doc, records.story)
+        return beat.input_key(doc, records.story, found)
     place = story_of(doc, records.story)
     if stage == "rephrase":
-        return rephrase.input_key(doc, place)
+        return rephrase.input_key(doc, place, found)
     if stage == "check":
         return check.input_key(doc, records.simplified, place) if records.simplified else None
-    found = decompose.read_decomposition(records.decomposition, doc)
     if found is None:
         return None
     if stage == "icons":

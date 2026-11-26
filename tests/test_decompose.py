@@ -318,8 +318,9 @@ async def test_ask_json_sends_the_schema_and_falls_back_when_it_is_refused():
 
 def test_parts_are_built_in_code_from_what_may_be_shown_before_answering():
     q = question()
-    d = QuestionDecomposition.model_validate(decomposition_reply())
-    parts = parts_from(d, key_free(q))
+    d = decomposition_reply()
+    d["problem"]["symptoms"] = [_fact("Reviews come too late.")]
+    parts = parts_from(QuestionDecomposition.model_validate(d), key_free(q))
     assert [p.role for p in parts] == ["context", "current_state", "problem", "ask"]
     assert parts[0].text == "A team works with an agent."
     # The ask is the question's own, word for word, and it comes last.
@@ -342,6 +343,30 @@ def test_parts_name_no_answer_only_entity_and_keep_the_ask_when_cut():
     # so it is dropped (not only its entity id).
     assert all("plan mode" not in p.text for p in parts)
     assert all("e3" not in p.entity_ids for p in parts)
+
+
+def test_parts_drop_a_repeated_fact_and_keep_the_goal_the_ask_refers_to():
+    q = question()
+    d = decomposition_reply()
+    d["context"]["current_state"] = [
+        _fact("Developers contest the posted findings."),
+        _fact("Most false positives involve uncovered patterns."),
+        _fact("Findings are posted as definitive."),
+    ]
+    d["problem"]["symptoms"] = [
+        # The first current state again, in other words: dropped.
+        _fact("Developers contest findings as false positives."),
+        _fact("Reviews come too late."),
+    ]
+    d["context"]["desired_state"] = [_fact("Uncovered cases go to a human reviewer.")]
+    parts = parts_from(QuestionDecomposition.model_validate(d), key_free(q))
+    texts = [p.text for p in parts]
+    assert "Developers contest findings as false positives." not in texts
+    assert len(parts) == MAX_PARTS
+    # Context, three current states and a symptom fill the five places; the goal takes
+    # the symptom's, so the ask still has something to refer to.
+    assert [p.role for p in parts][-2:] == ["goal", "ask"]
+    assert "Reviews come too late." not in texts
 
 
 def test_derived_entities_keep_refs_drop_concepts_and_follow_the_answer_options():
@@ -537,3 +562,104 @@ def test_single_question_routes_answer_404_for_an_unknown_question():
     client = client_for(FakeMongo([]), ScriptedIca())
     for step in ("decompose", "flow", "resolve"):
         assert client.post(f"/examination/{'0' * 24}/{step}").status_code == 404
+
+
+# --- what the resolution replaces, the code flow's events ------------------------------
+
+
+def _branching_flow():
+    """A pre-answer flow whose decision posts a finding anyway on one branch (the
+    problem) and reaches the question on the other."""
+    return DecisionFlow.model_validate({
+        "visualization": {"primary": "decision_flow", "secondary": [], "reason": "Routing."},
+        "trigger": "Work starts",
+        "nodes": [
+            _node("n1", "start", "Work starts"),
+            _node("n2", "decision", "Covered by the rules?"),
+            _node("n3", "process", "Posted anyway"),
+            _node("n4", "end", "Developers contest it"),
+            _node("n5", "decision", "Which mode?", is_question=True),
+        ],
+        "edges": [
+            _edge("n1", "n2"),
+            _edge("n2", "n3", type="no", label="Not covered"),
+            _edge("n2", "n5", type="yes", label="Covered"),
+            _edge("n3", "n4"),
+        ],
+    })
+
+
+def _resolved(keep_old: bool):
+    edges = [
+        _edge("n1", "n2"),
+        _edge("n2", "n6", type="yes", label="Covered", added=True),
+        _edge("n2", "n7", type="no", label="Not covered: a human decides", added=True),
+        _edge("n6", "n8", added=True),
+        _edge("n7", "n8", added=True),
+    ]
+    if keep_old:
+        edges += [_edge("n2", "n3", type="no", label="Not covered"), _edge("n3", "n4")]
+    reply_ = resolution_reply()
+    reply_["flow"] = {
+        "visualization": {"primary": "decision_flow", "secondary": [], "reason": "Routing."},
+        "trigger": "Work starts",
+        "nodes": [
+            _node("n1", "start", "Work starts"),
+            _node("n2", "decision", "Covered by the rules?"),
+            _node("n3", "process", "Posted anyway"),
+            _node("n4", "end", "Developers contest it"),
+            _node("n6", "process", "Posted", added=True),
+            _node("n7", "human_review", "A human decides", added=True),
+            _node("n8", "end", "Clear findings posted", added=True),
+        ],
+        "edges": edges,
+    }
+    return reply_
+
+
+def test_a_resolution_may_not_keep_the_old_branch_next_to_its_fix():
+    from claude_exam.api.flow import replaced_errors
+
+    before = _branching_flow()
+    errors = replaced_errors(before, DecisionFlow.model_validate(_resolved(keep_old=True)["flow"]))
+    assert len(errors) == 1 and "decision n2" in errors[0] and "n2->n3" in errors[0]
+
+
+def test_the_path_the_fix_replaced_is_pruned_in_code():
+    from claude_exam.api.flow import prune_replaced, replaced_errors
+
+    pruned = prune_replaced(_resolved(keep_old=False))
+    ids = [n["id"] for n in pruned["flow"]["nodes"]]
+    # The old branch is gone, so "posted anyway" and its end are no longer reached.
+    assert "n3" not in ids and "n4" not in ids
+    assert ids == ["n1", "n2", "n6", "n7", "n8"]
+    flow = DecisionFlow.model_validate(pruned["flow"])
+    assert replaced_errors(_branching_flow(), flow) == []
+    q = question()
+    assert resolution_errors(q, QuestionDecomposition.model_validate(decomposition_reply()), pruned, before=_branching_flow()) == []
+
+
+def test_a_resolution_keeps_the_start_and_where_the_learner_chose():
+    from claude_exam.api.flow import replaced_errors
+
+    flow = DecisionFlow.model_validate(_resolved(keep_old=False)["flow"])
+    flow.nodes = [n for n in flow.nodes if n.id != "n2"]
+    flow.edges = [e for e in flow.edges if "n2" not in (e.source, e.target)]
+    assert any("n2" in e and "chose after" in e for e in replaced_errors(_branching_flow(), flow))
+
+
+def test_the_code_flow_draws_only_events_that_happen_now_with_their_entities():
+    from claude_exam.api.flow import flow_from
+
+    q = question()
+    q["prompt"]["question"] = "The agent edits files. Which mode?"
+    d = decomposition_reply()
+    d["events"] = [
+        {"id": "ev1", "name": "Agent edits files", "actor_id": "e1", "target_id": None, "input_ids": [], "output_ids": [], "sequence": 1, "source_status": "inferred", "evidence": ""},
+        {"id": "ev2", "name": "Route to a reviewer", "actor_id": "e1", "target_id": None, "input_ids": [], "output_ids": [], "sequence": None, "source_status": "inferred", "evidence": ""},
+    ]
+    flow = flow_from(QuestionDecomposition.model_validate(d), key_free(q))
+    labels = [n.label for n in flow.nodes]
+    assert "Route to a reviewer" not in labels
+    start = flow.nodes[0]
+    assert start.label == "Agent edits files" and start.entity_ids == ["e1"]

@@ -23,6 +23,7 @@ on the previous one (icons, flow, resolution).
 """
 
 import logging
+import re
 from datetime import datetime, timezone
 
 from fastapi import HTTPException
@@ -95,8 +96,10 @@ exact identifiers the text uses for it (paths, tool, command and setting names, 
 other wordings) in aliases, copied exactly; keep a product or mode name as the name \
 when the question is about it (Claude Code, plan mode). At most {{MAX_ENTITIES}} \
 entities; include the things the answer options rely on.
-4. Events: meaningful actions or state changes, named as verb phrases ("Analyze pull \
-request"), with who does them and on what.
+4. Events: meaningful actions or state changes that happen NOW, named as verb phrases \
+("Analyze pull request"), with who does them and on what, each with its place in the \
+order (sequence 1, 2, ...). What should happen but does not yet (a step the question \
+wants, such as routing to a human) is no event: it belongs in desired_state and goals.
 5. Relationships connect entities, events and conditions by id. Use "causes" only when \
 the question states or clearly establishes causality; otherwise "leads_to" or \
 "associated_with" with source_status "inferred".
@@ -430,7 +433,9 @@ def parts_from(decomposition: QuestionDecomposition, question: KeyFreeQuestion) 
     explicit conditions, in that order, then the question's own ask, word for word, as
     the last part. Each part names the ids of the entities its text mentions. A part
     that gives an answer away (`leaks.leak`) is dropped: built in code, it cannot be
-    sent back. At most `MAX_PARTS`: the ask always stays, the rest is cut from the end."""
+    sent back, and so is one that repeats an earlier part (`_repeats`). At most
+    `MAX_PARTS`: the ask always stays, the rest is cut from the end, except that the
+    first goal is kept (it is what the ask usually refers to)."""
     view = scenario_view(decomposition, question)
     # What an answer names (as the decomposition gate): a part that names the model's
     # own word for something is still the scenario.
@@ -446,13 +451,36 @@ def parts_from(decomposition: QuestionDecomposition, question: KeyFreeQuestion) 
         ("constraint", c.description) for c in view.conditions if c.source_status == "explicit"
     ]
     ask = the_ask(question) or question.stem
+    kept: list[tuple[str, str]] = []
+    for role, text in found:
+        text = text.strip()
+        if text and not leak(text, terms) and not any(_repeats(text, t) for _, t in kept):
+            kept.append((role, text))
+    chosen = kept[: MAX_PARTS - 1]
+    # The ask often points back at the goal ("Which design achieves this?"): when the cut
+    # took every goal, the last part before them makes room for the first one.
+    goal = next((p for p in kept if p[0] == "goal"), None)
+    if goal and goal not in chosen and len(chosen) > 1:
+        chosen[-1] = goal
     parts = [
-        SemanticPart(role=role, text=text.strip(), entity_ids=_mentioned(text, view.entities))
-        for role, text in found
-        if text.strip() and not leak(text, terms)
-    ][: MAX_PARTS - 1]
+        SemanticPart(role=role, text=text, entity_ids=_mentioned(text, view.entities))
+        for role, text in chosen
+    ]
     parts.append(SemanticPart(role="ask", text=ask, entity_ids=_mentioned(ask, view.entities)))
     return parts
+
+
+def _content_words(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9_'-]+", normalize(text)) if len(w) >= 4}
+
+
+def _repeats(text: str, earlier: str) -> bool:
+    """Whether `text` says again what an earlier part said (the model often states the
+    same fact as a current state and as a symptom): at least three of the content words
+    of the shorter one, and three quarters of them, are in the other."""
+    a, b = _content_words(text), _content_words(earlier)
+    shared = len(a & b)
+    return shared >= 3 and shared >= 0.75 * min(len(a), len(b))
 
 
 def has_flow(record: dict | None) -> bool:

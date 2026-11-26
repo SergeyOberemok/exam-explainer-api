@@ -10,7 +10,7 @@ the app restarts.
 import logging
 
 from pymongo.asynchronous.database import AsyncDatabase
-from pymongo.errors import OperationFailure
+from pymongo.errors import DuplicateKeyError, OperationFailure
 
 from claude_exam.api.game.domain import ROUND_TTL_SECONDS
 from claude_exam.api.scenario_catalog import text_hash
@@ -25,9 +25,16 @@ async def ensure_text_hashes(db: AsyncDatabase) -> int:
     how many were filled in."""
     filled = 0
     async for doc in db["examination"].find({"text_hash": None}, {"prompt": 1}):
-        await db["examination"].update_one(
-            {"_id": doc["_id"]}, {"$set": {"text_hash": text_hash(doc)}}
-        )
+        try:
+            await db["examination"].update_one(
+                {"_id": doc["_id"]}, {"$set": {"text_hash": text_hash(doc)}}
+            )
+        except DuplicateKeyError:
+            # The bank already holds this question under another id: leave this copy
+            # without a hash (the unique sparse index ignores it) and say so, instead
+            # of failing startup.
+            logger.warning("question %s duplicates a stored question; text_hash not set", doc["_id"])
+            continue
         filled += 1
     if filled:
         logger.info("text_hash added to %d stored questions", filled)

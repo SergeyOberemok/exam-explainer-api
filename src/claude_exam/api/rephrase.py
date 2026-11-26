@@ -18,6 +18,7 @@ the length of each answer. A reply that fails is sent back with what was wrong, 
 
 import hashlib
 import logging
+import re
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
 
@@ -25,10 +26,10 @@ from fastapi import HTTPException
 from pymongo import ReturnDocument
 from pymongo.asynchronous.collection import AsyncCollection
 
-from claude_exam.api.exam_terms import lost_identifiers, lost_names, lost_numbers
+from claude_exam.api.exam_terms import lost_identifiers, lost_names, lost_numbers, widened
 from claude_exam.api.ica import IcaClient
 from claude_exam.api.ica_json import ask_validated
-from claude_exam.api.leaks import answer_only, leak
+from claude_exam.api.leaks import answer_only, leak, terms_key
 from claude_exam.api.question_view import KeyFreeQuestion, as_view, key_free
 from claude_exam.api.scenario_catalog import BY_KEY, COMPANY, COMPANY_INTRO, STAGES
 from claude_exam.api.schemas import (
@@ -44,7 +45,7 @@ logger = logging.getLogger(__name__)
 
 # Bump when the gates (`fidelity_errors`, `leak_errors`, `_validate_shape`) change what
 # is stored from the same reply (the prompt itself is in the input key, `step_key.py`).
-CODE_VERSION = "2"
+CODE_VERSION = "3"
 # How much longer than its original a rewritten answer may be before it is rejected.
 MAX_ANSWER_GROWTH = 1.25
 ANSWER_SLACK_CHARS = 15
@@ -74,7 +75,8 @@ THE QUESTION
 - Sentence one sets the moment in the company. {{PEOPLE_RULE}}
 - The story adds only who is asking and where. Every fact of the original stays: \
 each number and percentage as digits, each limit, tool, setting, condition and \
-symptom. Add no technical fact, cause or hint the original does not state.
+symptom. Add no technical fact, cause or hint the original does not state. Keep \
+each fact's scope: "most" stays "most", "these" never becomes "every" or "all".
 - The ask asks exactly what the original asks: do not widen or change it.
 {{BACKGROUND_RULE}}
 
@@ -83,6 +85,8 @@ THE ANSWERS
 people, no story. It must not be longer than the original answer.
 - Keep each detail that tells one option from another (extra steps, conditions, \
 qualifiers).
+- Add no reason, benefit or result the original answer does not state (no "so that \
+...", "to ensure ...", "so ... never ..."): it would make that answer look better.
 
 PLAIN LANGUAGE
 Short sentences (at most about 20 words), everyday words, active voice, concrete over \
@@ -112,11 +116,10 @@ customer appears frustrated." So it escalates simple billing corrections when \
 customers use strong language, yet handles unclear policy-exception disputes alone. \
 First-contact resolution is stuck at 64%. Which prompt change makes escalation \
 consistent and raises the resolution rate?
-Original answer: Have the agent output a self-reported confidence score with each \
-resolution decision and escalate any case where the confidence score falls below a \
-fixed threshold.
-Rephrase: Have the agent report a confidence score with each decision and escalate \
-when the score is below a fixed threshold.
+Original answer: Increase the agent's max_tokens limit so that it has room to reason \
+through each case before deciding whether to escalate.
+Rephrase: Raise `max_tokens` so the agent can think each case through before it \
+decides to escalate.
 
 OUTPUT FORMAT - you MUST respond with ONLY a single valid JSON object and nothing \
 else - no markdown fences, no prose before or after, no comments. \
@@ -217,6 +220,17 @@ def chapter_of(place: dict | None) -> str | None:
 
 
 _COPY_RATIO = 0.85
+# A clause that says why an answer is good ("..., so disputed comments are never
+# posted"): a rewrite may keep one the original has, never add one.
+_PURPOSE = re.compile(
+    r",\s*so\b|\bso that\b|\bto (?:ensure|make sure|guarantee)\b|\bensuring\b|\bwhich ensures\b",
+    re.IGNORECASE,
+)
+
+
+def added_purpose(original: str, rewrite: str) -> bool:
+    """Whether `rewrite` states a purpose or benefit and `original` states none."""
+    return bool(_PURPOSE.search(rewrite)) and not _PURPOSE.search(original)
 
 
 def fidelity_errors(question: "KeyFreeQuestion | dict", parsed: dict) -> list[str]:
@@ -229,7 +243,10 @@ def fidelity_errors(question: "KeyFreeQuestion | dict", parsed: dict) -> list[st
       be left out);
     - every named concept of the question and its answers (`exam_terms.lost_names`)
       is still named somewhere in the rewritten question and answers;
-    - no answer has grown past `MAX_ANSWER_GROWTH`.
+    - no answer has grown past `MAX_ANSWER_GROWTH`;
+    - no answer states a purpose or benefit its original does not (`added_purpose`);
+    - the question uses no sweeping word ("every", "all", "always" ...) the original
+      does not (`exam_terms.widened`).
     """
     q = as_view(question)
     originals, stem = list(q.answers), q.stem
@@ -239,6 +256,11 @@ def fidelity_errors(question: "KeyFreeQuestion | dict", parsed: dict) -> list[st
         lost = lost_identifiers(original, rewrite)
         if lost:
             errors.append(f"answer {letter} must keep these exact terms: {', '.join(lost)}")
+        if added_purpose(original, rewrite):
+            errors.append(
+                f"answer {letter} adds a reason or benefit the original does not state "
+                "(a 'so ...' or 'to ensure ...' clause): remove it"
+            )
         if len(rewrite) > len(original) * MAX_ANSWER_GROWTH + ANSWER_SLACK_CHARS:
             errors.append(
                 f"answer {letter} is longer than the original "
@@ -258,6 +280,12 @@ def fidelity_errors(question: "KeyFreeQuestion | dict", parsed: dict) -> list[st
     numbers = lost_numbers(stem, parsed["question"])
     if numbers:
         errors.append(f"the question must keep these numbers as digits: {', '.join(numbers)}")
+    sweeping = widened(q.question, parsed["question"])
+    if sweeping:
+        errors.append(
+            f"the question says {', '.join(sweeping)}, which the original does not: keep "
+            "each fact's own scope (most, some, these), never widen it"
+        )
     return errors
 
 
@@ -319,10 +347,21 @@ def messages(q: KeyFreeQuestion, place: dict | None = None) -> tuple[str, str]:
     return _build_system_message(len(q.answers), chapter_of(place)), _build_user_message(q, place)
 
 
-def input_key(doc: dict, place: dict | None = None) -> str | None:
+def input_key(
+    doc: dict, place: dict | None = None, decomposition: QuestionDecomposition | None = None
+) -> str | None:
     """The input key of the rephrase of `doc` (`step_key.py`). It covers the chapter's
-    intro and people and the story line, since they are in the messages."""
-    return key_or_none(lambda: step_key(CODE_VERSION, *messages(key_free(doc), place)))
+    intro and people and the story line, since they are in the messages, and the
+    answer-only entities the leak gate tested (`leaks.terms_key`), so a new
+    decomposition that names one outdates the rephrase."""
+    q = key_free(doc)
+
+    def build() -> str:
+        parts = list(messages(q, place))
+        terms = terms_key(answer_only(q, decomposition).narrow())
+        return step_key(CODE_VERSION, *parts, *([terms] if terms else []))
+
+    return key_or_none(build)
 
 
 async def rephrase_item(
@@ -391,7 +430,7 @@ async def rephrase_and_store(
         "related_lectures": doc.get("related_lectures", []),
         "prompt": rephrase.model_dump(),
         "ica": meta.model_dump(),
-        "input_key": input_key(doc, place),
+        "input_key": input_key(doc, place, decomposition),
         "updated_at": now,
     }
     if not same_text:

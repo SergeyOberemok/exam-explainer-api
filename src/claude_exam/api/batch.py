@@ -109,7 +109,6 @@ def new_job(
         "processed": 0,
         "succeeded": 0,
         "failed": 0,
-        "entities_failed": 0,
         "icons_failed": 0,
         "skipped": 0,
         "stages_failed": {},
@@ -177,8 +176,9 @@ async def is_current(stage: JobStage, stores: Stores, doc: dict) -> bool:
 
 
 async def missing_stages(mode: JobMode, stores: Stores, doc: dict) -> list[JobStage]:
-    """The steps of `mode` a question still needs."""
-    return [s for s in STAGES[mode] if not await is_current(s, stores, doc)]
+    """The steps of `mode` a question still needs (its records are read once)."""
+    records = await load_records(stores, doc)
+    return [s for s in STAGES[mode] if not pipeline_keys.is_current(s, doc, records)]
 
 
 def _step(stage: JobStage, ica: IcaClient, stores: Stores, doc: dict, model_id: IcaModelId):

@@ -43,6 +43,7 @@ from claude_exam.api.rephrase import quality_warnings, rephrase_item
 from claude_exam.api.scenario_catalog import scenario_of, split_scenario, stem_of
 from claude_exam.api.schemas import (
     DecisionFlow,
+    IcaMeta,
     PromptEntities,
     Rephrase,
     Resolution,
@@ -188,7 +189,8 @@ async def run_dry(
             result.check = await check_item(
                 ica, doc, {"prompt": result.rephrase.model_dump()}, model, story=story
             )
-            return None
+            # The check returns the field to store; its call metadata is in it.
+            return IcaMeta(**result.check["ica"])
         raise HTTPException(status_code=400, detail="no dry run for this step: its stored record is used")
 
     for stage in stages:
@@ -201,7 +203,12 @@ async def run_dry(
         warnings: list[str] = []
         try:
             meta = await run(stage, warnings)
-            step = {"stage": stage, "status": "ok", "tokens": meta.total_tokens if meta else 0}
+            step = {
+                "stage": stage,
+                "status": "ok",
+                "tokens": meta.total_tokens if meta else 0,
+                "attempts": meta.attempts if meta else 0,
+            }
         except HTTPException as exc:
             step = {"stage": stage, "status": f"failed {exc.status_code}", "detail": str(exc.detail)}
         step["seconds"] = round(time.monotonic() - started, 1)

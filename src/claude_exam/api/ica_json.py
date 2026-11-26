@@ -225,7 +225,7 @@ async def ask_validated(
     errors: list[str] = []
     parsed: dict = {}
     tokens = 0
-    for _ in range(max_attempts):
+    for attempt in range(1, max_attempts + 1):
         parsed, meta = await ask_json(
             ica,
             model_id,
@@ -241,6 +241,7 @@ async def ask_validated(
         errors = validate(parsed)
         if not errors:
             meta.total_tokens = tokens
+            meta.attempts = attempt
             return parsed, meta
         logger.info("%s of %s needs repair: %s", what, label, "; ".join(errors))
     raise HTTPException(

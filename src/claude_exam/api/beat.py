@@ -23,10 +23,11 @@ from fastapi import HTTPException
 from pymongo import ReturnDocument
 from pymongo.asynchronous.collection import AsyncCollection
 
+from claude_exam.api.exam_terms import widened
 from claude_exam.api.game.domain import story_of, usable_story
 from claude_exam.api.ica import IcaClient
 from claude_exam.api.ica_json import ask_validated
-from claude_exam.api.leaks import answer_only, leak_errors
+from claude_exam.api.leaks import answer_only, leak_errors, terms_key
 from claude_exam.api.question_view import KeyFreeQuestion, key_free
 from claude_exam.api.scenario_catalog import BY_KEY, COMPANY, COMPANY_INTRO, STAGES
 from claude_exam.api.schemas import IcaMeta, IcaModelId, QuestionDecomposition, QuestionStory
@@ -37,7 +38,7 @@ logger = logging.getLogger(__name__)
 
 # Bump when `beat_errors` changes what is stored from the same reply (the prompt is in
 # the input key, `step_key.py`).
-CODE_VERSION = "1"
+CODE_VERSION = "2"
 MAX_ATTEMPTS = 3
 
 _SYSTEM_MESSAGE = """\
@@ -67,6 +68,8 @@ for the chapter, by first name. Most lines need no person at all.
 - No exclamation marks, no "you".
 - Do not repeat the question's sentences. The line is a symptom or a situation, not a \
 summary.
+- Keep each fact's scope and wording: "most" stays "most", "silent or ambiguous" does \
+not become "never covers", and no "all", "every" or "never" the question does not use.
 
 EXAMPLES OF THE STYLE - from other questions; never reuse their content.
 - "In 9% of runs the report is written before synthesis has finished, and citations \
@@ -119,11 +122,20 @@ def messages(q: KeyFreeQuestion, place: dict) -> tuple[str, str]:
     return system, user
 
 
-def input_key(doc: dict, story_record: dict | None) -> str | None:
-    """The input key of the beat of `doc` (`step_key.py`); None when it cannot have one."""
-    return key_or_none(
-        lambda: step_key(CODE_VERSION, *messages(key_free(doc), story_of(doc, story_record)))
-    )
+def input_key(
+    doc: dict, story_record: dict | None, decomposition: QuestionDecomposition | None = None
+) -> str | None:
+    """The input key of the beat of `doc` (`step_key.py`); None when it cannot have one.
+    It also covers the answer-only entities the leak gate tested (`leaks.terms_key`), so
+    a new decomposition that names one outdates the beat."""
+    q = key_free(doc)
+
+    def build() -> str:
+        parts = list(messages(q, story_of(doc, story_record)))
+        terms = terms_key(answer_only(q, decomposition).narrow())
+        return step_key(CODE_VERSION, *parts, *([terms] if terms else []))
+
+    return key_or_none(build)
 
 
 def beat_errors(
@@ -137,6 +149,12 @@ def beat_errors(
     errors = []
     if len(text.split()) > MAX_LINE_WORDS or len(text) > MAX_LINE_CHARS:
         errors.append(f"the beat is longer than {MAX_LINE_WORDS} words")
+    sweeping = widened(q.question, text)
+    if sweeping:
+        errors.append(
+            f"the beat says {', '.join(sweeping)}, which the question does not: keep "
+            "its own scope (most, some, these), never widen a fact"
+        )
     errors += leak_errors(
         [("the beat", text)],
         answer_only(q, decomposition).narrow(),
@@ -192,7 +210,7 @@ async def beat_and_store(
             "$set": {
                 "beat": beat,
                 "beat_ica": meta.model_dump(),
-                "beat_input_key": input_key(doc, record),
+                "beat_input_key": input_key(doc, record, decomposition),
                 "updated_at": datetime.now(timezone.utc),
             }
         },

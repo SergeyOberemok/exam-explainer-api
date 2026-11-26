@@ -120,6 +120,8 @@ def test_the_beat_gate():
     assert "names 'plan mode'" in beat_errors(q, {"beat": "Kim wants plan mode."}, plan_mode())[0]
     # Without a decomposition only the answers' texts are known.
     assert beat_errors(q, {"beat": "Kim wants plan mode."}) == []
+    # A beat keeps the question's scope: it says "all" where the question does not.
+    assert "the beat says all" in beat_errors(q, {"beat": "All edits land before anyone reads them."})[0]
 
 
 async def test_the_models_own_word_is_no_leak_in_texts_written_from_the_question():
@@ -216,3 +218,63 @@ def test_the_flow_built_in_code_follows_the_events_and_leaves_out_what_leaks():
     assert labels == ["A task arrives", "Edits land unreviewed.", "Which mode?"]
     assert [n.type for n in built.nodes] == ["start", "output", "decision"]
     assert flow_errors(q, decomposition, built.model_dump()) == []
+
+
+# --- what the leak gate read is in the input keys ------------------------------------
+
+
+def test_beat_and_rephrase_keys_cover_the_answer_only_entities_their_gate_tested():
+    from claude_exam.api import beat, rephrase
+
+    q = question()
+    q["prompt"]["question"] = (
+        "SCENARIO: You are integrating Claude Code into your Continuous Integration pipeline. "
+        "QUESTION: Which mode?"
+    )
+    story = {"question_id": str(q["_id"]), "scenario": "pipeline", "stage": "design", "text_hash": text_hash(q)}
+    place = {"scenario": "pipeline", "stage": "design"}
+    d = plan_mode()
+    # Written before the decomposition existed, the gate knew no entity: a later
+    # decomposition that names one outdates both.
+    assert beat.input_key(q, story) != beat.input_key(q, story, d)
+    assert rephrase.input_key(q, place) != rephrase.input_key(q, place, d)
+    # A decomposition whose entities no answer names leaves the keys as they were.
+    plain = d.model_copy(deep=True)
+    plain.entities = [e for e in plain.entities if e.name != "plan mode"]
+    assert answer_only(q, plain).narrow().entities == ()
+    assert beat.input_key(q, story) == beat.input_key(q, story, plain)
+    assert rephrase.input_key(q, place) == rephrase.input_key(q, place, plain)
+
+    record = {"question_id": str(q["_id"]), "text_hash": text_hash(q), "semantic": d.model_dump()}
+    stored = {**story, "origin": "ica", "beat": "A line.", "beat_input_key": beat.input_key(q, story)}
+    assert is_current("beat", q, Records(story=stored))
+    assert not is_current("beat", q, Records(story=stored, decomposition=record))
+
+
+def test_the_seed_loader_refuses_a_beat_that_names_what_only_an_answer_proposes():
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "load_story_seed.py"
+    spec = importlib.util.spec_from_file_location("load_story_seed", path)
+    loader = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loader)
+
+    q = question()
+    q["prompt"]["question"] = (
+        "SCENARIO: You are integrating Claude Code into your Continuous Integration pipeline. "
+        "QUESTION: Which mode?"
+    )
+    item = {
+        "hash": text_hash(q), "scenario": "pipeline", "stage": "design",
+        "beat": "The team wants plan mode for every run.",
+        "win": "Runs stay safe.", "fail": "Runs still edit files.",
+    }
+    record = {"question_id": str(q["_id"]), "text_hash": text_hash(q), "semantic": plan_mode().model_dump()}
+    updates, problems = loader.seed_updates([item], [q], {str(q["_id"]): record})
+    assert updates == [] and "names 'plan mode'" in problems[0]
+
+    # Without the entity the beat loads, and drops a beat the model wrote earlier.
+    updates, problems = loader.seed_updates([{**item, "beat": "Runs keep editing files."}], [q])
+    assert problems == []
+    assert updates[0][1]["beat_ica"] is None and updates[0][1]["beat_input_key"] is None

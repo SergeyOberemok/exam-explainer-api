@@ -120,10 +120,18 @@ the question states.
 condition_id). A cause, check or test the question leaves open is what the learner \
 must work out: never draw it - let the flow reach the question node instead. Do not \
 use what you know about these products to fill it in.
+- Branch only where the system as it is now takes different paths. A condition the \
+system now ignores (it treats both cases the same, which is often the problem) is not \
+a decision: say it in a node label ("Every request handled alone, even when policy \
+is unclear"). Telling such cases apart is usually what the answers propose.
 - It ends in exactly ONE decision node with "is_question": true: the question the \
 learner must answer, in the question's own words - never a guess or a test of a \
 cause ("Is it caused by X?"). That node has NO outgoing edges - the answer \
 options are attached to it later. Every other path ends in an end node.
+- The question node comes where the situation goes wrong: the path through the \
+symptom (or the consequence the question wants changed) leads into it. Never end that \
+path in an end node and hang the question node on another branch, such as the one \
+where everything already works.
 - Do not draw any answer option, mechanism or fix. "added" is false everywhere.
 
 {{RULES}}
@@ -143,13 +151,21 @@ node where the learner had to choose (the nodes that led to it are named).
 
 WRITE
 1. answer_requirements: what any correct answer must achieve, as short phrases taken \
-from the goals and the explanation (2 to 5).
-2. flow: the flow the learner saw, continued. Keep all its nodes and edges with the \
-same ids, and from the nodes the learner chose after, add the steps the CORRECT \
-answer's mechanism adds, marked "added": true (nodes and the edges that touch them), \
-leading to end nodes with the outcome the explanation gives. New node ids continue the \
-numbering. No node has "is_question": true. Keep it small: add only what shows how \
-the correct mechanism fixes the problem.
+from the goals and the explanation (2 to 5). Each is a need of the situation, not a \
+rule written to rule out one option, and it describes a mechanism as the explanation \
+does (a prompt instruction or a few-shot example guides the model; it is not \
+"deterministic").
+2. flow: the flow the learner saw, continued. Keep its nodes and edges with the same \
+ids, and from the nodes the learner chose after, add the steps the CORRECT answer's \
+mechanism adds, marked "added": true (nodes and the edges that touch them), leading to \
+end nodes with the outcome the explanation gives. New node ids continue the numbering. \
+No node has "is_question": true. Keep it small: add only what shows how the correct \
+mechanism fixes the problem. The fix replaces what it changes: when it gives a \
+decision new branches, that decision keeps none of its old ones (mark every branch it \
+still has "added": true), and the old path that no longer happens (for example a \
+finding posted anyway, then contested) is left out - never draw the problem and its \
+fix as two branches of the same decision. Keep the start and the nodes the learner \
+chose after.
 3. options: one per answer, same order (A is index 0): verdict ("correct" for the \
 correct answer only), the requirements it supports (from answer_requirements), its \
 gaps (why it falls short; [] for the correct one), and one sentence of reason.
@@ -381,11 +397,18 @@ def flow_errors(doc: dict, decomposition: QuestionDecomposition, parsed: dict) -
 
 
 def resolution_errors(
-    doc: dict, decomposition: QuestionDecomposition, parsed: dict
+    doc: dict,
+    decomposition: QuestionDecomposition,
+    parsed: dict,
+    before: DecisionFlow | None = None,
 ) -> list[str]:
+    """The gate of a resolution. With `before` (the pre-answer flow it continues) it
+    also checks `replaced_errors`."""
     resolution, errors = _parsed(Resolution, parsed)
     if errors:
         return errors
+    if before is not None:
+        errors += replaced_errors(before, resolution.flow)
     source = "\n".join(
         [
             _source(doc),
@@ -393,7 +416,7 @@ def resolution_errors(
             *(clean_plain(f) for f in (doc.get("prompt") or {}).get("feedbacks", [])),
         ]
     )
-    errors = graph_errors(resolution.flow, decomposition, source, pre_answer=False)
+    errors += graph_errors(resolution.flow, decomposition, source, pre_answer=False)
     n_answers = len((doc.get("prompt") or {}).get("answers", []))
     if sorted(o.index for o in resolution.options) != list(range(n_answers)):
         errors.append(f"options must have one item per answer, with index 0 to {n_answers - 1}")
@@ -477,6 +500,73 @@ def prune_after_question(parsed: dict) -> dict:
     }
 
 
+def replaced_errors(before: DecisionFlow, after: DecisionFlow) -> list[str]:
+    """What a resolved flow must do with the pre-answer flow it continues: keep the
+    start and the nodes the learner chose after, and replace, not double, a decision
+    the correct mechanism changes (a pre-answer decision that gets an added branch keeps
+    no branch of its own; the old path would otherwise sit next to its fix)."""
+    errors = []
+    questions = {n.id for n in before.nodes if n.is_question}
+    kept = {n.id for n in after.nodes}
+    needed = [n.id for n in before.nodes if n.type == "start"]
+    needed += [e.source for e in before.edges if e.target in questions]
+    missing = [i for i in dict.fromkeys(needed) if i not in kept]
+    if missing:
+        errors.append(
+            f"keep the start and the nodes the learner chose after: {', '.join(missing)}"
+        )
+    decisions = {n.id for n in before.nodes if n.type == "decision" and not n.is_question}
+    for node_id in sorted(decisions & kept):
+        branches = [e for e in after.edges if e.source == node_id]
+        old = [e for e in branches if not e.added]
+        if old and any(e.added for e in branches):
+            errors.append(
+                f"decision {node_id} gets new branches from the correct answer, so it "
+                f"keeps none of its old ones: remove {', '.join(f'{e.source}->{e.target}' for e in old)} "
+                "(or mark a branch it still has as added) and leave out the path only "
+                "the old branch led to"
+            )
+    return errors
+
+
+def prune_replaced(parsed: dict) -> dict:
+    """A resolution reply without the pre-answer nodes its flow no longer reaches (the
+    path the correct mechanism replaced, once the model removed the branch into it), so
+    the model need not delete each of them. Added nodes always stay, so a fix that is
+    not connected is still reported by the gate. A reply of the wrong shape is returned
+    as it is."""
+    flow = parsed.get("flow")
+    if not isinstance(flow, dict):
+        return parsed
+    nodes, edges = flow.get("nodes"), flow.get("edges")
+    if not (isinstance(nodes, list) and isinstance(edges, list)):
+        return parsed
+    if not all(isinstance(n, dict) for n in nodes) or not all(isinstance(e, dict) for e in edges):
+        return parsed
+    starts = [n.get("id") for n in nodes if n.get("type") == "start"]
+    if len(starts) != 1:
+        return parsed
+    reached, todo = set(starts), list(starts)
+    while todo:
+        current = todo.pop()
+        for edge in edges:
+            if edge.get("source") == current and edge.get("target") not in reached:
+                reached.add(edge.get("target"))
+                todo.append(edge.get("target"))
+    cut = {n.get("id") for n in nodes if n.get("id") not in reached and n.get("added") is not True}
+    if not cut:
+        return parsed
+    logger.info("pruned %d replaced node(s) from the resolution", len(cut))
+    return {
+        **parsed,
+        "flow": {
+            **flow,
+            "nodes": [n for n in nodes if n.get("id") not in cut],
+            "edges": [e for e in edges if e.get("source") not in cut and e.get("target") not in cut],
+        },
+    }
+
+
 # A sentence ends at ".", "?" or "!" followed by space and a capital (or a quote), so a
 # file name such as ".claude/rules/" inside a sentence does not end it.
 def with_question_label(flow: DecisionFlow, doc: dict) -> DecisionFlow:
@@ -512,33 +602,43 @@ def flow_from(decomposition: QuestionDecomposition, question: KeyFreeQuestion | 
     q = key_free(question) if isinstance(question, dict) else question
     view = scenario_view(decomposition, q)
     terms = answer_only(q, decomposition)
-    events = sorted(view.events, key=lambda e: (e.sequence is None, e.sequence or 0))
-    found = [("process", e.name, e.source_status) for e in events]
-    found += [("output", f.text, f.source_status) for f in view.problem.symptoms]
+    # An event without a place in the order is usually what should happen, not what
+    # does: it is not drawn as a step of the situation.
+    events = sorted((e for e in view.events if e.sequence is not None), key=lambda e: e.sequence)
+    found = [
+        ("process", e.name, e.source_status, [e.actor_id, e.target_id, *e.input_ids, *e.output_ids])
+        for e in events
+    ]
+    found += [("output", f.text, f.source_status, []) for f in view.problem.symptoms]
+    known = {e.id for e in view.entities}
     steps = [
-        (kind, _short(text), status)
-        for kind, text, status in found
+        (kind, _short(text), status, ids)
+        for kind, text, status, ids in found
         if _short(text) and not leak(text, terms)
     ]
     # The first event starts the flow; without one, the context does.
     if not steps or steps[0][0] != "process":
         context = view.context.description
         label = "" if leak(context, terms) else _short(context)
-        steps.insert(0, ("start", label or "The situation", "inferred"))
+        steps.insert(0, ("start", label or "The situation", "inferred", []))
     steps = [("start", *steps[0][1:]), *steps[1 : MAX_NODES - 1]]
+
+    def entity_ids(label: str, ids: list) -> list[str]:
+        # The event's own actor, target and inputs/outputs first, then what the label names.
+        return list(dict.fromkeys(i for i in [*ids, *_mentioned(label, view.entities)] if i in known))
 
     nodes = [
         FlowNode(
             id=f"n{i + 1}",
             type=kind,
             label=label,
-            entity_ids=_mentioned(label, view.entities),
+            entity_ids=entity_ids(label, ids),
             condition_id="",
             source_status=status,
             is_question=False,
             added=False,
         )
-        for i, (kind, label, status) in enumerate(steps)
+        for i, (kind, label, status, ids) in enumerate(steps)
     ]
     ask = the_ask(q) or q.stem
     nodes.append(
@@ -568,7 +668,7 @@ def flow_from(decomposition: QuestionDecomposition, question: KeyFreeQuestion | 
 # Bump when the gates, `prune_after_question` or `with_question_label` change what is
 # stored from the same reply (the prompts are in the input keys, `step_key.py`).
 FLOW_CODE_VERSION = "2"
-RESOLVE_CODE_VERSION = "1"
+RESOLVE_CODE_VERSION = "2"
 
 
 def flow_messages(q: KeyFreeQuestion, decomposition: QuestionDecomposition) -> tuple[str, str]:
@@ -663,11 +763,12 @@ async def resolve_item(
         user,
         system=system,
         what="resolution",
-        validate=lambda parsed: resolution_errors(doc, decomposition, parsed),
+        validate=lambda parsed: resolution_errors(doc, decomposition, parsed, before=flow),
         max_attempts=MAX_ATTEMPTS,
         max_tokens=max_tokens,
         schema=Resolution,
         label=doc.get("_id"),
+        transform=prune_replaced,
     )
     return Resolution.model_validate(parsed), meta
 

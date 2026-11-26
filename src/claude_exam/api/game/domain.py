@@ -325,6 +325,14 @@ def to_review(doc: dict) -> GameReview:
     )
 
 
+def offered_rephrase(entry: dict | None) -> bool:
+    """Whether the round offered the question's rephrase when it took the question. An
+    entry stored before `rephrased` existed kept the rephrase's review in `simplified`
+    instead."""
+    entry = entry or {}
+    return bool(entry.get("rephrased", entry.get("simplified") is not None))
+
+
 def round_entry(
     doc: dict,
     rephrased: bool,

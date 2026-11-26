@@ -20,16 +20,23 @@ from pathlib import Path
 from fastapi import HTTPException
 from pymongo import MongoClient
 
+from claude_exam.api.decompose import read_decomposition
 from claude_exam.api.game.domain import answers_of
+from claude_exam.api.leaks import answer_only, leak
 from claude_exam.api.scenario_catalog import scenario_of, text_hash
 from claude_exam.api.story import SEED_LINE_WORDS, parse_story, record_fields, upsert_update
 
 SEED = Path(__file__).resolve().parents[1] / "data" / "story_seed.json"
 
 
-def seed_updates(items: list[dict], docs: list[dict]) -> tuple[list[tuple[str, dict]], list[str]]:
+def seed_updates(
+    items: list[dict], docs: list[dict], decompositions: dict[str, dict] | None = None
+) -> tuple[list[tuple[str, dict]], list[str]]:
     """`(question_id, record fields)` for every seed item, and what is wrong with the
-    seed (empty when it can be loaded)."""
+    seed (empty when it can be loaded). A beat is also tested as the beat step tests its
+    own (`leaks.leak`, with the question's decomposition from `decompositions`, by
+    question id, when it has a current one)."""
+    decompositions = decompositions or {}
     by_hash = {text_hash(d): d for d in docs}
     updates: list[tuple[str, dict]] = []
     problems: list[str] = []
@@ -57,6 +64,13 @@ def seed_updates(items: list[dict], docs: list[dict]) -> tuple[list[tuple[str, d
         except HTTPException as exc:
             problems.append(f"{name}: {exc.detail}")
             continue
+        decomposition = read_decomposition(decompositions.get(str(doc["_id"])), doc)
+        reason = leak(fields["beat"], answer_only(doc, decomposition).narrow())
+        if reason:
+            problems.append(f"{name}: the beat {reason}")
+            continue
+        # A beat the model wrote earlier leaves its metadata behind otherwise.
+        fields = {**fields, "beat_ica": None, "beat_input_key": None}
         node = (scenario.key, fields["stage"])
         position[node] = position.get(node, 0) + 1
         updates.append((str(doc["_id"]), record_fields(doc, fields, "seed", position[node])))
@@ -78,7 +92,8 @@ def main() -> int:
     db = MongoClient(database_url([a for a in argv if not a.startswith("--")])).get_default_database()
     items = json.loads(SEED.read_text(encoding="utf-8"))["items"]
     docs = list(db["examination"].find())
-    updates, problems = seed_updates(items, docs)
+    decompositions = {d["question_id"]: d for d in db["question_decomposition"].find()}
+    updates, problems = seed_updates(items, docs, decompositions)
     for problem in problems:
         print(f"  ! {problem}")
     if problems:

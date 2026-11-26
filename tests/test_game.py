@@ -821,3 +821,14 @@ def test_no_resolution_without_a_flow():
     url = f"/v1/game/rounds/{body['round_id']}/answers"
     result = c.post(url, json={"question_id": str(a["_id"]), "answer_index": 1}).json()
     assert result["resolution"]["rule"] == ""
+
+
+def test_a_round_entry_stored_before_rephrased_existed_still_offers_its_rephrase():
+    from claude_exam.api.game.domain import offered_rephrase
+
+    assert offered_rephrase({"rephrased": True})
+    assert not offered_rephrase({"rephrased": False, "simplified": {"explanation": ""}})
+    # Before: the rephrase's review was kept in `simplified` (None when not offered).
+    assert offered_rephrase({"simplified": {"explanation": "", "feedbacks": []}})
+    assert not offered_rephrase({"simplified": None})
+    assert not offered_rephrase(None)

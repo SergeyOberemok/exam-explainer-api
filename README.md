@@ -46,8 +46,13 @@ Indexes are created at startup. An index whose options changed is logged, not fa
 | `/v1/game` | Game for the Unity client: rounds, batches, answers, 50/50, browsing, story, objectives. Never reveals the answer before it is given. |
 | `/v1/search` | Text search over questions (`/questions` with answer key, `/game-questions` without). |
 | `/questions`, `/examination`, `/ica` | Study routes, import and pipeline jobs, ICA reference. |
+| `/evaluate` | Prompt evaluation: UI at `/evaluate/ui/`, dry-run API behind the API key. |
 
 Errors are `{"detail": "...", "code": "..."}`. Game responses are flat and null-free so Unity's `JsonUtility` can parse them.
+
+## Testing the extraction pipeline (UI)
+
+With the API running, open <http://127.0.0.1:8000/evaluate/ui/> to try a prompt or gate change on one question. Find a question by id or by its text, pick the steps to run, and see each result (steps, parts, entities, icons, decomposition, beat, flow, resolution, rephrase, check, raw JSON). Runs are dry: nothing is written to the database. If `API_KEY` is set, enter it in the page's key field.
 
 ## Adding questions
 

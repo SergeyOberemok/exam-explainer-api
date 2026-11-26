@@ -319,6 +319,22 @@ def test_a_faithful_rewrite_passes_and_each_loss_is_named():
     )
     # The scenario paragraph is background: its words need not come back.
     assert "customer support" not in GOOD["question"]
+    # A rewrite may not sell its answer with a benefit the original does not state...
+    assert "answer B adds a reason or benefit" in errors(
+        answers=[GOOD["answers"][0], "Put the limit in a PreToolUse hook, so process_refund never runs."]
+    )
+    assert "answer A adds a reason or benefit" in errors(
+        answers=["Set tool_choice to any in the subagent's prompt to ensure a call.", GOOD["answers"][1]]
+    )
+
+
+def test_a_purpose_the_original_states_may_stay():
+    from claude_exam.api.rephrase import added_purpose
+
+    assert not added_purpose("Raise max_tokens so that it can reason.", "Raise max_tokens so it can reason.")
+    assert added_purpose("Raise max_tokens.", "Raise max_tokens so that it can reason.")
+    # "so" alone inside a clause is not a purpose ("do so", "so far").
+    assert not added_purpose("Log every call.", "Log every call and do so for each tool.")
 
 
 def test_messages_set_the_question_in_its_chapter():
@@ -436,3 +452,15 @@ def test_difficulty_follows_the_tempting_answers_and_the_level():
     assert difficulty_of("remember", 0) == 1 and difficulty_of("apply", 1) == 1
     assert difficulty_of("apply", 2) == 2 and difficulty_of("analyze", 1) == 2
     assert difficulty_of("analyze", 2) == 3 and difficulty_of("apply", 3) == 3
+
+
+def test_a_rewrite_may_not_widen_a_fact():
+    from claude_exam.api.exam_terms import widened
+
+    assert widened("The agent posts these as definitive.", "The agent posts every finding as definitive.") == ["every"]
+    assert widened("It reads all files.", "It reads all the files.") == []
+    # "never" is how a rewrite says "does not": not a wider scope.
+    assert widened("It does not edit.", "It never edits.") == []
+    assert "the question says every" in " | ".join(
+        fidelity_errors(ITEM, {**GOOD, "question": GOOD["question"].replace("on 12%", "on every one of 12%")})
+    )

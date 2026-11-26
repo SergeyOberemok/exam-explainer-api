@@ -13,6 +13,7 @@ from claude_exam.api.game.domain import (
     FIFTY_FIFTY_CHARGES,
     FIFTY_FIFTY_ELIMINATES,
     MAX_ROUND_QUESTIONS,
+    offered_rephrase,
     OVERSAMPLE_FACTOR,
     dedupe,
     is_playable,
@@ -241,7 +242,7 @@ class GameService:
             story = story_of(doc, story_by_id.get(question_id))
             # Offer the rephrase again only if the round offered it then.
             simplified = simplified_by_id.get(question_id)
-            if not (stored.get(question_id) or {}).get("rephrased"):
+            if not offered_rephrase(stored.get(question_id)):
                 simplified = None
             decomposition = decomposition_by_id.get(question_id)
             items.append(to_game_question(doc, tags=tags, story=story, decomposition=decomposition))
@@ -373,7 +374,7 @@ class GameService:
             if entry is None:
                 raise errors.RoundFull()
             # Offer the rephrase only if the round offered it when the question was added.
-            if not entry.get("rephrased"):
+            if not offered_rephrase(entry):
                 simplified = None
 
         return GameRoundQuestion(

@@ -342,10 +342,10 @@ function stepsView(steps, planned) {
   const done = new Set(steps.map((s) => s.stage));
   const rows = steps.map((s) => [s.stage,
     chip(s.status, s.status === "ok" ? "ok" : s.status.startsWith("failed") ? "bad" : "warn"),
-    s.tokens || "", s.seconds ?? "",
+    s.tokens || "", s.attempts > 1 ? chip(String(s.attempts), "warn") : s.attempts || "", s.seconds ?? "",
     h("div", {}, s.detail ? h("div", { class: "error" }, s.detail) : "", (s.warnings || []).map((w) => h("div", { class: "chip warn" }, w)))]);
-  for (const p of planned || []) if (!done.has(p)) rows.push([p, chip(steps.length ? "waiting" : "queued"), "", "", ""]);
-  return table(["step", "status", "tokens", "s", "detail / warnings"], rows);
+  for (const p of planned || []) if (!done.has(p)) rows.push([p, chip(steps.length ? "waiting" : "queued"), "", "", "", ""]);
+  return table(["step", "status", "tokens", "tries", "s", "detail / warnings"], rows);
 }
 
 // Parts are built in code from the decomposition (no model call), the last one is the ask.

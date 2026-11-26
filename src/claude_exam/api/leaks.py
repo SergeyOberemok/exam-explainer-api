@@ -107,6 +107,15 @@ def answer_only(
     return AnswerOnly(entities=entities, answers=answers, proposed=proposed)
 
 
+def terms_key(terms: AnswerOnly) -> str:
+    """What of `terms` an input key must cover: the names and aliases of its entities,
+    sorted ("" without any). The answers come from the question, whose text is in the
+    messages already; the entities come from the decomposition, which a gate reads but
+    the messages of the beat and the rephrase do not show."""
+    names = {normalize(t) for e in terms.entities for t in (e.name, *e.aliases)}
+    return "|".join(sorted(n for n in names if n))
+
+
 def leak(text: str, terms: AnswerOnly) -> str:
     """Why `text` gives an answer away ("" when it does not)."""
     named = names_entity(text, terms.entities)

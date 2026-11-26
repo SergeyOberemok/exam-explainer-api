@@ -77,8 +77,7 @@ def parse_entities(
     MAX_ENTITIES, references to ids that do not exist (or were trimmed), and more than
     MAX_PER_ANSWER entities on an answer.
 
-    `texts` = (question text, answer texts), each the original and simplified version
-    joined. When given, a reference is also dropped (and logged) if the entity's name
+    `texts` = (question text, answer texts). When given, a reference is also dropped (and logged) if the entity's name
     or aliases do not occur in that text, and aliases found nowhere in the question
     are pruned. Without it only the structure is checked.
     """

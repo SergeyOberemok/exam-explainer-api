@@ -1,8 +1,7 @@
 """The question as the steps that write pre-answer content may read it: without the key.
 
 Everything a player can see before answering (the decomposition, its parts and
-entities, the icons, the flow, the rephrase) and the check that asks a model to answer
-without the key are written from a `KeyFreeQuestion`. It has no field for the correct
+entities, the icons, the flow, the beat) is written from a `KeyFreeQuestion`. It has no field for the correct
 answer, the feedback or the explanation, so a prompt builder that takes it cannot leak
 them: only objectives, the story and the resolution read the examination record itself.
 """

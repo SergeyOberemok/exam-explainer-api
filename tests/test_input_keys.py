@@ -15,12 +15,11 @@ from test_jobs import (
     run_job,
 )
 
-from claude_exam.api import batch, decompose, objectives, rephrase, story
+from claude_exam.api import batch, decompose, objectives, story
 from claude_exam.api.batch import STAGES, Stores
 
 pytestmark = pytest.mark.anyio
-# The game's steps, then the rephrase and its check (their own job mode, for study use).
-ALL = [*STAGES["full"], *STAGES["rephrase"]]
+ALL = list(STAGES["full"])
 
 
 @pytest.fixture
@@ -37,7 +36,6 @@ def stores_of(mongo) -> Stores:
     db = mongo.get_default_database()
     return Stores(
         db["examination"],
-        db["examination_simplified"],
         db["question_objectives"],
         db["question_story"],
         db["question_decomposition"],
@@ -55,8 +53,6 @@ async def done():
     mongo, ica = FakeMongo([q]), ScriptedIca()
     job = await run_job(mongo, ica, [q["_id"]], "full")
     assert job.failed == 0
-    job = await run_job(mongo, ica, [q["_id"]], "rephrase")
-    assert job.failed == 0
     return q, mongo, ica
 
 
@@ -67,12 +63,10 @@ async def test_a_finished_question_is_current_in_every_step():
 
 async def test_a_changed_prompt_or_frame_outdates_only_the_steps_that_read_it(monkeypatch):
     q, mongo, _ = await done()
-    # The company's intro is in the story's and the rephrase's messages (and the check's
-    # background, which this module does not patch).
+    # The company's intro is in the story's messages (and the resolution's, which this
+    # module does not patch).
     monkeypatch.setattr(story, "COMPANY_INTRO", story.COMPANY_INTRO + " Now in Lisbon.")
     assert await outdated(mongo, q) == ["story"]
-    monkeypatch.setattr(rephrase, "COMPANY_INTRO", rephrase.COMPANY_INTRO + " Now in Lisbon.")
-    assert await outdated(mongo, q) == ["story", "rephrase"]
 
 
 async def test_a_changed_upstream_result_outdates_what_was_built_from_it():
@@ -86,12 +80,6 @@ async def test_a_changed_upstream_result_outdates_what_was_built_from_it():
     record["semantic"]["entities"][0]["name"] = "Another thing"
     await db["question_decomposition"].update_one(question_id, {"$set": {"semantic": record["semantic"]}})
     assert await outdated(mongo, q) == ["icons", "resolve", "compose"]
-
-    # Another rephrase: its check, not the rephrase itself (its own inputs did not change).
-    await db["examination_simplified"].update_one(
-        question_id, {"$set": {"prompt.question": "Which mode never edits?"}}
-    )
-    assert await outdated(mongo, q) == ["icons", "resolve", "compose", "check"]
 
 
 async def test_another_decomposition_outdates_the_flow_and_its_resolution():

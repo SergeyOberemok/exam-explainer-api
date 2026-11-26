@@ -23,7 +23,6 @@ from claude_exam.api.dependencies import (
     AsyncDecompositionCollectionDep,
     AsyncGameQuestionCollectionDep,
     AsyncObjectivesCollectionDep,
-    AsyncSimplifiedCollectionDep,
     AsyncStoryCollectionDep,
     ExaminationDocDep,
     IcaClientDep,
@@ -103,7 +102,7 @@ class EvaluationOptions(BaseModel):
 async def get_options() -> EvaluationOptions:
     """The steps (in pipeline order) and the models the page offers."""
     return EvaluationOptions(
-        stages=[*STAGES["full"], *STAGES["rephrase"]],
+        stages=list(STAGES["full"]),
         dry_stages=list(DRY_STAGES),
         models=list(get_args(IcaModelId)),
         default_model="claude-haiku-5-5",
@@ -113,7 +112,6 @@ async def get_options() -> EvaluationOptions:
 @router.get("/questions")
 async def list_held_questions(
     collection: AsyncCollectionDep,
-    simplified: AsyncSimplifiedCollectionDep,
     decomposition: AsyncDecompositionCollectionDep,
     game_question: AsyncGameQuestionCollectionDep,
     story: AsyncStoryCollectionDep,
@@ -125,7 +123,7 @@ async def list_held_questions(
 ) -> HeldQuestionList:
     """The questions held for manual processing (imported with `manual=true`), oldest
     first, each with the steps of the full pipeline it still needs."""
-    stores = Stores(collection, simplified, objectives, story, decomposition, game_question)
+    stores = Stores(collection, objectives, story, decomposition, game_question)
     query = {**hold.HELD, **({"source": source} if source else {})}
     items = []
     async for doc in collection.find(query).sort("_id", 1).limit(limit):
@@ -146,7 +144,6 @@ async def list_held_questions(
 async def get_evaluation(
     doc: ExaminationDocDep,
     collection: AsyncCollectionDep,
-    simplified: AsyncSimplifiedCollectionDep,
     decomposition: AsyncDecompositionCollectionDep,
     game_question: AsyncGameQuestionCollectionDep,
     story: AsyncStoryCollectionDep,
@@ -156,12 +153,9 @@ async def get_evaluation(
     the steps it still needs) and what the pipeline stored for it."""
     query = {"question_id": str(doc["_id"])}
     result = Result.from_records(
-        doc,
-        await simplified.find_one(query),
-        await decomposition.find_one(query),
-        await game_question.find_one(query),
+        doc, await decomposition.find_one(query), await game_question.find_one(query)
     )
-    stores = Stores(collection, simplified, objectives, story, decomposition, game_question)
+    stores = Stores(collection, objectives, story, decomposition, game_question)
     return EvaluationView(
         original={
             **original_view(doc, await story.find_one(query), await objectives.find_one(query)),
@@ -185,7 +179,6 @@ async def _set_hold(doc: dict, held: bool, stores: Stores) -> HoldState:
 async def release_question(
     doc: ExaminationDocDep,
     collection: AsyncCollectionDep,
-    simplified: AsyncSimplifiedCollectionDep,
     decomposition: AsyncDecompositionCollectionDep,
     game_question: AsyncGameQuestionCollectionDep,
     story: AsyncStoryCollectionDep,
@@ -194,7 +187,7 @@ async def release_question(
     """Releases a held question into the game (and the backfills) as it is, whatever
     steps it still lacks. A real run releases it by itself once its steps are done."""
     return await _set_hold(
-        doc, False, Stores(collection, simplified, objectives, story, decomposition, game_question)
+        doc, False, Stores(collection, objectives, story, decomposition, game_question)
     )
 
 
@@ -202,7 +195,6 @@ async def release_question(
 async def hold_question(
     doc: ExaminationDocDep,
     collection: AsyncCollectionDep,
-    simplified: AsyncSimplifiedCollectionDep,
     decomposition: AsyncDecompositionCollectionDep,
     game_question: AsyncGameQuestionCollectionDep,
     story: AsyncStoryCollectionDep,
@@ -212,7 +204,7 @@ async def hold_question(
     backfills skip it. A real run that leaves none of its required steps missing
     releases it again."""
     return await _set_hold(
-        doc, True, Stores(collection, simplified, objectives, story, decomposition, game_question)
+        doc, True, Stores(collection, objectives, story, decomposition, game_question)
     )
 
 
@@ -236,7 +228,6 @@ async def run_evaluation(
     body: EvaluationRunRequest,
     doc: ExaminationDocDep,
     ica: IcaClientDep,
-    simplified: AsyncSimplifiedCollectionDep,
     decomposition: AsyncDecompositionCollectionDep,
     story: AsyncStoryCollectionDep,
     objectives: AsyncObjectivesCollectionDep,
@@ -249,14 +240,12 @@ async def run_evaluation(
     real run that writes the records (any step of the `full` job; 409 while a job runs)."""
     if body.persist:
         async for event in _persist_evaluation(
-            body, doc, ica, mongo, lock, simplified, decomposition, story
+            body, doc, ica, mongo, lock, decomposition, story
         ):
             yield event
         return
     query = {"question_id": str(doc["_id"])}
-    result = Result.from_records(
-        doc, await simplified.find_one(query), await decomposition.find_one(query)
-    )
+    result = Result.from_records(doc, await decomposition.find_one(query))
     story_record = await story.find_one(query)
     tags = await objectives.find_one(query)
     async for step in run_dry(
@@ -266,11 +255,10 @@ async def run_evaluation(
     yield EvaluationEvent(stage="done", status="done", result=result.as_json(doc))
 
 
-async def _stored_result(doc: dict, simplified, decomposition, story, game=None) -> Result:
+async def _stored_result(doc: dict, decomposition, story, game=None) -> Result:
     query = {"question_id": str(doc["_id"])}
     result = Result.from_records(
         doc,
-        await simplified.find_one(query),
         await decomposition.find_one(query),
         await game.find_one(query) if game is not None else None,
     )
@@ -284,7 +272,6 @@ async def _persist_evaluation(
     ica,
     mongo,
     lock,
-    simplified,
     decomposition,
     story,
 ) -> AsyncIterable[EvaluationEvent]:
@@ -318,10 +305,10 @@ async def _persist_evaluation(
             "detail": error["detail"] if error else "",
         }
         result = await _stored_result(
-            doc, simplified, decomposition, story, mongo.get_default_database()["game_question"]
+            doc, decomposition, story, mongo.get_default_database()["game_question"]
         )
         yield EvaluationEvent(**step, result=result.as_json(doc))
     result = await _stored_result(
-            doc, simplified, decomposition, story, mongo.get_default_database()["game_question"]
-        )
+        doc, decomposition, story, mongo.get_default_database()["game_question"]
+    )
     yield EvaluationEvent(stage="done", status="done", result=result.as_json(doc))

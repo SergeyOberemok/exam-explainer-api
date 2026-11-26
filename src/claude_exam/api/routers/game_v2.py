@@ -8,9 +8,8 @@ answers, each with what it proposes and the cast members it is made of) and the 
 impact (`success`, `partial`, `failure`) and the story consequence, with the review and
 the resolved flow.
 
-Same rules and error codes as `/v1/game` (`routers/game.py`): flat, null-free responses
-with lists in `items` (JsonUtility), the answer key only after answering, once. No
-rephrase: v2 has no `simplified` lists or routes.
+Flat, null-free responses with lists in `items` (JsonUtility), the answer key only after
+answering, once (`game.service.RoundRules`).
 """
 
 from typing import Annotated

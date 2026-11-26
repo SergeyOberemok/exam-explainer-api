@@ -2,18 +2,10 @@ import re
 
 from pymongo.asynchronous.collection import AsyncCollection
 
-from claude_exam.api.game.domain import (
-    PLAYABLE_QUERY,
-    answers_of,
-    correct_indices,
-    ids_filter,
-    is_playable,
-    to_game_question,
-)
+from claude_exam.api.game.domain import answers_of, correct_indices, ids_filter
 from claude_exam.api.schemas import (
     GameCard,
     GameCardList,
-    GameQuestionList,
     SearchHit,
     SearchResponse,
 )
@@ -90,29 +82,6 @@ async def search_questions(
     docs = await find_ranked(collection, build_filter(query, section, assessment_type), limit)
     items = [to_hit(d) for d in docs]
     return SearchResponse(items=items, total=len(items))
-
-
-async def search_game_questions(
-    collection: AsyncCollection,
-    simplified: AsyncCollection,
-    query: str,
-    *,
-    section: str = "",
-    assessment_type: str = "",
-    limit: int = 5,
-) -> GameQuestionList:
-    """Like `search_questions`, but only questions the game can play (with a rephrase
-    record in `simplified`), in the /game format: no answer key, so the player still has
-    to answer them in a round."""
-    rephrased = await simplified.distinct("question_id")
-    flt = {
-        **build_filter(query, section, assessment_type),
-        **PLAYABLE_QUERY,
-        "_id": ids_filter(str(i) for i in rephrased),
-    }
-    docs = await find_ranked(collection, flt, limit)
-    items = [to_game_question(d) for d in docs if is_playable(d)]
-    return GameQuestionList(items=items, total=len(items))
 
 
 async def search_game_cards(

@@ -8,16 +8,13 @@ one question by hand.
   path, visible under `GET /examination/jobs/{job_id}`), so it UPDATES the question's
   records in the database: its objectives, story, decomposition (with its parts,
   entities and icons), flow, resolution and game document (compose), as far as the
-  chosen steps go (`--mode rephrase` for the rephrase and its check). Without `--force` a step whose
-  result is current is skipped (`only_missing`).
+  chosen steps go. Without `--force` a step whose result is current is skipped
+  (`only_missing`).
 - `--dry-run`: calls the steps' compute functions only, feeding each step's result to the
   next in memory, and writes NOTHING. A step that is not run uses what is stored
   (`--stages flow` draws the flow of the stored decomposition). The objectives and story
   steps have no dry form: their stored records are used (a dry beat is written on the
   stored story's stage).
-
-With a decomposition, `--show` and `--mermaid` also print the pre-answer flow built in
-code (`flow.flow_from`, an experiment that is never stored) with the flow gate's verdict.
 
 Usage:
   uv run python scripts/run_pipeline.py QUESTION_ID [DATABASE_URL]
@@ -28,7 +25,7 @@ Usage:
   --mode      a job mode (`batch.STAGES`), default "full"
   --force     a real run redoes every chosen step, current or not
   --show      print the question, its beat, decomposition, parts (with their roles),
-              entities with their icons, the resolution, the game card and the rephrase
+              entities with their icons, the resolution and the game card
   --mermaid   print the flows as Mermaid `flowchart TD`, to paste into any Mermaid viewer
   --out FILE  write everything as JSON
 
@@ -90,7 +87,6 @@ async def dry_run(args, ica: IcaClient, db, doc: dict) -> Result:
     question_id = str(doc["_id"])
     result = Result.from_records(
         doc,
-        await db["examination_simplified"].find_one({"question_id": question_id}),
         await db["question_decomposition"].find_one({"question_id": question_id}),
     )
     story = await db["question_story"].find_one({"question_id": question_id})
@@ -128,7 +124,6 @@ async def real_run(args, ica: IcaClient, mongo: AsyncMongoClient, db, doc: dict)
     question_id = str(doc["_id"])
     result = Result.from_records(
         doc,
-        await db["examination_simplified"].find_one({"question_id": question_id}),
         await db["question_decomposition"].find_one({"question_id": question_id}),
         await db["game_question"].find_one({"question_id": question_id}),
     )
@@ -200,12 +195,6 @@ def show(doc: dict, result: Result) -> None:
             ids = f"  [{', '.join(part.entity_ids)}]" if part.entity_ids else ""
             print(f"  {part.role:<14}{part.text}{ids}")
 
-    if result.rephrase is not None:
-        print("\nREPHRASE")
-        print(f"  {result.rephrase.question}")
-        for i, answer in enumerate(result.rephrase.answers):
-            print(f"  {'*' if i in correct else ' '}{chr(65 + i)}. {answer}")
-
     entities = result.entities
     if entities is not None:
         print(f"\nENTITIES (question icon: {entities.question_icon})")
@@ -217,13 +206,6 @@ def show(doc: dict, result: Result) -> None:
     if result.flow is not None:
         v = result.flow.visualization
         print(f"\nFLOW: {v.primary} (+{', '.join(v.secondary) or 'none'}) - {v.reason}")
-    built, errors = result.code_flow(doc)
-    if built is not None:
-        print(f"\nFLOW BUILT IN CODE (experiment, not stored): {len(built.nodes)} nodes")
-        for node in built.nodes:
-            print(f"  {node.id:<4}{node.type:<9}{node.label}")
-        for error in errors or ["passes the flow gate"]:
-            print(f"  gate: {error}")
     if result.resolution is not None:
         r = result.resolution
         print("\nRESOLUTION")
@@ -252,8 +234,6 @@ def show(doc: dict, result: Result) -> None:
             print(f"  outcome {chr(65 + outcome['index'])} {outcome['impact']}: {outcome['consequence']}")
     elif result.game_missing:
         print(f"\nGAME CARD: not composed, missing {', '.join(result.game_missing)}")
-    if result.check:
-        print(f"\nCHECK: {result.check.get('verdict')}")
 
 
 async def main(argv: list[str]) -> int:
@@ -285,9 +265,6 @@ async def main(argv: list[str]) -> int:
                 print("\nFLOW BEFORE ANSWERING (Mermaid)\n" + mermaid(result.flow, answers))
             if result.resolution is not None:
                 print("\nRESOLVED FLOW (Mermaid)\n" + mermaid(result.resolution.flow))
-            built, _errors = result.code_flow(doc)
-            if built is not None:
-                print("\nFLOW BUILT IN CODE, experiment (Mermaid)\n" + mermaid(built, answers))
         if args.out:
             with open(args.out, "w", encoding="utf-8") as handle:
                 json.dump(result.as_json(doc), handle, ensure_ascii=False, indent=1, default=str)

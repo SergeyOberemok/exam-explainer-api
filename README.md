@@ -2,8 +2,8 @@
 
 A FastAPI backend for a Claude certification exam question bank, plus the Obsidian vault (study cards and roadmap) it grew out of. It:
 
-- stores practice-exam questions in MongoDB and serves them through study routes (with answer key) and a game API (`/v1/game`, no answer key until answered) for a Unity client;
-- turns an uploaded exam file into playable questions through an IBM Consulting Advantage (ICA) pipeline: learning objectives, story, simplified game text, visual entities, icons and a fidelity check;
+- stores practice-exam questions in MongoDB and serves them through study routes (with answer key) and a game API (`/v2/game`, no answer key until answered) for a Unity client;
+- turns an uploaded exam file into playable questions through an IBM Consulting Advantage (ICA) pipeline: learning objectives, story, a decomposition with its parts and entities, the beat, icons, the pre-answer flow and its resolution, composed into one game document per question;
 - keeps a Markdown vault (`Questions/`, `roadmap/`) with a small MCP server and Claude Code skills for studying.
 
 See [CLAUDE.md](CLAUDE.md) for the detailed design of each part.
@@ -43,8 +43,9 @@ Indexes are created at startup. An index whose options changed is logged, not fa
 
 | Prefix | Purpose |
 | --- | --- |
-| `/v1/game` | Game for the Unity client: rounds, batches, answers, 50/50, browsing, story, objectives. Never reveals the answer before it is given. |
-| `/v1/search` | Text search over questions (`/questions` with answer key, `/game-questions` without). |
+| `/v2/game` | Game for the Unity client over composed questions: rounds, batches, answers, 50/50, browsing, story, objectives. Never reveals the answer before it is given. |
+| `/v2/search` | The game's search (`/game-questions`, without the answer key). |
+| `/v1/search` | Study text search over questions (`/questions`, with the answer key). |
 | `/questions`, `/examination`, `/ica` | Study routes, import and pipeline jobs, ICA reference. |
 | `/evaluate` | Prompt evaluation: UI at `/evaluate/ui/`, dry-run API behind the API key. |
 
@@ -52,21 +53,21 @@ Errors are `{"detail": "...", "code": "..."}`. Game responses are flat and null-
 
 ## Testing the extraction pipeline (UI)
 
-With the API running, open <http://127.0.0.1:8000/evaluate/ui/> to try a prompt or gate change on one question. Find a question by id or by its text, pick the steps to run, and see each result (steps, parts, entities, icons, decomposition, beat, flow, resolution, rephrase, check, raw JSON). Runs are dry: nothing is written to the database. If `API_KEY` is set, enter it in the page's key field.
+With the API running, open <http://127.0.0.1:8000/evaluate/ui/> to try a prompt or gate change on one question. Find a question by id or by its text, pick the steps to run, and see each result (steps, parts, entities, icons, decomposition, beat, flow, resolution, game card, raw JSON). Runs are dry by default: nothing is written to the database unless "save to database" is ticked. If `API_KEY` is set, enter it in the page's key field.
 
 ## Adding questions
 
-Upload a practice-exam JSON file to `POST /examination/import` (use `?dry_run=true` first to see the report: new, duplicates, unplayable, unknown scenarios/sections). The import starts a `full` job: `objectives → story → simplify → entities → icons → check`. Re-uploading the same file is safe (duplicates are skipped).
+Upload a practice-exam JSON file to `POST /examination/import` (use `?dry_run=true` first to see the report: new, duplicates, unplayable, unknown scenarios/sections). The import starts a `full` job: `objectives → story → decompose → beat → icons → flow → resolve → compose`. Re-uploading the same file is safe (duplicates are skipped).
 
-To resume a broken import or apply a changed prompt or catalog, bump the module's `PROMPT_VERSION` if needed and call `POST /examination/pipeline/backfill`. The `ingest-exam` Claude Code skill runs this end to end.
+To resume a broken import or apply a changed prompt or catalog, call `POST /examination/pipeline/backfill` (each step's input key notices what changed). The `ingest-exam` Claude Code skill runs this end to end.
 
 Progress report:
 
 ```bash
-uv run python scripts/pipeline_report.py [DATABASE_URL] [--source FILE] [--show] [--check]
+uv run python scripts/pipeline_report.py [DATABASE_URL] [--source FILE] [--check]
 ```
 
-Other scripts in `scripts/`: `objective_coverage.py`, `story_coverage.py`, `propose_objectives.py`, `propose_scenarios.py`, `load_story_seed.py`, `export_game_icons.py`, `compare_simplified.py`.
+Other scripts in `scripts/`: `objective_coverage.py`, `story_coverage.py`, `propose_objectives.py`, `propose_scenarios.py`, `load_story_seed.py`, `export_game_icons.py`, `run_pipeline.py`, `reset_db.py`.
 
 ## Tests
 

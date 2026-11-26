@@ -20,7 +20,6 @@ from claude_exam.api.batch import (
     new_job,
     run_simplification_job,
 )
-from claude_exam.api.check import check_and_store
 from claude_exam.api.dependencies import (
     AsyncCollectionDep,
     AsyncDecompositionCollectionDep,
@@ -29,7 +28,6 @@ from claude_exam.api.dependencies import (
     AsyncJobsCollectionDep,
     AsyncMongoClientDep,
     AsyncObjectivesCollectionDep,
-    AsyncSimplifiedCollectionDep,
     AsyncStoryCollectionDep,
     IcaClientDep,
     PipelineConcurrencyDep,
@@ -53,7 +51,6 @@ from claude_exam.api.schemas import (
     QuestionObjectives,
     QuestionStory,
     SimplificationJob,
-    SimplifiedQuestion,
 )
 from claude_exam.api.security import require_api_key
 from claude_exam.api.beat import beat_and_store
@@ -156,7 +153,7 @@ async def import_practice_exam(
     text and answers) is left out, so the same file can be uploaded again. Unless
     `simplify=false`, a background job then runs the whole pipeline for each new
     question (job mode "full": objectives, story, decomposition with its parts and
-    entities, icons, flow, resolution, rephrase, check);
+    entities, icons, flow, resolution, compose);
     track it via `GET /examination/jobs/{job_id}`.
 
     The result also says what the pipeline cannot do for the new questions until a
@@ -210,7 +207,6 @@ async def import_practice_exam(
 @router.post("/pipeline/backfill", status_code=202)
 async def backfill_pipeline(
     collection: AsyncCollectionDep,
-    simplified: AsyncSimplifiedCollectionDep,
     objectives: AsyncObjectivesCollectionDep,
     story: AsyncStoryCollectionDep,
     decomposition: AsyncDecompositionCollectionDep,
@@ -242,7 +238,7 @@ async def backfill_pipeline(
     applied; `only_missing=false` redoes everything. Track it via
     `GET /examination/jobs/{job_id}`.
     """
-    stores = Stores(collection, simplified, objectives, story, decomposition, game_question)
+    stores = Stores(collection, objectives, story, decomposition, game_question)
     question_ids: list[ObjectId] = []
     query = hold.with_hold({"source": source} if source else {}, include_manual)
     async for doc in collection.find(query):
@@ -297,7 +293,7 @@ async def backfill_icons(
     those without current icons: none yet, or picked from another catalog, prompt or
     set of entities); track it via `GET /examination/jobs/{job_id}`.
     """
-    stores = Stores(collection, None, None, None, decomposition)
+    stores = Stores(collection, None, None, decomposition)
     question_ids: list[ObjectId] = []
     async for record in decomposition.find({}, {"question_id": 1}):
         if not ObjectId.is_valid(record.get("question_id", "")):
@@ -310,33 +306,6 @@ async def backfill_icons(
         question_ids.append(doc["_id"])
     job_id = await starter.start("icons-backfill", question_ids, model_id, "icons", only_missing)
     return EntitiesBackfill(job_id=job_id, total=len(question_ids))
-
-
-@router.post("/{question_id}/check")
-async def check_question(
-    question_id: QuestionObjectIdDep,
-    collection: AsyncCollectionDep,
-    simplified: AsyncSimplifiedCollectionDep,
-    story: AsyncStoryCollectionDep,
-    ica: IcaClientDep,
-    lock: SimplificationLockDep,
-    model_id: ModelIdQuery = "claude-haiku-5-5",
-    max_tokens: MaxTokensQuery = None,
-) -> SimplifiedQuestion:
-    """
-    (Re)check the rephrase of one question: a model answers it without the key, and
-    the verdict is stored on the rephrase record (`check`). A rephrase whose verdict is
-    "changed" is not offered by the game. 404 without a rephrase; 409 while a job runs.
-    """
-    doc = await collection.find_one({"_id": question_id})
-    if doc is None:
-        raise HTTPException(status_code=404, detail="question not found")
-    _refuse_while_a_job_runs(lock)
-    async with lock:
-        record = await story.find_one({"question_id": str(question_id)})
-        return await check_and_store(
-            ica, simplified, doc, model_id, max_tokens, story=story_of(doc, record)
-        )
 
 
 @router.get("/{question_id}/decomposition")
@@ -467,7 +436,7 @@ async def backfill_objectives(
     track it via `GET /examination/jobs/{job_id}`.
     """
     question_ids: list[ObjectId] = []
-    stores = Stores(collection, None, objectives, None)
+    stores = Stores(collection, objectives, None)
     query = hold.with_hold({"section": section} if section else {}, include_manual)
     async for doc in collection.find(query):
         if only_missing and await is_current("objectives", stores, doc):
@@ -564,7 +533,7 @@ async def backfill_story(
     `GET /examination/jobs/{job_id}`.
     """
     question_ids: list[ObjectId] = []
-    stores = Stores(collection, None, None, story)
+    stores = Stores(collection, None, story)
     async for doc in collection.find(hold.with_hold({}, include_manual)):
         if only_missing and not await missing_stages("story", stores, doc):
             continue

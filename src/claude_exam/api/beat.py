@@ -2,7 +2,7 @@
 
 The story step (`story.py`) places a question in its chapter and stage and writes the
 lines shown after the answer; it reads the key, which those lines need. The beat is read
-before answering (and the rephrase is set after it), so it is written here, from the
+before answering, so it is written here, from the
 `KeyFreeQuestion`: the model sees the company, the chapter with its people, the stage
 the story step chose, the question and the answers the player will see, and never the
 correct answer, the feedback or the explanation.

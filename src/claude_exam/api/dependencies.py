@@ -12,14 +12,11 @@ from pymongo.asynchronous.collection import AsyncCollection
 from claude_exam.api.game.errors import (
     QuestionNotFound,
     RoundNotFound,
-    SimplifiedNotFound,
 )
 from claude_exam.api.game.card_repository import CardRepository
 from claude_exam.api.game.card_service import CardService
-from claude_exam.api.game.repository import QuestionRepository, RoundRepository
-from claude_exam.api.game.service import GameService
+from claude_exam.api.game.repository import RoundRepository
 from claude_exam.api.ica import IcaClient
-from claude_exam.api.schemas import OBJECT_ID_PATTERN
 
 
 def get_ica_client(request: Request) -> IcaClient:
@@ -36,16 +33,6 @@ def get_async_collection(request: Request) -> AsyncCollection:
 
 
 AsyncCollectionDep = Annotated[AsyncCollection, Depends(get_async_collection)]
-
-
-def get_async_simplified_collection(request: Request) -> AsyncCollection:
-    client: AsyncMongoClient = request.app.state.async_mongo_client
-    return client.get_default_database()["examination_simplified"]
-
-
-AsyncSimplifiedCollectionDep = Annotated[
-    AsyncCollection, Depends(get_async_simplified_collection)
-]
 
 
 def get_async_objectives_collection(request: Request) -> AsyncCollection:
@@ -168,23 +155,6 @@ def get_round_object_id(round_id: str) -> ObjectId:
 RoundObjectIdDep = Annotated[ObjectId, Depends(get_round_object_id)]
 
 
-def get_game_service(
-    examination: AsyncCollectionDep,
-    simplified: AsyncSimplifiedCollectionDep,
-    rounds: AsyncRoundsCollectionDep,
-    objectives: AsyncObjectivesCollectionDep,
-    story: AsyncStoryCollectionDep,
-    decomposition: AsyncDecompositionCollectionDep,
-) -> GameService:
-    return GameService(
-        QuestionRepository(examination, simplified, objectives, story, decomposition),
-        RoundRepository(rounds),
-    )
-
-
-GameServiceDep = Annotated[GameService, Depends(get_game_service)]
-
-
 def get_card_service(
     cards: AsyncGameQuestionCollectionDep,
     examination: AsyncCollectionDep,
@@ -195,20 +165,6 @@ def get_card_service(
 
 
 CardServiceDep = Annotated[CardService, Depends(get_card_service)]
-
-
-_OBJECT_ID_HEX = re.compile(OBJECT_ID_PATTERN)
-
-
-def get_simplified_question_id(question_id: str) -> str:
-    """Path `question_id` of a simplified question (stored as a string); a malformed id is a
-    404 like an unknown one."""
-    if not _OBJECT_ID_HEX.match(question_id):
-        raise SimplifiedNotFound()
-    return question_id
-
-
-SimplifiedQuestionIdDep = Annotated[str, Depends(get_simplified_question_id)]
 
 
 @dataclass

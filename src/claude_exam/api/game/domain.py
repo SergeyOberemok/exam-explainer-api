@@ -1,8 +1,8 @@
 """Pure game rules and mappings: no database, no HTTP.
 
-Questions come from `examination` (id in `_id`) or `examination_simplified` (same
-`prompt` / `correct_response` layout, examination id as a *string* in `question_id`;
-the id types differ for historical reasons, so the code always joins through `str(_id)`).
+Questions come from `examination` (id in `_id`); the pipeline's records name them by
+`question_id`, the examination id as a *string*, so the code always joins through
+`str(_id)`.
 """
 
 import logging
@@ -24,14 +24,10 @@ from claude_exam.api.scenario_catalog import (
 from claude_exam.api.schemas import (
     AnswerEntities,
     DecisionFlow,
-    GameAnswer,
     GameFlow,
     GamePart,
-    GameQuestion,
-    GameResolution,
     GameReview,
     PromptEntities,
-    Resolution,
 )
 
 logger = logging.getLogger(__name__)
@@ -47,26 +43,6 @@ MAX_ROUND_QUESTIONS = 500
 # `$sample` runs on the pre-filter and `is_playable` has the last word, so ask for more
 # than needed and trim: a round then rarely comes back short.
 OVERSAMPLE_FACTOR = 2
-# Verdicts the check step stores on a rephrase record (`check.verdict`): a model
-# answering the rephrase without the key picked the right answer ("same"); it picked
-# another one there but the right one on the original, so the rewrite is at fault
-# ("changed", and the game does not offer that rephrase); or it missed both, which says
-# the question is hard, not that the rewrite is wrong ("hard").
-CHECK_SAME, CHECK_CHANGED, CHECK_HARD = "same", "changed", "hard"
-
-# Pre-filter for pick-one questions the game can show; `is_playable` has the final say.
-# A question held for manual processing (`hold.py`) is left out until it is released.
-# The game also serves only questions with a rephrase record (`examination_simplified`);
-# that lives in another collection, so the service adds it as an id filter
-# (`QuestionRepository.rephrased_ids`, `playable_query(only_ids=...)`).
-PLAYABLE_QUERY: dict = {
-    "correct_response": {"$size": 1},
-    "prompt.answers.1": {"$exists": True},
-    f"prompt.answers.{MAX_ANSWERS}": {"$exists": False},
-    **hold.NOT_HELD,
-}
-
-
 def letter_to_index(letter: object) -> int:
     """'a' -> 0, 'b' -> 1, ...; -1 for anything that isn't a single letter
     (correct_response stores option letters, but stored data may be malformed)."""
@@ -97,24 +73,6 @@ def is_playable(doc: dict) -> bool:
         and len(correct_indices(doc)) == 1
         and not hold.is_held(doc)
     )
-
-
-def simplified_matches(original: dict, simplified: dict) -> bool:
-    """A rephrase (`rephrase.py`) is only usable if it keeps the answers and the correct
-    one, and the check step (`check.py`) has not found that its wording changed which
-    answer is right. A rephrase that was never checked is usable."""
-    if ((simplified.get("check") or {}).get("verdict")) == CHECK_CHANGED:
-        return False
-    return len(answers_of(simplified)) == len(answers_of(original)) and correct_indices(
-        simplified
-    ) == correct_indices(original)
-
-
-def usable_simplified(original: dict, simplified: dict | None) -> dict | None:
-    """The rephrase `simplified` if the game can offer it for `original`, else None."""
-    if simplified is not None and simplified_matches(original, simplified):
-        return simplified
-    return None
 
 
 def entities_of(record: dict | None, count: int) -> PromptEntities:
@@ -247,26 +205,6 @@ def flow_of(original: dict, record: dict | None) -> GameFlow:
     return game_flow(current["flow"])
 
 
-def resolution_of(original: dict, record: dict | None) -> dict | None:
-    """The resolution to keep in a round entry (a `GameResolution` dump), None without
-    one; sent exactly when `flow_of` sends the flow it continues. Part of the answer
-    key."""
-    record = _current_decomposition(original, record)
-    if not (decompose.has_flow(record) and decompose.has_resolution(record)):
-        return None
-    try:
-        resolution = Resolution.model_validate(record["resolution"])
-    except ValidationError as e:
-        logger.warning("ignoring malformed resolution: %s", e)
-        return None
-    return GameResolution(
-        answer_requirements=resolution.answer_requirements,
-        flow=game_flow(resolution.flow.model_dump()),
-        options=resolution.options,
-        rule=resolution.rule,
-    ).model_dump()
-
-
 def parts_of(record: dict | None) -> list[GamePart]:
     """The semantic parts of a `question_decomposition` record ([] when it has none or
     they are malformed)."""
@@ -277,49 +215,6 @@ def parts_of(record: dict | None) -> list[GamePart]:
         return [GamePart.model_validate(p) for p in raw]
     except ValidationError:
         return []
-
-
-def to_game_question(
-    doc: dict,
-    *,
-    simplified: bool = False,
-    original: dict | None = None,
-    tags: dict | None = None,
-    story: dict | None = None,
-    decomposition: dict | None = None,
-) -> GameQuestion:
-    """Map an `examination` doc, or with `original` (its `examination` doc) a rephrase
-    from `examination_simplified`. `tags` is the question's `question_objectives`
-    record, `story` what `story_of` returned for the original and `decomposition` its
-    `question_decomposition` record: the entities, the parts and the flow come from it,
-    for both versions (the rephrase keeps the answers in order, so the entities still
-    fit; its sentences are not the parts, so it carries none). `simplified` without
-    `original` (browsing rephrases) gives one without entities and flow."""
-    simplified = simplified or original is not None
-    source = original if original is not None else doc
-    record = _current_decomposition(source, decomposition)
-    prompt = doc.get("prompt") or {}
-    story = story or {}
-    return GameQuestion(
-        id=str(doc["question_id"] if simplified else doc["_id"]),
-        simplified=simplified,
-        section=doc.get("section") or "",
-        assessment_type=doc.get("assessment_type") or "",
-        question=prompt.get("question") or "",
-        answers=[
-            GameAnswer(index=i, text=text or "") for i, text in enumerate(answers_of(doc))
-        ],
-        entities=entities_of(record, len(answers_of(doc))) if record else PromptEntities(),
-        objectives=objectives_of(tags),
-        difficulty=difficulty_of(tags),
-        scenario=story.get("scenario", ""),
-        stage=story.get("stage", ""),
-        # A rephrase has the scenario woven in, so it has no separate stem.
-        stem="" if simplified else story.get("stem", ""),
-        beat=story.get("beat", ""),
-        parts=[] if simplified else parts_of(record),
-        flow=flow_of(source, decomposition),
-    )
 
 
 def to_review(doc: dict) -> GameReview:
@@ -335,70 +230,10 @@ def to_review(doc: dict) -> GameReview:
     )
 
 
-def offered_rephrase(entry: dict | None) -> bool:
-    """Whether the round offered the question's rephrase when it took the question. An
-    entry stored before `rephrased` existed kept the rephrase's review in `simplified`
-    instead."""
-    entry = entry or {}
-    return bool(entry.get("rephrased", entry.get("simplified") is not None))
-
-
-def round_entry(
-    doc: dict,
-    rephrased: bool,
-    tags: dict | None = None,
-    record: dict | None = None,
-    decomposition: dict | None = None,
-) -> dict:
-    """What a round document keeps for one playable question: its answer key and review,
-    and whether the round offers its rephrase (`record` is its `question_story` record,
-    `decomposition` its `question_decomposition` record)."""
-    correct = correct_indices(doc)[0]
-    count = len(answers_of(doc))
-    return {
-        "correct": correct,
-        "count": count,
-        "original": to_review(doc).model_dump(),
-        "rephrased": rephrased,
-        "misconceptions": misconceptions_of(tags, count, correct),
-        "outcomes": outcomes_of(doc, record),
-        "resolution": resolution_of(doc, decomposition),
-    }
-
-
-def filter_query(section: str | None, assessment_type: str | None) -> dict:
-    """Exact filters; empty or None means "any" (JsonUtility sends "" for unset strings)."""
-    query: dict = {}
-    if section:
-        query["section"] = section
-    if assessment_type:
-        query["assessment_type"] = assessment_type
-    return query
-
-
 def ids_filter(question_ids) -> dict:
     """`{"$in": [...]}` on examination `_id` for question ids given as strings (invalid
     ones left out)."""
     return {"$in": [ObjectId(i) for i in question_ids if ObjectId.is_valid(i)]}
-
-
-def playable_query(
-    section: str | None,
-    assessment_type: str | None,
-    exclude_ids: list[str] = (),
-    only_ids: list[str] | None = None,
-) -> dict:
-    """Filters plus the playable pre-filter, leaving out `exclude_ids` (examination ids)
-    and, when `only_ids` is given (it may be empty), keeping only those."""
-    query = {**filter_query(section, assessment_type), **PLAYABLE_QUERY}
-    ids: dict = {}
-    if only_ids is not None:
-        ids.update(ids_filter(only_ids))
-    if exclude_ids:
-        ids["$nin"] = [ObjectId(i) for i in exclude_ids]
-    if ids:
-        query["_id"] = ids
-    return query
 
 
 def dedupe(docs: list[dict], key: str) -> list[dict]:
@@ -411,8 +246,3 @@ def dedupe(docs: list[dict], key: str) -> list[dict]:
             seen.add(doc_id)
             unique.append(doc)
     return unique
-
-
-def pick_playable(docs: list[dict], count: int) -> list[dict]:
-    """The first `count` distinct playable docs."""
-    return [d for d in dedupe(docs, "_id") if is_playable(d)][:count]

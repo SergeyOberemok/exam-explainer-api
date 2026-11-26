@@ -1,7 +1,7 @@
 """Does a text shown before answering give an answer away? One definition for every step.
 
 A text a player reads before answering (a decomposition's scenario facts, a semantic
-part, a flow label, the story beat, the rephrased question) leaks when it
+part, a flow label, the story beat) leaks when it
 
 - names an entity only an answer option names (`AnswerOnly.entities`: what the answers
   propose, such as "a separate review instance"; one the scenario paragraph or the stem
@@ -83,7 +83,7 @@ class AnswerOnly:
 
     def narrow(self) -> "AnswerOnly":
         """Only what an answer names. For a text written from the raw question (the
-        decomposition, its parts, the beat, the rephrase), which may well reuse the
+        decomposition, its parts, the beat), which may well reuse the
         model's own word for something; the flow, drawn from `scenario_view` where such
         entities are already gone, keeps the wide set."""
         return AnswerOnly(entities=self.proposed, answers=self.answers, proposed=self.proposed)
@@ -111,7 +111,7 @@ def terms_key(terms: AnswerOnly) -> str:
     """What of `terms` an input key must cover: the names and aliases of its entities,
     sorted ("" without any). The answers come from the question, whose text is in the
     messages already; the entities come from the decomposition, which a gate reads but
-    the messages of the beat and the rephrase do not show."""
+    the messages of the beat do not show."""
     names = {normalize(t) for e in terms.entities for t in (e.name, *e.aliases)}
     return "|".join(sorted(n for n in names if n))
 

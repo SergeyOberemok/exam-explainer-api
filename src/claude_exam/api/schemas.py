@@ -4,7 +4,6 @@ from typing import Annotated, Any, Literal
 
 from pydantic import (
     BaseModel,
-    ConfigDict,
     Field,
     ValidationError,
     field_validator,
@@ -108,7 +107,7 @@ class QuestionPage(BaseModel):
 
 # Game models are flat and null-free so Unity's JsonUtility can parse them. Nothing a
 # game client can read says which answer is correct: it learns that, with the
-# feedback and explanation, only by answering inside a round (`/v1/game/rounds`).
+# feedback and explanation, only by answering inside a round (`/v2/game/rounds`).
 
 # Examination ids are ObjectId hex strings; the pattern also keeps them safe to use
 # as keys in a round document's field paths.
@@ -143,7 +142,7 @@ class AnswerEntities(BaseModel):
 
 
 class PromptEntities(BaseModel):
-    """Entities of a simplified question, resolved per place they are mentioned."""
+    """Visual entities of a question, resolved per place they are mentioned."""
 
     # Icon key for the question as a whole.
     question_icon: str | None = None
@@ -178,55 +177,6 @@ class PromptEntities(BaseModel):
         }
 
 
-class GameAnswer(BaseModel):
-    """One answer option, without whether it is correct."""
-
-    index: int
-    text: str
-
-
-class GameQuestion(BaseModel):
-    # Always the examination question id, also for simplified questions.
-    id: str
-    # True for the question's rephrase (`examination_simplified`).
-    simplified: bool = False
-    section: str
-    assessment_type: str
-    question: str
-    answers: list[GameAnswer]
-    # Visual entities of the question (from its decomposition, index-aligned with
-    # `answers`; the same on its rephrase); empty lists without a decomposition and on
-    # search results.
-    entities: PromptEntities = PromptEntities()
-    # Learning-objective keys from `objective_catalog.OBJECTIVES`, the main one first;
-    # empty until the question is tagged.
-    objectives: list[str] = []
-    # 1 (easy) to 3 (hard); 0 until the question is tagged.
-    difficulty: int = 0
-    # Chapter key from `scenario_catalog.SCENARIOS`; "" when the question's scenario
-    # paragraph is missing or unknown.
-    scenario: str = ""
-    # Stage key from `scenario_catalog.STAGES`; "" until the question has a story record.
-    stage: str = ""
-    # `question` without its scenario paragraph, for a client that shows the chapter's
-    # intro instead. "" when there is no chapter, and on simplified questions.
-    stem: str = ""
-    # One line to show before the question; "" until the question has a story record.
-    beat: str = ""
-    # The question as semantic parts, built from its decomposition (originals of a
-    # decomposed question; [] on rephrases). A part's `entity_ids` match `entities[].ref`
-    # and the flow's node `entity_ids`.
-    parts: list["GamePart"] = []
-    # The pre-answer flow of the question (key-free, `flow.py`); empty when it has none.
-    flow: "GameFlow" = Field(default_factory=lambda: GameFlow())
-
-
-class GameQuestionList(BaseModel):
-    # JsonUtility needs an object at the JSON root, so lists are wrapped.
-    items: list[GameQuestion]
-    total: int
-
-
 GameBatchSize = Annotated[int, Field(ge=1, le=50)]
 
 
@@ -244,35 +194,12 @@ class GameRoundRequest(BaseModel):
     ordered: bool = False
 
 
-class GameRound(BaseModel):
-    round_id: str
-    # The round's questions, in play order.
-    items: list[GameQuestion]
-    # Rephrases of the round's questions that have one, matched by `id`.
-    simplified: list[GameQuestion]
-    # Playable questions matching the filters.
-    total: int
-    fifty_fifty_charges: int
-
-
 class GameRoundBatchRequest(BaseModel):
     """Ask for the round's next batch. `batch_index` is the batch wanted (the start is batch 0,
     so the first call sends 1); sending the same index again returns that batch again."""
 
     batch_index: int = Field(ge=1)
     count: GameBatchSize = 10
-
-
-class GameRoundBatch(BaseModel):
-    """More questions for the same round, none of them already in it. Empty `items` means
-    every playable question matching the round's filters is already in the round."""
-
-    batch_index: int
-    items: list[GameQuestion]
-    # Rephrases of `items` that have one, matched by `id`.
-    simplified: list[GameQuestion]
-    # Playable questions matching the round's filters that are not in the round yet.
-    remaining: int
 
 
 class GameAnswerRequest(BaseModel):
@@ -288,22 +215,6 @@ class GameReview(BaseModel):
     feedbacks: list[str] = []
 
 
-class GameAnswerResult(BaseModel):
-    question_id: str
-    answer_index: int
-    is_correct: bool
-    correct_index: int
-    original: GameReview
-    # What picking `answer_index` suggests the player got wrong; "" for the correct
-    # answer and for a question that is not tagged.
-    misconception: str = ""
-    # What happens in the story after this answer; "" without a story record.
-    outcome: str = ""
-    # How the correct answer resolves the question, and how each option measures up
-    # (`flow.py`); empty when the question has none. Part of the answer key.
-    resolution: "GameResolution" = Field(default_factory=lambda: GameResolution())
-
-
 class GameFiftyFiftyRequest(BaseModel):
     question_id: GameQuestionId
 
@@ -316,14 +227,6 @@ class GameFiftyFiftyResult(BaseModel):
 
 class GameRoundQuestionRequest(BaseModel):
     question_id: GameQuestionId
-
-
-class GameRoundQuestion(BaseModel):
-    """A question added to a round, without its answer key."""
-
-    item: GameQuestion
-    # Its simplified version: one item, or none (a list, since JsonUtility can't read null).
-    simplified: list[GameQuestion]
 
 
 class GameSectionList(BaseModel):
@@ -400,23 +303,6 @@ class IcaAgentList(BaseModel):
 IcaModelId = Literal["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5-5"]
 
 
-class ExplainRequest(BaseModel):
-    """Send one practice-exam item to the ICA chat model for simplification."""
-
-    question_id: int
-    # Model called via /chat-models/chat/completions.
-    # Defaults to claude-haiku-5-5 — the same model the Exam Explainer assistant uses.
-    model_id: IcaModelId = "claude-haiku-5-5"
-    max_tokens: int | None = None
-
-
-class SimplifyRequest(BaseModel):
-    """Options for simplifying a stored question (the question id is in the path)."""
-
-    model_id: IcaModelId = "claude-haiku-5-5"
-    max_tokens: int | None = None
-
-
 PartRole = Literal[
     "context", "current_state", "problem", "consequence", "goal", "constraint", "ask"
 ]
@@ -432,23 +318,6 @@ class SemanticPart(BaseModel):
     entity_ids: list[str] = []
 
 
-class SimplifiedPrompt(BaseModel):
-    """Mirrors the original item's prompt sub-object with simplified content."""
-
-    question: str
-    answers: list[str]
-    feedbacks: list[str]
-    explanation: str
-
-
-class Rephrase(BaseModel):
-    """A question and its answers in other words (`rephrase.py`), index-aligned with
-    the original's answers. Written without the key, so it has no feedback."""
-
-    question: str
-    answers: list[str]
-
-
 class IcaMeta(BaseModel):
     """ICA call metadata, kept out of the item's top-level keys."""
 
@@ -457,43 +326,6 @@ class IcaMeta(BaseModel):
     total_tokens: int
     # Replies asked for (the first one plus repairs, `ica_json.ask_validated`).
     attempts: int = 1
-
-
-class SimplifiedCheck(BaseModel):
-    """What the check step found for a rephrase (`check.py`)."""
-
-    # "same": a model answering the rephrase without the key picked the right answer.
-    # "changed": it picked another one there but the right one on the original, so the
-    # rewrite is at fault and the game does not offer this text.
-    # "hard": it missed both; the question is hard, the rewrite is not shown to be wrong.
-    verdict: Literal["same", "changed", "hard"]
-    # Index of the answer picked on the rephrase, and on the original (None when the
-    # original was not asked: only a disagreement asks it).
-    picked: int
-    picked_original: int | None = None
-    # `step_key.py`: what the check was asked from (None on older records).
-    input_key: str | None = None
-    ica: IcaMeta
-
-
-class SimplifiedQuestion(BaseModel):
-    """Record stored in `examination_simplified`, keyed by the examination `_id`: the
-    question's rephrase (`rephrase.py`) and its check."""
-
-    question_id: str
-    section: str
-    assessment_type: str
-    source: str
-    correct_response: list[str]
-    related_lectures: list[Any]
-    prompt: Rephrase
-    ica: IcaMeta
-    # `step_key.py`: what the rephrase was written from (None on older records).
-    input_key: str | None = None
-    # Result of the check step; None until it has run for this text.
-    check: SimplifiedCheck | None = None
-    created_at: datetime
-    updated_at: datetime
 
 
 ObjectiveLevel = Literal["remember", "understand", "apply", "analyze"]
@@ -509,7 +341,7 @@ class Distractor(BaseModel):
 
 class QuestionObjectives(BaseModel):
     """Record stored in `question_objectives`, keyed by the examination `_id` (as a
-    string, like `examination_simplified`). Written by `objectives.tag_and_store`."""
+    string). Written by `objectives.tag_and_store`."""
 
     question_id: str
     section: str
@@ -578,18 +410,14 @@ class EntitiesBackfill(BaseModel):
 # "decompose": the decomposition and what is built on it (icons, flow, resolution).
 # "icons", "flow", "resolve": one step of those (the flow also redoes its resolution).
 # "compose": only the game document, from the stored records.
-# "rephrase": write the rephrase and check it; "check": only check stored rephrases
-# (study use; the game no longer reads them).
 # "objectives", "story": tag questions with learning objectives, or place them in their
 # chapter's stages; each writes its own collection and needs its catalog first.
 JobMode = Literal[
     "full",
-    "rephrase",
     "icons",
     "objectives",
     "story",
     "beat",
-    "check",
     "decompose",
     "flow",
     "resolve",
@@ -604,8 +432,6 @@ JobStage = Literal[
     "icons",
     "flow",
     "resolve",
-    "rephrase",
-    "check",
     "compose",
 ]
 
@@ -648,39 +474,6 @@ class SimplificationJob(BaseModel):
     started_at: datetime | None = None
     finished_at: datetime | None = None
 
-
-class ExplainResponse(BaseModel):
-    """
-    Simplified item — top-level keys match an original practice-exam item
-    (_class, id, assessment_type, prompt, correct_response, section,
-    question_plain, related_lectures). Call metadata lives under `ica`, so
-    dropping that one key yields a record storable beside the source record.
-    """
-
-    # populate_by_name lets internal code set the field as class_.
-    # serialization_alias on the field + model_config serialize_by_alias=True
-    # ensures FastAPI sends "_class" (not "class_") over the wire.
-    model_config = ConfigDict(populate_by_name=True)
-
-    class_: str = Field(alias="_class", serialization_alias="_class")
-    id: int
-    assessment_type: str
-    prompt: SimplifiedPrompt
-    correct_response: list[str]
-    section: str
-    question_plain: str
-    related_lectures: list[Any]
-    # Not part of the original item; strip before storing.
-    ica: IcaMeta
-
-
-# ---------------------------------------------------------------------------------------
-# Question decomposition, decision flow and resolution (`decompose.py`, `flow.py`).
-# The model replies in these shapes (strict `json_schema`, see `ica_json.strict_schema`)
-# and they are stored as they are in `question_decomposition`, one record per question.
-# Field names follow `docs/question_decomposition_decision_flow_spec.md`, except that a
-# flow edge says `source` / `target` (not `from` / `to`): `from` is a keyword in the
-# game's C#.
 
 SourceStatus = Literal["explicit", "inferred", "unknown"]
 DecompEntityType = Literal[
@@ -924,7 +717,7 @@ class DecompositionRecord(BaseModel):
     parts: list[SemanticPart] = []
     entities: PromptEntities = PromptEntities()
     # The icon picks by id (None before the icon step ran, or on a record written
-    # before they were stored this way); `entities` carries the same keys for /v1.
+    # before they were stored this way); `entities` carries the same keys.
     icons: QuestionIcons | None = None
     icons_ica: IcaMeta | None = None
     icons_input_key: str | None = None
@@ -967,13 +760,6 @@ class GameFlow(BaseModel):
     trigger: str = ""
     nodes: list[FlowNode] = []
     edges: list[FlowEdge] = []
-
-
-class GameResolution(BaseModel):
-    answer_requirements: list[str] = []
-    flow: GameFlow = GameFlow()
-    options: list[OptionEvaluation] = []
-    rule: str = ""
 
 
 # ---------- /v2/game: the composed question (`compose.py`, collection `game_question`) ----------
@@ -1120,7 +906,3 @@ class GameCardAnswerResult(BaseModel):
     rule: str = ""
     answer_requirements: list[str] = []
     resolution_flow: GameFlow = Field(default_factory=lambda: GameFlow())
-
-
-GameQuestion.model_rebuild()
-GameAnswerResult.model_rebuild()

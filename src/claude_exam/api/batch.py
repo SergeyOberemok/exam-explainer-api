@@ -9,7 +9,6 @@ from pymongo import AsyncMongoClient
 
 from claude_exam.api import hold, pipeline_keys
 from claude_exam.api.beat import beat_and_store
-from claude_exam.api.check import check_and_store
 from claude_exam.api.compose import compose_and_store, set_held
 from claude_exam.api.decompose import decompose_and_store, read_decomposition
 from claude_exam.api.flow import flow_and_store, resolve_and_store
@@ -19,7 +18,6 @@ from claude_exam.api.icons import assign_and_store
 from claude_exam.api.objectives import tag_and_store
 from claude_exam.api.pipeline_keys import Records
 from claude_exam.api.schemas import IcaModelId, JobMode, JobStage
-from claude_exam.api.rephrase import rephrase_and_store
 from claude_exam.api.story import story_and_store
 
 logger = logging.getLogger(__name__)
@@ -41,8 +39,7 @@ DEFAULT_CONCURRENCY = 3
 # beat (key-free, the line before the question) needs the story's stage and comes after
 # the decomposition, whose answer-only entities its leak check uses. The resolution sets
 # its per-answer consequences in the story, so it comes after the story. The last step
-# composes the game document (`compose.py`) from all of them. The rephrase and its check
-# are no longer part of it (the game does not read them); their own modes remain.
+# composes the game document (`compose.py`) from all of them.
 STAGES: dict[JobMode, tuple[JobStage, ...]] = {
     "full": (
         "objectives",
@@ -59,8 +56,6 @@ STAGES: dict[JobMode, tuple[JobStage, ...]] = {
     "icons": ("icons",),
     "flow": ("flow", "resolve"),
     "resolve": ("resolve",),
-    "rephrase": ("rephrase", "check"),
-    "check": ("check",),
     "objectives": ("objectives",),
     "story": ("story", "beat"),
     "beat": ("beat",),
@@ -73,7 +68,6 @@ _NEEDS: dict[JobStage, JobStage] = {
     "icons": "decompose",
     "flow": "decompose",
     "resolve": "flow",
-    "check": "rephrase",
 }
 # A counter kept from before "full" existed: questions whose earlier steps were stored
 # but whose icon step failed.
@@ -82,7 +76,6 @@ _LEGACY_COUNTER = {"icons": "icons_failed"}
 
 class Stores(NamedTuple):
     examination: object
-    simplified: object
     objectives: object
     story: object
     decomposition: object = None
@@ -168,7 +161,6 @@ async def load_records(stores: Stores, doc: dict) -> Records:
         objectives=await find(stores.objectives),
         story=await find(stores.story),
         decomposition=await find(stores.decomposition),
-        simplified=await find(stores.simplified),
         game_question=await find(stores.game_question),
     )
 
@@ -241,29 +233,12 @@ def _step(stage: JobStage, ica: IcaClient, stores: Stores, doc: dict, model_id: 
             ica, stores.story, doc, model_id, decomposition=await _decomposition(stores, doc)
         )
 
-    async def rephrased():
-        await rephrase_and_store(
-            ica,
-            stores.simplified,
-            doc,
-            model_id,
-            place=await _story(stores, doc),
-            decomposition=await _decomposition(stores, doc),
-        )
-
-    async def checked():
-        await check_and_store(
-            ica, stores.simplified, doc, model_id, story=await _story(stores, doc)
-        )
-
     return {
         "objectives": objectives,
         "story": story,
         "beat": written,
         "decompose": decomposed,
         "icons": icons,
-        "rephrase": rephrased,
-        "check": checked,
         "flow": drawn,
         "resolve": resolved,
         "compose": composed,
@@ -377,7 +352,6 @@ async def run_simplification_job(
     db = mongo.get_default_database()
     stores = Stores(
         db["examination"],
-        db["examination_simplified"],
         db["question_objectives"],
         db["question_story"],
         db["question_decomposition"],

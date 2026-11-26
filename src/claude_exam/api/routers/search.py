@@ -2,19 +2,18 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
 
-from claude_exam.api.dependencies import AsyncCollectionDep, AsyncSimplifiedCollectionDep
+from claude_exam.api.dependencies import AsyncCollectionDep
 from claude_exam.api.schemas import (
     SEARCH_TEXT_MAX,
-    GameQuestionList,
     SearchRequest,
     SearchResponse,
 )
-from claude_exam.api.search import search_game_questions, search_questions
+from claude_exam.api.search import search_questions
 from claude_exam.api.security import require_api_key, search_rate_limit
 
 # Study lookup: finds questions by text and returns the answer key and explanation.
-# Kept apart from /game, whose responses never reveal the answer before answering.
-# `/v1/search/game-questions` is the exception: the game's search, without the key.
+# Kept apart from /game, whose responses never reveal the answer before answering (the
+# game's own search is `/v2/search/game-questions`, in `routers/game_v2.py`).
 #
 # Each search has a GET (short texts, easy to call by hand) and a POST taking the same
 # fields as a JSON body (`SearchRequest`), for a whole pasted question: percent-encoded,
@@ -51,39 +50,6 @@ async def search_by_body(
     """`GET /v1/search/questions` with the fields in a JSON body."""
     return await search_questions(
         collection,
-        body.q,
-        section=body.section,
-        assessment_type=body.assessment_type,
-        limit=body.limit,
-    )
-
-
-@router.get("/game-questions")
-async def search_game(
-    collection: AsyncCollectionDep,
-    simplified: AsyncSimplifiedCollectionDep,
-    q: SearchText,
-    section: Section = "",
-    assessment_type: AssessmentType = "",
-    limit: Limit = 5,
-) -> GameQuestionList:
-    """Playable questions matching `q`, best first, without their answer key. To play one,
-    add it to a round with `POST /v1/game/rounds/{round_id}/questions`."""
-    return await search_game_questions(
-        collection, simplified, q, section=section, assessment_type=assessment_type, limit=limit
-    )
-
-
-@router.post("/game-questions")
-async def search_game_by_body(
-    collection: AsyncCollectionDep,
-    simplified: AsyncSimplifiedCollectionDep, body: SearchRequest
-) -> GameQuestionList:
-    """`GET /v1/search/game-questions` with the fields in a JSON body: what the game
-    sends, since a pasted question can be too long for a URL."""
-    return await search_game_questions(
-        collection,
-        simplified,
         body.q,
         section=body.section,
         assessment_type=body.assessment_type,

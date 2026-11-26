@@ -4,8 +4,7 @@
 Emptied (documents deleted, indexes kept, so a running API needs no restart): every
 collection of the database but `examination` and those named with `--keep`; today that is
 the pipeline's records (`question_objectives`, `question_story`, `question_decomposition`,
-`examination_simplified`, `game_question`), the jobs (`simplification_jobs`) and the game
-rounds (`game_rounds`).
+`game_question`), the jobs (`simplification_jobs`) and the game rounds (`game_rounds`).
 
 The questions themselves are not touched (their `text_hash` stays, and so does a
 manual-mode hold unless `--unhold`). The story seed lives in `question_story`, so load it

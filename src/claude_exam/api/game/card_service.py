@@ -1,10 +1,9 @@
 """Round rules for `/v2/game`, over the composed `game_question` documents (`compose.py`).
 
-The rules are those of v1 (`GameService`): a round holds at most `MAX_ROUND_QUESTIONS`,
-batches come in order and never repeat a question, an answer counts once, the 50/50 is
-used once per question. What differs is where a question comes from: one stored
-document, already shaped for the game and already checked to be complete, instead of
-five collections joined per request. Its `public` part is sent; its `key` goes into the
+A round holds at most `MAX_ROUND_QUESTIONS`, batches come in order and never repeat a
+question, an answer counts once, the 50/50 is used once per question (`RoundRules`). A
+question is one stored document, already shaped for the game and already checked to be
+complete. Its `public` part is sent; its `key` goes into the
 round entry and comes back, for the answer given, in the answer result.
 """
 

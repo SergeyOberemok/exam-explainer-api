@@ -52,7 +52,7 @@ def test_the_view_shows_the_original_with_its_key_and_nothing_stored_yet():
     assert [a["correct"] for a in answers] == [False, True, False, False]
     assert answers[1]["feedback"] == "Correct. b"
     assert got["original"]["explanation"] == "Missing guidance needs human judgment."
-    assert got["stored"]["rephrase"] is None and got["stored"]["decomposition"] is None
+    assert got["stored"]["decomposition"] is None and "rephrase" not in got["stored"]
 
 
 def test_a_dry_run_streams_one_line_per_step_and_writes_nothing():
@@ -60,24 +60,22 @@ def test_a_dry_run_streams_one_line_per_step_and_writes_nothing():
     mongo, ica = FakeMongo([q]), ScriptedIca()
     client = client_for(mongo, ica)
     before = written(mongo)
-    stages = ["decompose", "icons", "flow", "resolve", "rephrase", "objectives"]
+    stages = ["decompose", "icons", "flow", "resolve", "objectives"]
     response = client.post(f"/evaluate/questions/{q['_id']}/run", json={"stages": stages})
     assert response.status_code == 200
     events = lines(response)
     assert [e["stage"] for e in events] == [*stages, "done"]
-    assert [e["status"] for e in events[:5]] == ["ok"] * 5
-    assert events[5]["status"].startswith("skipped")
+    assert [e["status"] for e in events[:4]] == ["ok"] * 4
+    assert events[4]["status"].startswith("skipped")
     result = events[-1]["result"]
     assert result["decomposition"] and result["parts"][-1]["role"] == "ask"
-    assert result["resolution"]["rule"] and result["rephrase"]["answers"]
+    assert result["resolution"]["rule"]
     assert result["entities"]["question_icon"] and result["mermaid"]["flow"].startswith("flowchart")
-    # The experiment: the flow built in code, with the flow gate's verdict.
-    assert result["code_flow"]["nodes"][-1]["is_question"] and result["code_flow_errors"] == []
-    assert result["mermaid"]["code_flow"].startswith("flowchart")
+    assert "code_flow" not in result and set(result["mermaid"]) == {"flow", "resolution"}
     assert written(mongo) == before
 
 
-def test_a_dry_beat_needs_the_stored_story_and_feeds_the_rephrase():
+def test_a_dry_beat_needs_the_stored_story():
     q = question()
     q["prompt"]["question"] = (
         "SCENARIO: You are integrating Claude Code into your Continuous Integration pipeline. "
@@ -85,7 +83,7 @@ def test_a_dry_beat_needs_the_stored_story_and_feeds_the_rephrase():
     )
     mongo, ica = FakeMongo([q]), ScriptedIca()
     client = client_for(mongo, ica)
-    run = lambda: lines(client.post(f"/evaluate/questions/{q['_id']}/run", json={"stages": ["beat", "rephrase"]}))  # noqa: E731
+    run = lambda: lines(client.post(f"/evaluate/questions/{q['_id']}/run", json={"stages": ["beat"]}))  # noqa: E731
     # No story record: no stage to write the beat for.
     assert run()[0]["status"] == "failed 422"
     db = mongo.get_default_database()
@@ -95,10 +93,8 @@ def test_a_dry_beat_needs_the_stored_story_and_feeds_the_rephrase():
     )
     before = written(mongo)
     events = run()
-    assert [e["status"] for e in events[:2]] == ["ok", "ok"]
+    assert events[0]["status"] == "ok"
     assert events[-1]["result"]["beat"] == "The team cannot agree on a working mode."
-    rephrase_prompt = [p for kind, p in zip(ica.calls, ica.prompts) if kind == "rephrase"][-1]
-    assert "The team cannot agree on a working mode." in rephrase_prompt
     assert written(mongo) == before
 
 
@@ -107,12 +103,11 @@ def test_a_failed_step_is_reported_and_the_run_goes_on():
     ica = ScriptedIca(decompose=[HTTPException(status_code=502, detail="bad reply")] * 5)
     client = client_for(FakeMongo([q]), ica)
     events = lines(
-        client.post(f"/evaluate/questions/{q['_id']}/run", json={"stages": ["decompose", "flow", "rephrase"]})
+        client.post(f"/evaluate/questions/{q['_id']}/run", json={"stages": ["decompose", "flow"]})
     )
     by_stage = {e["stage"]: e for e in events}
     assert by_stage["decompose"]["status"] == "failed 502"
     assert by_stage["flow"]["status"] == "failed 409" and "decomposition" in by_stage["flow"]["detail"]
-    assert by_stage["rephrase"]["status"] == "ok"
     assert events[-1]["stage"] == "done"
 
 
@@ -131,19 +126,19 @@ def test_a_persisted_run_writes_the_records_and_streams_what_is_stored():
     q = question()
     mongo = FakeMongo([q])
     client = client_for(mongo, ScriptedIca())
-    stages = ["decompose", "flow", "rephrase"]
+    stages = ["decompose", "flow"]
     response = client.post(
         f"/evaluate/questions/{q['_id']}/run", json={"stages": stages, "persist": True}
     )
     assert response.status_code == 200
     events = lines(response)
     assert [e["stage"] for e in events] == [*stages, "done"]
-    assert [e["status"] for e in events[:3]] == ["ok or current"] * 3
+    assert [e["status"] for e in events[:2]] == ["ok or current"] * 2
     result = events[-1]["result"]
-    assert result["decomposition"] and result["flow"] and result["rephrase"]["answers"]
+    assert result["decomposition"] and result["flow"]
     # Written, unlike a dry run: the view now shows the same records.
     stored = client.get(f"/evaluate/questions/{q['_id']}").json()["stored"]
-    assert stored["decomposition"] and stored["rephrase"]
+    assert stored["decomposition"] and stored["flow"]
     assert written(mongo)["question_decomposition"] == 1
 
 

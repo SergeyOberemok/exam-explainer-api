@@ -1,6 +1,6 @@
 """No answer key in pre-answer content: every step whose output a player sees before
-answering (the decomposition, the icons, the flow, the beat, the rephrase) and the check that
-answers without the key build their messages from `KeyFreeQuestion`, which has no field
+answering (the decomposition, the icons, the flow, the beat) builds its messages from
+`KeyFreeQuestion`, which has no field
 for the key, the feedback or the explanation. Sentinel strings in those fields must
 never reach such a prompt; the steps that may see the key (objectives, story,
 resolution) do get them."""
@@ -9,7 +9,7 @@ from dataclasses import fields
 
 from test_jobs import decomposition_reply, flow_reply
 
-from claude_exam.api import beat, check, decompose, flow, icons, objectives, rephrase, story
+from claude_exam.api import beat, decompose, flow, icons, objectives, story
 from claude_exam.api.question_view import KeyFreeQuestion, key_free
 from claude_exam.api.schemas import DecisionFlow, PromptEntities, QuestionDecomposition
 
@@ -46,14 +46,11 @@ def test_the_view_has_no_field_for_the_key():
 def test_no_pre_answer_prompt_carries_the_key():
     q = key_free(DOC)
     d = QuestionDecomposition.model_validate(decomposition_reply())
-    rephrased = {"prompt": {"question": "Which mode only reads?", "answers": ["acceptEdits mode", "plan mode"]}}
     assert leaks(*decompose.messages(q)) == []
     assert leaks(*flow.flow_messages(q, d)) == []
     assert leaks(*icons.messages(q, PromptEntities())) == []
     assert leaks(*icons.messages(q, PromptEntities(), d)) == []
-    assert leaks(*rephrase.messages(q, PLACE)) == []
     assert leaks(*beat.messages(q, PLACE)) == []
-    assert leaks(*check.messages(q, rephrased, PLACE)) == []
 
 
 def test_the_steps_shown_after_answering_do_read_the_key():

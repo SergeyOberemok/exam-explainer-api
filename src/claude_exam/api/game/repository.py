@@ -1,4 +1,4 @@
-"""MongoDB access for the game. The service decides; these classes only read and write.
+"""MongoDB access for the game rounds. The service decides; this class only reads and writes.
 
 A `game_rounds` document:
 
@@ -6,7 +6,7 @@ A `game_rounds` document:
       "created_at": datetime,                 # TTL index: dropped after ROUND_TTL_SECONDS
       "filters": {"section": str, "assessment_type": str, "objective": str,
                   "scenario": str, "stage": str, "ordered": bool},
-      "questions": {question_id: round_entry},# answer key and reviews, never sent before answering
+      "questions": {question_id: {correct, count, key}},  # never sent before answering
       "question_ids": [question_id, ...],     # every question in the round, in the order added
       "batches": [[question_id, ...], ...],   # batch 0 is the start; each later one is one /batches call
       "answers": {question_id: answer_index},
@@ -18,188 +18,13 @@ A `game_rounds` document:
 inside field paths.
 """
 
-import asyncio
 from datetime import datetime, timezone
 
 from bson import ObjectId
 from pymongo import ReturnDocument
 from pymongo.asynchronous.collection import AsyncCollection
 
-from claude_exam.api import hold
-from claude_exam.api.game.domain import (
-    FIFTY_FIFTY_CHARGES,
-    MAX_ROUND_QUESTIONS,
-    PLAYABLE_QUERY,
-    ids_filter,
-)
-from claude_exam.api.scenario_catalog import BY_KEY, STAGE_KEYS
-
-
-class QuestionRepository:
-    """Reads `examination`, `examination_simplified`, `question_objectives` (the
-    learning-objective tags), `question_story` (chapter stage and story lines) and
-    `question_decomposition` (flow and resolution). Without one of the last three, every
-    question reads as untagged, without a story or without a flow."""
-
-    def __init__(
-        self,
-        examination: AsyncCollection,
-        simplified: AsyncCollection,
-        objectives: AsyncCollection | None = None,
-        story: AsyncCollection | None = None,
-        decomposition: AsyncCollection | None = None,
-    ) -> None:
-        self.examination = examination
-        self.simplified = simplified
-        self.objectives = objectives
-        self.story = story
-        self.decomposition = decomposition
-
-    @staticmethod
-    async def _fetch(
-        collection: AsyncCollection, query: dict, size: int, shuffle: bool
-    ) -> list[dict]:
-        pipeline: list[dict] = [{"$match": query}]
-        if shuffle:
-            pipeline.append({"$sample": {"size": size}})
-        else:
-            # Stable order, so the same call returns the same questions.
-            pipeline += [{"$sort": {"_id": 1}}, {"$limit": size}]
-        cursor = await collection.aggregate(pipeline)
-        return await cursor.to_list()
-
-    async def fetch_with_total(
-        self, query: dict, size: int, *, shuffle: bool = True, simplified: bool = False
-    ) -> tuple[list[dict], int]:
-        """Up to `size` matching docs (random or by id) and how many match in all."""
-        collection = self.simplified if simplified else self.examination
-        return await asyncio.gather(
-            self._fetch(collection, query, size, shuffle),
-            collection.count_documents(query),
-        )
-
-    async def sample(self, query: dict, size: int) -> list[dict]:
-        return await self._fetch(self.examination, query, size, shuffle=True)
-
-    async def find_all(self, query: dict) -> list[dict]:
-        """Every matching `examination` doc (for a story round, whose pool is one chapter
-        or stage)."""
-        return await self.examination.find(query).to_list()
-
-    async def count(self, query: dict) -> int:
-        return await self.examination.count_documents(query)
-
-    async def get(self, question_id: str | ObjectId) -> dict | None:
-        return await self.examination.find_one({"_id": ObjectId(question_id)})
-
-    async def get_many(self, question_ids: list[str]) -> dict[str, dict]:
-        cursor = self.examination.find({"_id": {"$in": [ObjectId(i) for i in question_ids]}})
-        return {str(d["_id"]): d for d in await cursor.to_list()}
-
-    async def get_simplified(self, question_id: str) -> dict | None:
-        return await self.simplified.find_one({"question_id": question_id})
-
-    async def get_simplified_many(self, question_ids: list[str]) -> dict[str, dict]:
-        if not question_ids:
-            return {}
-        cursor = self.simplified.find({"question_id": {"$in": list(question_ids)}})
-        return {str(d["question_id"]): d for d in await cursor.to_list()}
-
-    async def get_tags_many(self, question_ids: list[str]) -> dict[str, dict]:
-        """The `question_objectives` records of the given questions, by question id."""
-        if self.objectives is None or not question_ids:
-            return {}
-        cursor = self.objectives.find({"question_id": {"$in": list(question_ids)}})
-        return {str(d["question_id"]): d for d in await cursor.to_list()}
-
-    async def get_decomposition_many(self, question_ids: list[str]) -> dict[str, dict]:
-        """The `question_decomposition` records of the given questions, by question id."""
-        if self.decomposition is None or not question_ids:
-            return {}
-        # The game reads the parts, entities, flow and resolution and the `text_hash`
-        # that tells whether they were written for the question's text as it is, never
-        # `semantic`, the largest part.
-        cursor = self.decomposition.find(
-            {"question_id": {"$in": list(question_ids)}},
-            {"semantic": 0, "semantic_ica": 0, "flow_ica": 0, "resolution_ica": 0},
-        )
-        return {str(d["question_id"]): d for d in await cursor.to_list()}
-
-    async def ids_with_objective(self, key: str) -> list[str]:
-        """Ids of the questions tagged with `key`, as main or secondary objective."""
-        if self.objectives is None:
-            return []
-        cursor = self.objectives.find({"objectives": key}, {"question_id": 1})
-        return [str(d["question_id"]) for d in await cursor.to_list()]
-
-    async def objective_counts(self) -> dict[str, int]:
-        """How many playable questions each objective key is on. Reads every tag record,
-        which is fine for a question bank of thousands."""
-        if self.objectives is None:
-            return {}
-        tagged = await self.objectives.find({}, {"question_id": 1, "objectives": 1}).to_list()
-        playable = await self.playable_ids([str(t.get("question_id", "")) for t in tagged])
-        counts: dict[str, int] = {}
-        for record in tagged:
-            if record.get("question_id") in playable:
-                for key in set(record.get("objectives") or []):
-                    counts[key] = counts.get(key, 0) + 1
-        return counts
-
-    async def get_story_many(self, question_ids: list[str]) -> dict[str, dict]:
-        """The `question_story` records of the given questions, by question id."""
-        if self.story is None or not question_ids:
-            return {}
-        cursor = self.story.find({"question_id": {"$in": list(question_ids)}})
-        return {str(d["question_id"]): d for d in await cursor.to_list()}
-
-    async def story_records(self, scenario: str = "", stage: str = "") -> list[dict]:
-        """Story records of a chapter and/or stage (all of them without either), in story
-        order: chapter, stage, `order`, then question id so the order is stable."""
-        if self.story is None:
-            return []
-        query = {k: v for k, v in (("scenario", scenario), ("stage", stage)) if v}
-        records = await self.story.find(
-            query, {"question_id": 1, "scenario": 1, "stage": 1, "order": 1}
-        ).to_list()
-
-        def position(keys: tuple[str, ...], key: object) -> int:
-            return keys.index(key) if key in keys else len(keys)
-
-        return sorted(
-            records,
-            key=lambda r: (
-                position(tuple(BY_KEY), r.get("scenario")),
-                position(STAGE_KEYS, r.get("stage")),
-                r.get("order") or 0,
-                str(r.get("question_id")),
-            ),
-        )
-
-    async def rephrased_ids(self) -> list[str]:
-        """Ids of the questions with a rephrase record: the only ones the game serves."""
-        return [str(i) for i in await self.simplified.distinct("question_id")]
-
-    async def held_ids(self) -> list[str]:
-        """Ids of the questions held for manual processing (`hold.py`)."""
-        cursor = self.examination.find(hold.HELD, {"_id": 1})
-        return [str(d["_id"]) for d in await cursor.to_list()]
-
-    async def playable_ids(self, question_ids: list[str]) -> set[str]:
-        """Which of the given questions pass the playable pre-filter and have a rephrase
-        record."""
-        rephrased = set(await self.rephrased_ids())
-        ids = ids_filter(i for i in question_ids if i in rephrased)
-        cursor = self.examination.find({**PLAYABLE_QUERY, "_id": ids}, {"_id": 1})
-        return {str(d["_id"]) for d in await cursor.to_list()}
-
-    async def sections(self, *, simplified: bool = False) -> list[str]:
-        if simplified:
-            return await self.simplified.distinct("section")
-        # Only sections of questions the game serves (those with a rephrase record).
-        return await self.examination.distinct(
-            "section", {"_id": ids_filter(await self.rephrased_ids())}
-        )
+from claude_exam.api.game.domain import FIFTY_FIFTY_CHARGES, MAX_ROUND_QUESTIONS
 
 
 class RoundRepository:

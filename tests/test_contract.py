@@ -1,14 +1,13 @@
 """The wire contract with the Unity game, pinned in files.
 
-- `tests/contract/*.json`: one real response per type the game parses, built from fixed
-  data. The Unity EditMode tests parse a copy of the same files
-  (`../exam-cards-game/Assets/Tests/EditMode/Contract/`), so a change here that the game
-  can't read fails there too.
+- `tests/contract/v2_*.json` (and `fifty_fifty.json`, `error_*.json`): one real response
+  per type the game parses, built from fixed data. The Unity EditMode tests parse a copy
+  of the same files (`../exam-cards-game/Assets/Tests/EditMode/Contract/`), so a change
+  here that the game can't read fails there too.
 - `tests/contract/icon_catalog.json`: every icon key the API can send; the game's tests
   check that it ships a picture for each.
-- `tests/contract/openapi_game.json`: the OpenAPI schemas and paths of the game routes;
-  `openapi_game_v2.json` the same for `/v2/game` (composed questions, `compose.py`),
-  whose responses are pinned as `v2_*.json`.
+- `tests/contract/openapi_game_v2.json`: the OpenAPI schemas and paths of `/v2/game`
+  (composed questions, `compose.py`).
 
 After an intended change, regenerate both copies and commit them in both repos:
 
@@ -29,12 +28,8 @@ from test_jobs import decomposition_reply, flow_reply, resolution_reply
 from claude_exam.api import compose
 from claude_exam.api.dependencies import (
     get_async_collection,
-    get_async_decomposition_collection,
     get_async_game_question_collection,
-    get_async_objectives_collection,
     get_async_rounds_collection,
-    get_async_simplified_collection,
-    get_async_story_collection,
 )
 from claude_exam.api.icon_catalog import ICONS
 from claude_exam.api.main import app
@@ -79,26 +74,8 @@ EXAM = [
     question(Q2, "What caches prompts?", ["cache_control", "retries", "batches", "tools"], "a"),
     question(Q3, "Which <tag> is literal?", ["<example>", "<b>", "none"], "a"),
 ]
-# Q1 has a rephrase (question and answers only; the review stays the original's). The
-# game serves only questions with a rephrase record, so Q2 and Q3 have one too, but the
-# check found it `changed`: the game plays their original and offers no rephrase.
-SIMPLE = [
-    {
-        **EXAM[0],
-        "_id": ObjectId("65f0000000000000000000b1"),
-        "question_id": str(Q1),
-        "prompt": {"question": "Where does the key go?", "answers": EXAM[0]["prompt"]["answers"]},
-    },
-    *(
-        {**q, "_id": ObjectId(), "question_id": str(q["_id"]), "check": {"verdict": "changed"}}
-        for q in EXAM[1:]
-    ),
-]
-
-# Q1 is decomposed: its parts and entities (with icons) are served on the question and,
-# the entities, on its rephrase. The second answer and the last entity have no icon yet,
-# and "retired-key" is no longer in the catalog: all three are served as null. It has no
-# flow, so the flow is empty.
+# Q1 is decomposed: the stored parts and entities (with icons) of its record; the V2_*
+# pieces below complete it.
 DECOMPOSITION = [
     {
         "_id": ObjectId("65f0000000000000000000e1"),
@@ -164,18 +141,6 @@ STORY = [
 ]
 
 
-@pytest.fixture
-def client():
-    rounds = FakeRounds()
-    app.dependency_overrides[get_async_story_collection] = lambda: FakeCollection(STORY)
-    app.dependency_overrides[get_async_objectives_collection] = lambda: FakeCollection(TAGS)
-    app.dependency_overrides[get_async_collection] = lambda: FakeCollection(EXAM)
-    app.dependency_overrides[get_async_simplified_collection] = lambda: FakeCollection(SIMPLE)
-    app.dependency_overrides[get_async_decomposition_collection] = lambda: FakeCollection(DECOMPOSITION)
-    app.dependency_overrides[get_async_rounds_collection] = lambda: rounds
-    return TestClient(app)
-
-
 def check(name: str, body: dict) -> None:
     text = json.dumps(body, indent=2, ensure_ascii=False, sort_keys=False) + "\n"
     targets = [CONTRACT_DIR / name]
@@ -192,47 +157,13 @@ def check(name: str, body: dict) -> None:
             )
 
 
-def test_game_flow_responses(client):
-    game_round = client.post("/v1/game/rounds", json={"count": 2}).json()
-    rid = game_round["round_id"]
-    check("round.json", {**game_round, "round_id": ROUND_ID})
-
-    base = f"/v1/game/rounds/{rid}"
-    check("fifty_fifty.json", client.post(f"{base}/fifty-fifty", json={"question_id": str(Q1)}).json())
-    answer = client.post(f"{base}/answers", json={"question_id": str(Q1), "answer_index": 1})
-    check("answer.json", answer.json())
-    # A wrong answer to a tagged question says what it suggests (in its own round,
-    # since a question is answered once).
-    other = client.post("/v1/game/rounds", json={"count": 1}).json()["round_id"]
-    check("answer_wrong.json", client.post(
-        f"/v1/game/rounds/{other}/answers", json={"question_id": str(Q1), "answer_index": 2}
-    ).json())
-    conflict = client.post(f"{base}/answers", json={"question_id": str(Q1), "answer_index": 2})
-    assert conflict.status_code == 409
-    check("error_already_answered.json", conflict.json())
-    check("answer_no_simplified.json", client.post(
-        f"{base}/answers", json={"question_id": str(Q2), "answer_index": 0}
-    ).json())
-    check("batch.json", client.post(f"{base}/batches", json={"batch_index": 1, "count": 10}).json())
-    check("batch_empty.json", client.post(f"{base}/batches", json={"batch_index": 2}).json())
-    check("add_question.json", client.post(f"{base}/questions", json={"question_id": str(Q1)}).json())
-    check("search.json", client.get("/v1/search/game-questions", params={"q": "key"}).json())
-    # The game sends its search as a POST body; both forms answer the same.
-    check("search.json", client.post("/v1/search/game-questions", json={"q": "key"}).json())
-    check("story.json", client.get("/v1/game/story").json())
-
-
 def test_icon_catalog():
     check("icon_catalog.json", {"keys": [icon.key for icon in ICONS]})
 
 
-def test_validation_error_response(client):
-    check("error_validation.json", client.post("/v1/game/rounds", json={"count": 0}).json())
-
-
 # --- /v2/game: composed questions -------------------------------------------------------
 
-# Q1 composed from fixed records: its decomposition (the stored parts and entities of v1
+# Q1 composed from fixed records: its decomposition (the stored parts and entities
 # above, a decomposition whose answer options name what each answer proposes, a flow
 # and a resolution with a consequence per answer), its objectives and its story.
 V2_SEMANTIC = decomposition_reply(3)
@@ -288,9 +219,13 @@ def test_game_v2_flow_responses(client_v2):
     rid = game_round["round_id"]
     check("v2_round.json", {**game_round, "round_id": ROUND_ID})
     base = f"/v2/game/rounds/{rid}"
+    check("fifty_fifty.json", client.post(f"{base}/fifty-fifty", json={"question_id": str(Q1)}).json())
     check("v2_answer.json", client.post(
         f"{base}/answers", json={"question_id": str(Q1), "answer_index": 1}
     ).json())
+    conflict = client.post(f"{base}/answers", json={"question_id": str(Q1), "answer_index": 2})
+    assert conflict.status_code == 409
+    check("error_already_answered.json", conflict.json())
     other = client.post("/v2/game/rounds", json={"count": 1}).json()["round_id"]
     check("v2_answer_wrong.json", client.post(
         f"/v2/game/rounds/{other}/answers", json={"question_id": str(Q1), "answer_index": 2}
@@ -301,14 +236,12 @@ def test_game_v2_flow_responses(client_v2):
     check("v2_story.json", client.get("/v2/game/story").json())
 
 
-@pytest.mark.parametrize(
-    ("prefixes", "name"),
-    [
-        (("/v1/game", "/v1/search/game"), "openapi_game.json"),
-        (("/v2/game", "/v2/search/game"), "openapi_game_v2.json"),
-    ],
-)
-def test_openapi_game_schema(prefixes, name):
+def test_validation_error_response(client_v2):
+    check("error_validation.json", client_v2.post("/v2/game/rounds", json={"count": 0}).json())
+
+
+def test_openapi_game_schema():
+    prefixes, name = ("/v2/game", "/v2/search/game"), "openapi_game_v2.json"
     spec = app.openapi()
     paths = {p: v for p, v in spec["paths"].items() if p.startswith(prefixes)}
     used = set()

@@ -11,10 +11,6 @@ class QuestionNotFound(ApiError):
     status_code, code, detail = 404, "question_not_found", "question not found"
 
 
-class SimplifiedNotFound(ApiError):
-    status_code, code, detail = 404, "simplified_not_found", "simplified question not found"
-
-
 class QuestionNotInRound(ApiError):
     status_code, code, detail = 404, "question_not_in_round", "question is not in this round"
 

@@ -2,7 +2,7 @@
 
 An import with `manual=true` stores its questions with `pipeline_mode: "manual"` and starts
 no job: the questions are processed one by one from the evaluation page. While held, a
-question is not playable (`game.domain.PLAYABLE_QUERY` / `is_playable`) and the backfills
+question is not playable (`game.domain.is_playable`; its game document is `held`) and the backfills
 leave it alone unless asked (`include_manual`). It is released (the field removed) as soon
 as a real run leaves none of its steps missing (`batch.release_if_ready`), or by
 hand (`POST /evaluate/questions/{id}/release`).

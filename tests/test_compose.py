@@ -43,7 +43,6 @@ def stores_of(mongo) -> Stores:
     db = mongo.get_default_database()
     return Stores(
         db["examination"],
-        db["examination_simplified"],
         db["question_objectives"],
         db["question_story"],
         db["question_decomposition"],

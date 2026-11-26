@@ -94,7 +94,7 @@ class FakeIca:
 
 
 class FakeCollection:
-    """Just enough of AsyncCollection for the simplified-question upsert."""
+    """Just enough of AsyncCollection for the decomposition record upserts."""
 
     def __init__(self, *docs):
         self.docs = list(docs)

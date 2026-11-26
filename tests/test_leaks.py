@@ -1,13 +1,11 @@
 """One leak rule for every text shown before answering (`leaks.py`): the gates of the
-decomposition, the flow, the beat and the rephrase, the semantic parts, and the flow
-built in code (an experiment)."""
+decomposition, the flow and the beat, and the semantic parts."""
 
 import pytest
 from fastapi import HTTPException
 from test_jobs import (
     FakeMongo,
     ScriptedIca,
-    SIMPLE,
     decomposition_reply,
     decomposition_with_plan_mode,
     flow_reply,
@@ -20,11 +18,10 @@ from test_jobs import (
 from claude_exam.api import batch
 from claude_exam.api.beat import beat_and_store, beat_errors, beat_item
 from claude_exam.api.decompose import decomposition_errors
-from claude_exam.api.flow import flow_errors, flow_from
+from claude_exam.api.flow import flow_errors
 from claude_exam.api.leaks import AnswerOnly, answer_only, leak, leak_errors
 from claude_exam.api.pipeline_keys import Records, is_current
-from claude_exam.api.question_view import key_free, the_ask
-from claude_exam.api.rephrase import rephrase_item
+from claude_exam.api.question_view import key_free
 from claude_exam.api.scenario_catalog import text_hash
 from claude_exam.api.schemas import QuestionDecomposition
 
@@ -124,15 +121,12 @@ def test_the_beat_gate():
     assert "the beat says all" in beat_errors(q, {"beat": "All edits land before anyone reads them."})[0]
 
 
-async def test_the_models_own_word_is_no_leak_in_texts_written_from_the_question():
-    # "Agent" is an entity no text names (the model's word, not an answer's): the beat
-    # and the rephrase, written from the raw question, may use it.
+def test_the_models_own_word_is_no_leak_in_texts_written_from_the_question():
+    # "Agent" is an entity no text names (the model's word, not an answer's): the beat,
+    # written from the raw question, may use it.
     d = QuestionDecomposition.model_validate(decomposition_reply())
     q = question()
     assert beat_errors(key_free(q), {"beat": "The agent edits too much."}, d) == []
-    ica = ScriptedIca(rephrase=[reply({**SIMPLE, "question": "Which mode should the agent use?"})])
-    rephrase, _meta = await rephrase_item(ica, q, MODEL, decomposition=d)
-    assert rephrase.question == "Which mode should the agent use?" and ica.calls == ["rephrase"]
 
 
 async def test_a_leaking_beat_is_sent_back_and_repaired():
@@ -147,17 +141,6 @@ async def test_a_beat_needs_a_stage():
     with pytest.raises(HTTPException) as exc:
         await beat_item(ScriptedIca(), question(), {"scenario": "", "stage": ""}, MODEL)
     assert exc.value.status_code == 422
-
-
-async def test_a_rephrased_question_naming_what_an_answer_proposes_is_sent_back():
-    good = {**SIMPLE, "question": "Which mode only reads and never edits?"}
-    ica = ScriptedIca(rephrase=[reply(SIMPLE), reply(good)])
-    rephrase, _meta = await rephrase_item(ica, question(), MODEL, decomposition=plan_mode())
-    assert rephrase.question == good["question"] and ica.calls == ["rephrase", "rephrase"]
-    # Without a decomposition "plan mode" is not known to be an answer's.
-    ica = ScriptedIca(rephrase=[reply(SIMPLE)])
-    rephrase, _meta = await rephrase_item(ica, question(), MODEL)
-    assert rephrase.question == SIMPLE["question"] and ica.calls == ["rephrase"]
 
 
 # --- the beat step in jobs ----------------------------------------------------------
@@ -187,44 +170,11 @@ async def test_the_beat_is_written_on_the_story_record_and_a_seed_beat_is_curren
     assert not is_current("beat", q, Records(story={**seed, "beat": ""}))
 
 
-# --- the flow built in code (experiment) --------------------------------------------
-
-
-def test_the_flow_built_in_code_passes_the_flow_gate_and_ends_at_the_ask():
-    q = question()
-    d = plan_mode()
-    built = flow_from(d, q)
-    assert flow_errors(q, d, built.model_dump()) == []
-    last = built.nodes[-1]
-    assert last.is_question and last.type == "decision" and last.label == the_ask(q)
-    assert built.nodes[0].type == "start" and built.visualization.primary == "process_flow"
-    assert [(e.source, e.target) for e in built.edges] == [
-        (a.id, b.id) for a, b in zip(built.nodes, built.nodes[1:])
-    ]
-
-
-def test_the_flow_built_in_code_follows_the_events_and_leaves_out_what_leaks():
-    q = question()
-    d = decomposition_with_plan_mode()
-    d["events"] = [
-        {"id": "v2", "name": "The agent edits files", "actor_id": None, "target_id": None, "input_ids": [], "output_ids": [], "sequence": 2, "source_status": "inferred", "evidence": ""},
-        {"id": "v1", "name": "A task arrives", "actor_id": None, "target_id": None, "input_ids": [], "output_ids": [], "sequence": 1, "source_status": "inferred", "evidence": ""},
-        {"id": "v3", "name": "Someone turns on plan mode", "actor_id": None, "target_id": None, "input_ids": [], "output_ids": [], "sequence": 3, "source_status": "inferred", "evidence": ""},
-    ]
-    decomposition = QuestionDecomposition.model_validate(d)
-    built = flow_from(decomposition, q)
-    labels = [n.label for n in built.nodes]
-    # "agent" names the model's own entity, which the flow gate also refuses.
-    assert labels == ["A task arrives", "Edits land unreviewed.", "Which mode?"]
-    assert [n.type for n in built.nodes] == ["start", "output", "decision"]
-    assert flow_errors(q, decomposition, built.model_dump()) == []
-
-
 # --- what the leak gate read is in the input keys ------------------------------------
 
 
-def test_beat_and_rephrase_keys_cover_the_answer_only_entities_their_gate_tested():
-    from claude_exam.api import beat, rephrase
+def test_the_beat_key_covers_the_answer_only_entities_its_gate_tested():
+    from claude_exam.api import beat
 
     q = question()
     q["prompt"]["question"] = (
@@ -232,18 +182,15 @@ def test_beat_and_rephrase_keys_cover_the_answer_only_entities_their_gate_tested
         "QUESTION: Which mode?"
     )
     story = {"question_id": str(q["_id"]), "scenario": "pipeline", "stage": "design", "text_hash": text_hash(q)}
-    place = {"scenario": "pipeline", "stage": "design"}
     d = plan_mode()
     # Written before the decomposition existed, the gate knew no entity: a later
-    # decomposition that names one outdates both.
+    # decomposition that names one outdates it.
     assert beat.input_key(q, story) != beat.input_key(q, story, d)
-    assert rephrase.input_key(q, place) != rephrase.input_key(q, place, d)
-    # A decomposition whose entities no answer names leaves the keys as they were.
+    # A decomposition whose entities no answer names leaves the key as it was.
     plain = d.model_copy(deep=True)
     plain.entities = [e for e in plain.entities if e.name != "plan mode"]
     assert answer_only(q, plain).narrow().entities == ()
     assert beat.input_key(q, story) == beat.input_key(q, story, plain)
-    assert rephrase.input_key(q, place) == rephrase.input_key(q, place, plain)
 
     record = {"question_id": str(q["_id"]), "text_hash": text_hash(q), "semantic": d.model_dump()}
     stored = {**story, "origin": "ica", "beat": "A line.", "beat_input_key": beat.input_key(q, story)}

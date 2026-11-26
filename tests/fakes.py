@@ -97,7 +97,7 @@ class FakeCursor:
 
 
 class FakeCollection:
-    """`examination` / `examination_simplified`. `$sample` keeps the stored order (and its
+    """`examination` (or any collection the tests read). `$sample` keeps the stored order (and its
     duplicates, as `$sample` may), so tests are deterministic."""
 
     def __init__(self, docs):

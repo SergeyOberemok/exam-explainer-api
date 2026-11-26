@@ -1,46 +1,19 @@
-import json
-
 from fastapi import APIRouter, Depends, HTTPException
 
 from claude_exam.api.config import get_settings
 from claude_exam.api.dependencies import IcaClientDep
 from claude_exam.api.schemas import (
-    ExplainRequest,
-    ExplainResponse,
     IcaAgentList,
     IcaAssistant,
     IcaChatRequest,
     IcaChatResponse,
-    SimplifiedPrompt,
 )
 from claude_exam.api.security import require_api_key
-from claude_exam.api.rephrase import rephrase_item
-from claude_exam.html_clean import clean_plain
-from claude_exam.paths import REPO_ROOT
 
 # Study/admin routes: they need the API key when one is configured.
 router = APIRouter(
     prefix="/ica", tags=["ica"], dependencies=[Depends(require_api_key)]
 )
-
-_PRACTICE_EXAM_FILE = REPO_ROOT / "public" / "claude-certified-architect-practice-1.json"
-
-# Cached item lookup: question_id → item dict
-_exam_items: dict[int, dict] | None = None
-
-
-def _get_exam_items() -> dict[int, dict]:
-    global _exam_items
-    if _exam_items is None:
-        try:
-            data = json.loads(_PRACTICE_EXAM_FILE.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            raise HTTPException(
-                status_code=503,
-                detail=f"Practice exam file not found: {_PRACTICE_EXAM_FILE}",
-            )
-        _exam_items = {item["id"]: item for item in data.get("results", [])}
-    return _exam_items
 
 
 @router.get("/assistants")
@@ -74,41 +47,4 @@ async def chat(body: IcaChatRequest, ica: IcaClientDep) -> IcaChatResponse:
         finish_reason=choice.get("finish_reason"),
         total_tokens=(data.get("usage") or {}).get("total_tokens", 0),
         assistant_id=assistant_id,
-    )
-
-
-@router.post("/explain", response_model_by_alias=True)
-async def explain(body: ExplainRequest, ica: IcaClientDep) -> ExplainResponse:
-    """
-    Rephrase one item of the practice-exam file (`rephrase.rephrase_item`, one call,
-    written without the key) and return it in the item's shape; the feedback and the
-    explanation are the item's own (a rephrase has none).
-    """
-    items = _get_exam_items()
-    item = items.get(body.question_id)
-    if item is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Question id {body.question_id!r} not found in practice exam file",
-        )
-
-    rephrase, meta = await rephrase_item(ica, item, body.model_id, body.max_tokens)
-    original = item.get("prompt") or {}
-    simplified_prompt = SimplifiedPrompt(
-        question=rephrase.question,
-        answers=rephrase.answers,
-        feedbacks=[clean_plain(f) for f in original.get("feedbacks", [])],
-        explanation=clean_plain(original.get("explanation", "")),
-    )
-
-    return ExplainResponse(
-        class_=item.get("_class", "assessment"),
-        id=item["id"],
-        assessment_type=item.get("assessment_type", "multiple-choice"),
-        prompt=simplified_prompt,
-        correct_response=item.get("correct_response", []),
-        section=item.get("section", ""),
-        question_plain=simplified_prompt.question,
-        related_lectures=item.get("related_lectures", []),
-        ica=meta,
     )

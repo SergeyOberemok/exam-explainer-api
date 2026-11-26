@@ -10,10 +10,8 @@ game's story, its decomposition (with semantic parts and visual entities built f
 the story line shown before it (the beat, written without the key), icons, the flow
 shown before answering, the resolution shown after (with a story consequence and an
 impact per answer), and last the game document the game serves (`compose`: the
-question as briefing, ask, tools, map and outcomes, put together in code). The rephrase
-and its check are no longer part of an upload (the game does not read them; job mode
-`rephrase` still writes them for study use). Your
-job is to run it, read the report, and fix what the report names. Do not hand-write
+question as briefing, ask, tools, map and outcomes, put together in code). Your job is
+to run it, read the report, and fix what the report names. Do not hand-write
 records for questions: if the pipeline cannot do something, the fix is a catalog or a
 prompt, so the next upload needs no hand work either.
 
@@ -126,22 +124,11 @@ Exit status 0 means done. Otherwise it names what is left:
   Usually the steps step 5 runs. "resolution with a consequence per answer" is a
   resolution written before the resolve step wrote consequences; step 5 writes it again.
 - **section without objectives / scenario no chapter claims**: steps 3 and 2.
-- **rephrases the check found changed** (only for rephrases written with job mode
-  `rephrase`, which only `/v1/game` and the study routes read): a model answering the
-  rephrase without the key picked a wrong answer, but the right one on the original.
-  /v1 does not offer these rephrases (only the original). Read them with `--show`, write each again
-  with `POST /questions/<id>/rephrase?force=true` and check it with
-  `POST /examination/<id>/check`. If the same kind of mistake repeats, fix the prompt in
-  `rephrase.py` instead.
-- **current rephrases that break a fidelity rule**: should be 0; anything listed means
-  a gate changed since the text was written. Bump `rephrase.CODE_VERSION` and run step 5.
 - **pre-answer flows that may point at the correct answer**: the flow shown before
   answering shares clearly more words with the correct answer than with the others.
   Look at one with `uv run python scripts/run_pipeline.py <id> --stages flow --dry-run --mermaid`;
   redo it with `POST /examination/<id>/flow` (then `/resolve`), or, when it repeats,
   tighten the flow prompt in `flow.py` (the next backfill redoes the flows).
-- **hard** (for information): the model missed the question in both wordings. Nothing
-  is wrong with the rephrase; these are the bank's hardest questions.
 
 To look at or redo one question step by step, use
 `uv run python scripts/run_pipeline.py <id> --show --mermaid` (add `--dry-run` to write

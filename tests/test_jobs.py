@@ -1,5 +1,5 @@
 """The ingest jobs: job modes (decomposition with its parts and entities, icons,
-rephrase and check), the routes that start them, and the standalone steps.
+objectives, story), the routes that start them, and the standalone steps.
 
 The last test runs the same pipeline against a real MongoDB (opt-in, like
 `tests/test_game_mongo.py`): TEST_MONGO_URL=mongodb://127.0.0.1:27017.
@@ -29,7 +29,6 @@ from claude_exam.api.dependencies import (
     get_async_jobs_collection,
     get_async_mongo_client,
     get_async_objectives_collection,
-    get_async_simplified_collection,
     get_async_story_collection,
     get_ica_client,
     get_simplification_lock,
@@ -144,7 +143,6 @@ class FakeMongo:
     def __init__(self, examination=()):
         self.db = {
             "examination": Coll(*examination),
-            "examination_simplified": Coll(),
             "question_objectives": Coll(),
             "question_story": Coll(),
             "question_decomposition": Coll(),
@@ -161,13 +159,6 @@ def reply(payload):
         "choices": [{"message": {"content": json.dumps(payload)}, "finish_reason": "stop"}],
         "usage": {"total_tokens": 7},
     }
-
-
-# The default rephrase reply (`rephrase.py`): the question and answers only.
-SIMPLE = {
-    "question": "Which mode, plan mode or acceptEdits mode, reads but never edits?",
-    "answers": ["acceptEdits mode", "plan mode"],
-}
 
 
 def icons_reply():
@@ -311,32 +302,26 @@ class ScriptedIca:
     the call kinds."""
 
     DEFAULTS = {
-        "rephrase": lambda: SIMPLE,
         "icons": icons_reply,
         "objectives": objectives_reply,
         "story": lambda: story_reply(),
         "beat": lambda: {"beat": "The team cannot agree on a working mode."},
-        "check": lambda: {"reason": "It blocks edits.", "answer": "B"},
     }
 
     def __init__(
         self,
-        rephrase=(),
         icons=(),
         objectives=(),
         story=(),
-        check=(),
         beat=(),
         decompose=(),
         flow=(),
         resolve=(),
     ):
         self.queues = {
-            "rephrase": list(rephrase),
             "icons": list(icons),
             "objectives": list(objectives),
             "story": list(story),
-            "check": list(check),
             "beat": list(beat),
             "decompose": list(decompose),
             "flow": list(flow),
@@ -374,9 +359,9 @@ class ScriptedIca:
             else "objectives" if "learning objective" in system
             else "story" if "story of a quiz game" in system
             else "beat" if "the line shown just BEFORE" in system
-            else "check" if "You answer one multiple-choice question" in system
-            else "rephrase"
+            else None
         )
+        assert kind is not None, f"unexpected ICA call: {system[:80]!r}"
         self.calls.append(kind)
         self.prompts.append(prompt)
         self.max_tokens.append(max_tokens)
@@ -414,12 +399,6 @@ async def run_job(mongo, ica, ids, mode, only_missing=False):
     return SimplificationJob(**{**doc, "id": str(doc.pop("_id"))})
 
 
-async def stored(mongo, doc):
-    """The question's rephrase record."""
-    db = mongo.get_default_database()
-    return await db["examination_simplified"].find_one({"question_id": str(doc["_id"])})
-
-
 async def decomposed(mongo, doc):
     """The question's decomposition record (with its parts, entities and icons)."""
     db = mongo.get_default_database()
@@ -444,7 +423,6 @@ async def test_decompose_mode_stores_parts_entities_icons_flow_and_resolution():
     }
     assert record["entities"]["question_icon"] == "mode" and record["icons_ica"] is not None
     assert record["flow"] and record["resolution"]
-    assert await stored(mongo, q) is None  # the rephrase is a step of its own
 
 
 async def test_icons_failure_after_the_decomposition_is_partial_not_a_failed_job():
@@ -493,45 +471,33 @@ async def test_a_new_decomposition_drops_the_old_icons():
     assert record["entities"]["answers"][1]["entities"][0]["icon"] is None
 
 
-async def test_rephrase_mode_writes_the_rephrase_and_checks_it():
-    q = question()
-    mongo, ica = FakeMongo([q]), ScriptedIca()
-    job = await run_job(mongo, ica, [q["_id"]], "rephrase")
-    assert ica.calls == ["rephrase", "check"]
-    assert (job.status, job.succeeded) == ("completed", 1)
-    record = await stored(mongo, q)
-    assert record["prompt"] == SIMPLE and record["correct_response"] == ["b"]
-    assert record["check"]["verdict"] == "same" and record["input_key"]
-
-
-async def test_a_failed_rephrase_is_reported_with_its_stage_and_nothing_is_checked():
-    q = question()
+async def test_a_failed_step_is_reported_with_its_stage_and_what_needs_it_is_not_tried():
+    q = in_chapter(section=TAGGABLE)
     mongo = FakeMongo([q])
-    ica = ScriptedIca(rephrase=[HTTPException(status_code=400, detail="bad key")])
-    job = await run_job(mongo, ica, [q["_id"]], "rephrase")
-    assert ica.calls == ["rephrase"]  # no check without a rephrase
+    ica = ScriptedIca(story=[HTTPException(status_code=400, detail="bad key")])
+    job = await run_job(mongo, ica, [q["_id"]], "story")
+    assert ica.calls == ["story"]  # no beat without a story
     assert (job.status, job.failed) == ("failed", 1)
-    assert job.errors[0].stage == "rephrase"
-    assert await stored(mongo, q) is None
+    assert job.errors[0].stage == "story"
 
 
 async def test_a_step_retries_transient_errors():
-    q = question()
+    q = question(section=TAGGABLE)
     mongo = FakeMongo([q])
-    ica = ScriptedIca(rephrase=[HTTPException(status_code=429, detail="slow down")])
-    job = await run_job(mongo, ica, [q["_id"]], "rephrase")
-    assert ica.calls == ["rephrase", "rephrase", "check"]
+    ica = ScriptedIca(objectives=[HTTPException(status_code=429, detail="slow down")])
+    job = await run_job(mongo, ica, [q["_id"]], "objectives")
+    assert ica.calls == ["objectives", "objectives"]
     assert job.succeeded == 1
 
 
 async def test_a_job_skips_what_another_job_did_meanwhile():
     """only_missing is checked when the job reaches a question, not when it was queued."""
-    q = question()
+    q = question(section=TAGGABLE)
     mongo, ica = FakeMongo([q]), ScriptedIca()
-    await run_job(mongo, ica, [q["_id"]], "rephrase")  # e.g. the import job it waited for
+    await run_job(mongo, ica, [q["_id"]], "objectives")  # e.g. the import job it waited for
     ica.calls.clear()
 
-    job = await run_job(mongo, ica, [q["_id"]], "rephrase", only_missing=True)
+    job = await run_job(mongo, ica, [q["_id"]], "objectives", only_missing=True)
     assert ica.calls == []
     assert (job.status, job.succeeded, job.skipped, job.failed) == ("completed", 0, 1, 0)
 
@@ -555,7 +521,7 @@ async def tags(mongo, doc):
     )
 
 
-async def test_objectives_job_tags_without_a_simplified_record():
+async def test_objectives_job_tags_a_question():
     q = question(section=TAGGABLE)
     mongo, ica = FakeMongo([q]), ScriptedIca()
     job = await run_job(mongo, ica, [q["_id"]], "objectives")
@@ -566,7 +532,6 @@ async def test_objectives_job_tags_without_a_simplified_record():
     assert (record["level"], record["tempting"], record["difficulty"]) == ("apply", [], 1)
     assert record["distractors"][1] is None and record["distractors"][0]["misconception"]
     assert record["input_key"] and record["created_at"] == record["updated_at"]
-    assert await stored(mongo, q) is None
 
 
 async def test_objectives_job_skips_current_records_and_redoes_outdated_ones(monkeypatch):
@@ -717,7 +682,6 @@ def client_for(mongo, ica, lock=None):
     db = mongo.get_default_database()
     lock = lock or asyncio.Semaphore(1)
     app.dependency_overrides[get_async_collection] = lambda: db["examination"]
-    app.dependency_overrides[get_async_simplified_collection] = lambda: db["examination_simplified"]
     app.dependency_overrides[get_async_objectives_collection] = lambda: db["question_objectives"]
     app.dependency_overrides[get_async_story_collection] = lambda: db["question_story"]
     app.dependency_overrides[get_async_decomposition_collection] = lambda: db["question_decomposition"]
@@ -806,14 +770,13 @@ def test_a_held_question_waits_for_its_resolution():
     assert db["game_question"].docs == []
 
 
-def test_a_held_question_is_released_without_a_rephrase_once_composed():
+def test_a_held_question_is_released_once_composed():
     held = in_chapter(section=TAGGABLE, pipeline_mode="manual")
     mongo, ica = FakeMongo([held]), ScriptedIca()
     client = client_for(mongo, ica)
     client.post("/examination/pipeline/backfill", params={"include_manual": "true"})
     db = mongo.get_default_database()
     assert "pipeline_mode" not in db["examination"].docs[0]
-    assert "rephrase" not in ica.calls and db["examination_simplified"].docs == []
     # Composed while held, then released: the game document follows the hold.
     assert [d["held"] for d in db["game_question"].docs] == [False]
 
@@ -850,19 +813,6 @@ def test_icons_backfill_and_single_question_route():
     assert client.post(f"/examination/{ObjectId()}/icons").status_code == 404
     # Forcing picks them all again.
     assert client.post("/examination/icons/backfill", params={"only_missing": "false"}).json()["total"] == 1
-
-
-def test_rephrase_route_returns_a_stored_rephrase_unless_forced():
-    q = question()
-    mongo, ica = FakeMongo([q]), ScriptedIca()
-    client = client_for(mongo, ica)
-    first = client.post(f"/questions/{q['_id']}/rephrase")
-    assert first.status_code == 200 and first.json()["prompt"] == SIMPLE and ica.calls == ["rephrase"]
-    assert client.post(f"/questions/{q['_id']}/rephrase").status_code == 200
-    assert ica.calls == ["rephrase"]
-    client.post(f"/questions/{q['_id']}/rephrase", params={"force": "true"})
-    assert ica.calls == ["rephrase", "rephrase"]
-    assert client.post(f"/questions/{ObjectId()}/rephrase").status_code == 404
 
 
 async def test_the_icons_route_refuses_while_a_job_holds_the_lock():

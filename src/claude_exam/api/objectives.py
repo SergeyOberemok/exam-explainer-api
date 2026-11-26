@@ -5,7 +5,7 @@ objective it tests (and up to two more it touches), a thinking level, which wron
 answers are tempting (the difficulty follows from that), and for every wrong answer
 what a learner who picks it gets wrong. The tags describe the
 ORIGINAL question and its answer key, so they are stored in their own collection
-(`question_objectives`, one record per question) and not on the simplified record.
+(`question_objectives`, one record per question).
 
 Unlike icons, nothing here is repaired with a guess: a reply without a usable main
 objective is rejected, and the question stays untagged until it is tagged again

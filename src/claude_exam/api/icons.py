@@ -115,7 +115,7 @@ def listed_actions(decomposition: QuestionDecomposition, q: KeyFreeQuestion) -> 
     """The actions a question is drawn with: the events of the scenario as the pre-answer
     flow may use them (`decompose.scenario_view`: no reference to an entity only an
     answer names) that happened (with a `sequence`; one without is what should happen,
-    left out as in `flow.flow_from`), in order."""
+    left out), in order."""
     events = [e for e in scenario_view(decomposition, q).events if e.sequence is not None]
     return sorted(events, key=lambda e: e.sequence)
 

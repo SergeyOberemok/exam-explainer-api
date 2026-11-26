@@ -19,7 +19,6 @@ from test_jobs import (
     reply,
     resolution_reply,
     run_job,
-    stored,
 )
 
 from claude_exam.api import batch, decompose, ica_json
@@ -38,7 +37,6 @@ from claude_exam.api.ica_json import ask_json, strict_schema
 from claude_exam.api.schemas import (
     DecisionFlow,
     QuestionDecomposition,
-    Rephrase,
 )
 from claude_exam.api.question_view import key_free
 
@@ -288,7 +286,7 @@ def test_strict_schema_closes_every_object_and_requires_every_field():
     entity = schema["$defs"]["DecompEntity"]
     assert entity["additionalProperties"] is False
     assert set(entity["required"]) == set(entity["properties"])
-    assert "default" not in str(strict_schema(Rephrase))
+    assert "default" not in str(schema)
 
 
 async def test_ask_json_sends_the_schema_and_falls_back_when_it_is_refused():
@@ -538,7 +536,7 @@ async def test_resolve_is_outdated_with_its_flow_and_an_old_record_shape_still_r
     store = mongo.get_default_database()["question_decomposition"]
     record = store.docs[0]
     assert record["parts"] and record["input_key"]
-    stores = batch.Stores(None, None, None, None, store)
+    stores = batch.Stores(None, None, None, store)
     assert await batch.is_current("resolve", stores, q)
     # A changed flow prompt outdates the flow, and so the resolution that continues it.
     from claude_exam.api import flow
@@ -644,20 +642,3 @@ def test_a_resolution_keeps_the_start_and_where_the_learner_chose():
     flow.nodes = [n for n in flow.nodes if n.id != "n2"]
     flow.edges = [e for e in flow.edges if "n2" not in (e.source, e.target)]
     assert any("n2" in e and "chose after" in e for e in replaced_errors(_branching_flow(), flow))
-
-
-def test_the_code_flow_draws_only_events_that_happen_now_with_their_entities():
-    from claude_exam.api.flow import flow_from
-
-    q = question()
-    q["prompt"]["question"] = "The agent edits files. Which mode?"
-    d = decomposition_reply()
-    d["events"] = [
-        {"id": "ev1", "name": "Agent edits files", "actor_id": "e1", "target_id": None, "input_ids": [], "output_ids": [], "sequence": 1, "source_status": "inferred", "evidence": ""},
-        {"id": "ev2", "name": "Route to a reviewer", "actor_id": "e1", "target_id": None, "input_ids": [], "output_ids": [], "sequence": None, "source_status": "inferred", "evidence": ""},
-    ]
-    flow = flow_from(QuestionDecomposition.model_validate(d), key_free(q))
-    labels = [n.label for n in flow.nodes]
-    assert "Route to a reviewer" not in labels
-    start = flow.nodes[0]
-    assert start.label == "Agent edits files" and start.entity_ids == ["e1"]

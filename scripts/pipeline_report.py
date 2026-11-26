@@ -27,7 +27,7 @@ from collections import Counter
 
 from pymongo import MongoClient
 
-from claude_exam.api import decompose, pipeline_keys
+from claude_exam.api import decompose, hold, pipeline_keys
 from claude_exam.api.batch import STAGES
 from claude_exam.api.pipeline_keys import Records
 from claude_exam.api.game.domain import (
@@ -96,6 +96,7 @@ def main() -> int:
     sections: Counter = Counter()
     paragraphs: Counter = Counter()
     unplayable = 0
+    held = 0
     changed: list[str] = []
     hard: list[str] = []
     lossy: list[tuple[str, list[str]]] = []
@@ -122,7 +123,8 @@ def main() -> int:
                 warning = leak_warning(doc, flow)
                 if warning:
                     leaks.append((question_id, warning))
-        unplayable += not is_playable(doc)
+        held += hold.is_held(doc)
+        unplayable += not is_playable(doc) and not hold.is_held(doc)
         if not for_section(doc.get("section") or ""):
             sections[normalize_section(doc.get("section")) or "(no section)"] += 1
         paragraph = unknown_paragraph(doc)
@@ -144,7 +146,8 @@ def main() -> int:
             if hard_problems:
                 lossy.append((question_id, hard_problems))
 
-    print(f"{len(docs)} questions" + (f" from {source}" if source else "") + f", {unplayable} the game cannot play\n")
+    print(f"{len(docs)} questions" + (f" from {source}" if source else "") + f", {unplayable} the game cannot play"
+          + (f", {held} held for manual processing (not played yet)" if held else "") + "\n")
     print(f"  {'step':<12}{'current':>9}{'outdated':>10}{'missing':>9}")
     for stage in STAGES["full"]:
         c = states[stage]

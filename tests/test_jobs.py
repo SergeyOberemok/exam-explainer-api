@@ -67,6 +67,14 @@ class _Cursor:
         for doc in self.docs:
             yield doc
 
+    def sort(self, key, direction=1):
+        self.docs.sort(key=lambda d: d[key], reverse=direction < 0)
+        return self
+
+    def limit(self, n):
+        self.docs = self.docs[:n]
+        return self
+
 
 class Coll:
     """The collection operations the pipeline and its routes send (copies on read, like
@@ -88,6 +96,8 @@ class Coll:
         for key, value in update.get("$push", {}).items():
             items = value["$each"] if isinstance(value, dict) and "$each" in value else [value]
             doc.setdefault(key, []).extend(copy.deepcopy(items))
+        for key in update.get("$unset", {}):
+            doc.pop(key, None)
 
     async def find_one(self, query, projection=None):
         doc = self._first(query)
@@ -95,6 +105,9 @@ class Coll:
 
     def find(self, query=None, projection=None):
         return _Cursor([copy.deepcopy(d) for d in self.docs if matches(d, query or {})])
+
+    async def count_documents(self, query):
+        return sum(1 for d in self.docs if matches(d, query))
 
     async def insert_one(self, doc):
         doc = {"_id": ObjectId(), **copy.deepcopy(doc)}
@@ -726,6 +739,63 @@ def test_import_runs_the_whole_pipeline_unless_disabled(params, calls):
     else:
         assert resp.json()["job_id"] is None
     assert ica.calls == calls
+
+
+def test_a_manual_import_holds_the_questions_and_starts_no_job():
+    mongo, ica = FakeMongo(), ScriptedIca()
+    client = client_for(mongo, ica)
+    # manual wins over simplify
+    resp = upload(client, manual="true", simplify="true")
+    assert resp.status_code == 200
+    assert (resp.json()["inserted"], resp.json()["job_id"], resp.json()["manual"]) == (1, None, True)
+    assert mongo.get_default_database()["examination"].docs[0]["pipeline_mode"] == "manual"
+    assert ica.calls == []
+    # An ordinary import stores nothing extra.
+    other = upload(client, in_chapter(section=TAGGABLE, prompt={"question": "Other?", "answers": ["a", "b"]}), simplify="false")
+    assert other.json()["manual"] is False
+    assert "pipeline_mode" not in mongo.get_default_database()["examination"].docs[1]
+
+
+def test_backfills_skip_held_questions_unless_asked():
+    held = in_chapter(section=TAGGABLE, pipeline_mode="manual")
+    mongo, ica = FakeMongo([held]), ScriptedIca()
+    client = client_for(mongo, ica)
+    for route in ("pipeline", "objectives", "story"):
+        assert client.post(f"/examination/{route}/backfill").json()["total"] == 0, route
+    assert ica.calls == []
+    resp = client.post("/examination/pipeline/backfill", params={"include_manual": "true"})
+    assert resp.json()["total"] == 1
+    # The full job left no required step missing, so the question was released.
+    assert "pipeline_mode" not in mongo.get_default_database()["examination"].docs[0]
+
+
+def test_a_held_question_stays_held_while_a_required_step_is_missing():
+    held = in_chapter(section=TAGGABLE, pipeline_mode="manual")
+    ica = ScriptedIca(decompose=[HTTPException(status_code=400, detail="x")])
+    mongo = FakeMongo([held])
+    client = client_for(mongo, ica)
+    client.post("/examination/pipeline/backfill", params={"include_manual": "true"})
+    assert mongo.get_default_database()["examination"].docs[0]["pipeline_mode"] == "manual"
+
+
+def test_a_held_question_is_released_without_the_optional_rephrase():
+    held = in_chapter(section=TAGGABLE, pipeline_mode="manual")
+    ica = ScriptedIca(rephrase=[HTTPException(status_code=400, detail="x")])
+    mongo = FakeMongo([held])
+    client = client_for(mongo, ica)
+    client.post("/examination/pipeline/backfill", params={"include_manual": "true"})
+    assert "pipeline_mode" not in mongo.get_default_database()["examination"].docs[0]
+
+
+def test_the_icons_backfill_skips_held_questions():
+    mongo = FakeMongo()
+    ica = ScriptedIca(icons=[HTTPException(status_code=400, detail="x")])
+    client = client_for(mongo, ica)
+    upload(client)  # the icon step of the import job fails
+    exam = mongo.get_default_database()["examination"].docs
+    exam[0]["pipeline_mode"] = "manual"
+    assert client.post("/examination/icons/backfill").json()["total"] == 0
+    assert client.post("/examination/icons/backfill", params={"include_manual": "true"}).json()["total"] == 1
 
 
 def test_icons_backfill_and_single_question_route():

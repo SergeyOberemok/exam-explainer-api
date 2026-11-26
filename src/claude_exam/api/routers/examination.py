@@ -37,6 +37,7 @@ from claude_exam.api.dependencies import (
 )
 from claude_exam.api.decompose import decompose_and_store, read_decomposition
 from claude_exam.api.flow import flow_and_store, resolve_and_store
+from claude_exam.api import hold
 from claude_exam.api.game.domain import story_of
 from claude_exam.api.icons import assign_and_store
 from claude_exam.api.ingest import plan_import
@@ -135,6 +136,14 @@ async def import_practice_exam(
     simplify: Annotated[
         bool, Query(description="Start the background pipeline job after import")
     ] = True,
+    manual: Annotated[
+        bool,
+        Query(
+            description="Store the questions held for manual processing: no job starts, "
+            "the game does not play them and the backfills skip them until each is "
+            "processed from the evaluation page (or released by hand)"
+        ),
+    ] = False,
     model_id: ModelIdQuery = "claude-haiku-5-5",
     dry_run: Annotated[
         bool,
@@ -152,6 +161,10 @@ async def import_practice_exam(
     The result also says what the pipeline cannot do for the new questions until a
     catalog is extended (`unknown_scenarios`, `unknown_sections`). Call it with
     `dry_run=true` first to see that before anything is stored.
+
+    With `manual=true` no job starts whatever `simplify` says: the questions are stored
+    held (`pipeline_mode: "manual"`, see `hold.py`) and processed one by one from the
+    evaluation page; a question is released into the game once its steps are done.
     """
     try:
         data = json.loads(await file.read())
@@ -178,15 +191,19 @@ async def import_practice_exam(
     if dry_run:
         return ImportResult(source=source, inserted=0, dry_run=True, **report)
 
+    if manual:
+        new = [{**doc, hold.FIELD: hold.MANUAL} for doc in new]
     inserted_ids: list[ObjectId] = []
     if new:
         inserted_ids = (await collection.insert_many(new)).inserted_ids
 
     job_id: str | None = None
-    if simplify:
+    if simplify and not manual:
         job_id = await starter.start(source, inserted_ids, model_id, "full")
 
-    return ImportResult(source=source, inserted=len(inserted_ids), job_id=job_id, **report)
+    return ImportResult(
+        source=source, inserted=len(inserted_ids), job_id=job_id, manual=manual, **report
+    )
 
 
 @router.post("/pipeline/backfill", status_code=202)
@@ -211,6 +228,10 @@ async def backfill_pipeline(
     limit: Annotated[
         int | None, Query(ge=1, description="Process at most this many questions")
     ] = None,
+    include_manual: Annotated[
+        bool,
+        Query(description="Also questions held for manual processing (imported with manual=true)"),
+    ] = False,
 ) -> EntitiesBackfill:
     """
     Start a background job that runs the whole pipeline (job mode "full") for stored
@@ -221,7 +242,8 @@ async def backfill_pipeline(
     """
     stores = Stores(collection, simplified, objectives, story, decomposition)
     question_ids: list[ObjectId] = []
-    async for doc in collection.find({"source": source} if source else {}):
+    query = hold.with_hold({"source": source} if source else {}, include_manual)
+    async for doc in collection.find(query):
         if only_missing and not await missing_stages("full", stores, doc):
             continue
         question_ids.append(doc["_id"])
@@ -263,6 +285,10 @@ async def backfill_icons(
     only_missing: Annotated[
         bool, Query(description="Skip questions whose icons are current")
     ] = True,
+    include_manual: Annotated[
+        bool,
+        Query(description="Also questions held for manual processing (imported with manual=true)"),
+    ] = False,
 ) -> EntitiesBackfill:
     """
     Start a background job that picks icons for decomposed questions (by default only
@@ -275,7 +301,9 @@ async def backfill_icons(
         if not ObjectId.is_valid(record.get("question_id", "")):
             continue
         doc = await collection.find_one({"_id": ObjectId(record["question_id"])})
-        if doc is None or (only_missing and await is_current("icons", stores, doc)):
+        if doc is None or (hold.is_held(doc) and not include_manual):
+            continue
+        if only_missing and await is_current("icons", stores, doc):
             continue
         question_ids.append(doc["_id"])
     job_id = await starter.start("icons-backfill", question_ids, model_id, "icons", only_missing)
@@ -419,6 +447,10 @@ async def backfill_objectives(
     limit: Annotated[
         int | None, Query(ge=1, description="Tag at most this many questions")
     ] = None,
+    include_manual: Annotated[
+        bool,
+        Query(description="Also questions held for manual processing (imported with manual=true)"),
+    ] = False,
 ) -> EntitiesBackfill:
     """
     Start a background job that tags questions with learning objectives (by default
@@ -428,7 +460,8 @@ async def backfill_objectives(
     """
     question_ids: list[ObjectId] = []
     stores = Stores(collection, None, objectives, None)
-    async for doc in collection.find({"section": section} if section else {}):
+    query = hold.with_hold({"section": section} if section else {}, include_manual)
+    async for doc in collection.find(query):
         if only_missing and await is_current("objectives", stores, doc):
             continue
         question_ids.append(doc["_id"])
@@ -511,6 +544,10 @@ async def backfill_story(
     limit: Annotated[
         int | None, Query(ge=1, description="Write at most this many stories")
     ] = None,
+    include_manual: Annotated[
+        bool,
+        Query(description="Also questions held for manual processing (imported with manual=true)"),
+    ] = False,
 ) -> EntitiesBackfill:
     """
     Start a background job that writes the story of questions (by default only those
@@ -520,7 +557,7 @@ async def backfill_story(
     """
     question_ids: list[ObjectId] = []
     stores = Stores(collection, None, None, story)
-    async for doc in collection.find({}):
+    async for doc in collection.find(hold.with_hold({}, include_manual)):
         if only_missing and not await missing_stages("story", stores, doc):
             continue
         question_ids.append(doc["_id"])

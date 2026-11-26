@@ -7,7 +7,7 @@ from bson import ObjectId
 from fastapi import HTTPException
 from pymongo import AsyncMongoClient
 
-from claude_exam.api import pipeline_keys
+from claude_exam.api import hold, pipeline_keys
 from claude_exam.api.beat import beat_and_store
 from claude_exam.api.check import check_and_store
 from claude_exam.api.decompose import decompose_and_store, read_decomposition
@@ -181,6 +181,22 @@ async def missing_stages(mode: JobMode, stores: Stores, doc: dict) -> list[JobSt
     return [s for s in STAGES[mode] if not pipeline_keys.is_current(s, doc, records)]
 
 
+async def release_if_ready(stores: Stores, doc: dict) -> bool:
+    """Releases a question held for manual processing (`hold.py`) into the game once no
+    required step of the "full" job is missing or outdated (the rephrase and its check
+    are optional). Returns whether it was released. Needs every store: a job of another
+    mode, whose `Stores` lack some, releases nothing."""
+    if not hold.is_held(doc) or None in stores:
+        return False
+    missing = await missing_stages("full", stores, doc)
+    if any(stage not in hold.OPTIONAL_STAGES for stage in missing):
+        return False
+    await stores.examination.update_one(
+        {"_id": doc["_id"], **hold.HELD}, {"$unset": {hold.FIELD: ""}}
+    )
+    return True
+
+
 def _step(stage: JobStage, ica: IcaClient, stores: Stores, doc: dict, model_id: IcaModelId):
     """The operation of one pipeline step for one question."""
 
@@ -285,6 +301,7 @@ async def _process(
                 stored += 1
             except HTTPException as exc:
                 failed(stage, exc.status_code, str(exc.detail))
+        await release_if_ready(stores, doc)
     except HTTPException as exc:
         failed(stage, exc.status_code, str(exc.detail))
     except Exception as exc:  # keep the batch going on any per-question failure

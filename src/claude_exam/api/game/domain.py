@@ -10,7 +10,7 @@ import logging
 from bson import ObjectId
 from pydantic import ValidationError
 
-from claude_exam.api import decompose
+from claude_exam.api import decompose, hold
 from claude_exam.api.icon_catalog import known as known_icon
 from claude_exam.api.objective_catalog import known as known_objective
 from claude_exam.api.scenario_catalog import (
@@ -55,10 +55,12 @@ OVERSAMPLE_FACTOR = 2
 CHECK_SAME, CHECK_CHANGED, CHECK_HARD = "same", "changed", "hard"
 
 # Pre-filter for pick-one questions the game can show; `is_playable` has the final say.
+# A question held for manual processing (`hold.py`) is left out until it is released.
 PLAYABLE_QUERY: dict = {
     "correct_response": {"$size": 1},
     "prompt.answers.1": {"$exists": True},
     f"prompt.answers.{MAX_ANSWERS}": {"$exists": False},
+    **hold.NOT_HELD,
 }
 
 
@@ -85,8 +87,13 @@ def correct_indices(doc: dict) -> list[int]:
 
 
 def is_playable(doc: dict) -> bool:
-    """Pick-one: 2..MAX_ANSWERS answers and exactly one valid correct answer."""
-    return 2 <= len(answers_of(doc)) <= MAX_ANSWERS and len(correct_indices(doc)) == 1
+    """Pick-one: 2..MAX_ANSWERS answers and exactly one valid correct answer, and not held
+    for manual processing (`hold.is_held`)."""
+    return (
+        2 <= len(answers_of(doc)) <= MAX_ANSWERS
+        and len(correct_indices(doc)) == 1
+        and not hold.is_held(doc)
+    )
 
 
 def simplified_matches(original: dict, simplified: dict) -> bool:

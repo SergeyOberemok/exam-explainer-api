@@ -593,6 +593,22 @@ def test_browse_lists_only_playable_questions():
     assert [q["id"] for q in items] == [str(good["_id"])]
 
 
+def test_a_question_held_for_manual_processing_is_not_played():
+    good, held = doc(), doc(pipeline_mode="manual")
+    assert not is_playable(held)
+    items = client_with(exam=[held, good]).get("/v1/game/questions").json()["items"]
+    assert [q["id"] for q in items] == [str(good["_id"])]
+    rounds = FakeRounds()
+    c, body = start_round([held, good], rounds=rounds)
+    assert [q["id"] for q in body["items"]] == [str(good["_id"])]
+    added = c.post(
+        f"/v1/game/rounds/{body['round_id']}/questions", json={"question_id": str(held["_id"])}
+    )
+    assert added.status_code == 422 and added.json()["code"] == "question_not_playable"
+    only_held = client_with(exam=[held]).post("/v1/game/rounds", json={"count": 10})
+    assert only_held.status_code == 404 and only_held.json()["code"] == "no_questions"
+
+
 def test_simplified_question_by_id():
     a = doc()
     c = client_with(simple=[simplified_of(a)])

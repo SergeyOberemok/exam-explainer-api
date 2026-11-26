@@ -60,6 +60,28 @@ catalog makes the next backfill tag every question again (one call per question)
 curl -s -X POST "http://127.0.0.1:8000/examination/import" -F "file=@<path to file>.json"
 ```
 
+### Manual mode: import now, process question by question
+
+When the user wants the questions stored but processed by hand (one at a time, from the
+evaluation page), import with `manual=true` instead:
+
+```
+curl -s -X POST "http://127.0.0.1:8000/examination/import?manual=true" -F "file=@<path to file>.json"
+```
+
+No job starts (`job_id` is null, `manual` is true). The questions are stored **held**
+(`pipeline_mode: "manual"`): the game does not play them and the backfills of step 5
+skip them (add `?include_manual=true` to a backfill to take them after all). Then tell
+the user to open `http://127.0.0.1:8000/evaluate/ui/`: "Waiting for the pipeline"
+lists the held questions with the steps each one needs. Clicking one loads it, "Select
+missing steps" ticks them and turns on "save to database", and "Run and save" runs them.
+A question is released into the game by itself once no required step is missing (the
+rephrase and its check are optional), or by hand with "Release to game"
+(`POST /evaluate/questions/<id>/release`; `/hold` holds it again). In manual mode, skip
+the job polling below; the report of step 6 counts the held questions.
+
+### The job
+
 It returns `job_id`. Poll `GET /examination/jobs/<job_id>` until `status` is `completed`
 or `failed` (about 30 seconds per question with the default three at a time; eight
 model calls each, more when a gate asks for a repair). In the job: `succeeded`, `failed`, `stages_failed` (failures per step) and
@@ -83,7 +105,9 @@ inputs (another prompt, catalog, chapter or upstream result: each step stores a 
 the messages it sent, so there is nothing to bump), and runs only those steps. Use it
 after a crash, after fixing a catalog, and after changing a prompt.
 `{"job_id": null, "total": 0}` means nothing is left. `?source=<file name>` limits it
-to one upload; `?limit=N` to a few questions for a trial.
+to one upload; `?limit=N` to a few questions for a trial. Questions held for manual
+processing are skipped unless `?include_manual=true` (which also releases each one
+whose required steps the job completes).
 
 ## 6. Report
 

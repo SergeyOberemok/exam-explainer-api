@@ -7,7 +7,7 @@ import pytest
 from bson import ObjectId
 from fastapi import HTTPException
 from test_decompose import review_question
-from test_jobs import FakeMongo, ScriptedIca, client_for, question
+from test_jobs import TAGGABLE, FakeMongo, ScriptedIca, client_for, in_chapter, question
 
 from claude_exam.api import batch, ica_json
 from claude_exam.api.scenario_catalog import text_hash
@@ -177,3 +177,46 @@ def test_a_persisted_run_is_refused_while_a_job_runs():
     assert response.status_code == 409
     # A dry run does not take the lock.
     assert client.post(f"/evaluate/questions/{q['_id']}/run", json={"stages": ["decompose"]}).status_code == 200
+
+
+def test_the_held_questions_are_listed_with_the_steps_they_need():
+    held, other = question(pipeline_mode="manual"), question()
+    elsewhere = question(pipeline_mode="manual", source="y.json")
+    client = client_for(FakeMongo([held, other, elsewhere]), ScriptedIca())
+    got = client.get("/evaluate/questions").json()
+    assert got["total"] == 2
+    assert [i["id"] for i in got["items"]] == [str(held["_id"]), str(elsewhere["_id"])]
+    assert got["items"][0]["question"] == "Which mode?"
+    assert got["items"][0]["missing"][0] == "objectives" and "decompose" in got["items"][0]["missing"]
+    only = client.get("/evaluate/questions", params={"source": "y.json"}).json()
+    assert [i["id"] for i in only["items"]] == [str(elsewhere["_id"])]
+    view = client.get(f"/evaluate/questions/{held['_id']}").json()["original"]
+    assert view["held"] is True and "decompose" in view["missing"]
+    assert client.get(f"/evaluate/questions/{other['_id']}").json()["original"]["held"] is False
+
+
+def test_a_question_is_released_and_held_by_hand():
+    held = question(pipeline_mode="manual")
+    mongo = FakeMongo([held])
+    client = client_for(mongo, ScriptedIca())
+    exam = mongo.get_default_database()["examination"].docs
+    released = client.post(f"/evaluate/questions/{held['_id']}/release").json()
+    assert released["held"] is False and "pipeline_mode" not in exam[0]
+    assert client.get("/evaluate/questions").json()["total"] == 0
+    again = client.post(f"/evaluate/questions/{held['_id']}/hold").json()
+    assert again["held"] is True and exam[0]["pipeline_mode"] == "manual"
+    assert client.post(f"/evaluate/questions/{ObjectId()}/release").status_code == 404
+
+
+def test_a_persisted_run_that_completes_the_steps_releases_the_question():
+    held = in_chapter(section=TAGGABLE, pipeline_mode="manual")
+    mongo = FakeMongo([held])
+    client = client_for(mongo, ScriptedIca())
+    exam = mongo.get_default_database()["examination"].docs
+    url = f"/evaluate/questions/{held['_id']}/run"
+    client.post(url, json={"stages": ["objectives", "story", "decompose"], "persist": True})
+    assert exam[0]["pipeline_mode"] == "manual"  # beat, icons, flow, resolve still missing
+    missing = client.get(f"/evaluate/questions/{held['_id']}").json()["original"]["missing"]
+    assert missing[:4] == ["beat", "icons", "flow", "resolve"]
+    client.post(url, json={"stages": missing, "persist": True})
+    assert "pipeline_mode" not in exam[0]

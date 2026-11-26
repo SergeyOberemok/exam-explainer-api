@@ -27,6 +27,8 @@ class ImportResult(BaseModel):
     job_id: str | None = None
     # True when nothing was stored: the rest of the report says what an import would do.
     dry_run: bool = False
+    # True when the questions were stored held for manual processing (`hold.py`).
+    manual: bool = False
     # Questions that would be (or were) stored: in the file, and not a duplicate.
     new: int = 0
     # Left out: the same question and answers are already stored, or occur earlier in

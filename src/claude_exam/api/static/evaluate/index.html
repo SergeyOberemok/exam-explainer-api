@@ -38,7 +38,7 @@
                  border-radius: 6px; padding: 6px 8px; font: inherit; color: inherit; }
   ul.hits { list-style: none; margin: 8px 0 0; padding: 0; max-height: 360px; overflow-y: auto; }
   ul.hits li { padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; margin: 4px 0; cursor: pointer; }
-  ul.hits li:hover { border-color: var(--accent); }
+  ul.hits li:hover, ul.hits li.current { border-color: var(--accent); }
   ul.hits .meta { color: var(--muted); font-size: 12px; }
   button { background: var(--accent); color: var(--accent-ink); border: 0; border-radius: 6px;
            padding: 6px 14px; cursor: pointer; font-weight: 600; }
@@ -91,6 +91,15 @@
       </form>
       <div id="find-error" class="error"></div>
       <ul id="hits" class="hits"></ul>
+    </div>
+    <div class="card">
+      <h2>Waiting for the pipeline</h2>
+      <div class="row">
+        <input type="text" id="held-source" placeholder="source file (any)" size="22">
+        <button type="button" class="ghost" id="held-refresh">Refresh</button>
+        <span id="held-state" class="muted"></span>
+      </div>
+      <ul id="held" class="hits"></ul>
     </div>
     <div class="card" id="original"><h2>Original question</h2><div class="empty">Find a question by id or by its text.</div></div>
     <div class="card">
@@ -149,6 +158,7 @@ try { $("apikey").value = localStorage.getItem("evaluate.apikey") || ""; } catch
 $("apikey").addEventListener("change", () => {
   try { localStorage.setItem("evaluate.apikey", $("apikey").value); } catch {}
   if (!options.stages.length) loadOptions(); // they failed without the key
+  loadHeld();
 });
 function headers(json = false) {
   const out = {};
@@ -259,6 +269,7 @@ async function loadQuestion(id) {
     renderOriginal(current.original);
     renderResults(current.stored, "stored", []);
     $("run").disabled = false;
+    for (const li of $("held").querySelectorAll("li")) li.classList.toggle("current", li.title && li.querySelector(".meta")?.textContent.endsWith(id));
   } finally { if (mine === loading) $("load").disabled = false; }
 }
 
@@ -302,6 +313,8 @@ $("run").addEventListener("click", async () => {
     const failed = steps.filter((s) => s.status.startsWith("failed")).length;
     $("run-state").textContent = (finished ? "done" : "stream ended early") +
       ` in ${Math.round((Date.now() - started) / 1000)}s` + (failed ? `, ${failed} failed` : "");
+    // A saving run may have released the question (nothing required left missing).
+    if (persist) { await refreshOriginal(); await loadHeld(); }
   } catch (err) {
     if (!controller.signal.aborted) $("run-state").textContent = `stream broke: ${err}`;
   } finally {
@@ -309,6 +322,64 @@ $("run").addEventListener("click", async () => {
     if (running === controller) { running = null; $("run").disabled = false; }
   }
 });
+
+// --- questions held for manual processing (imported with manual=true) ----------------
+async function loadHeld() {
+  const source = $("held-source").value.trim();
+  const params = new URLSearchParams({ limit: "100" });
+  if (source) params.set("source", source);
+  const res = await fetch(`${API}/questions?${params}`, { headers: headers() });
+  if (!res.ok) { $("held-state").textContent = await failure(res); return; }
+  const { items, total } = await res.json();
+  $("held-state").textContent = total ? `${items.length} of ${total} held` : "none held";
+  $("held").replaceChildren(...items.map((q) => {
+    const li = h("li", { title: q.question, class: q.id === question ? "current" : "" },
+      h("div", { class: "meta" }, `${q.section || "no section"} · ${q.source} · ${q.id}`),
+      q.question,
+      h("div", { class: "meta" }, q.missing.length ? `needs: ${q.missing.join(", ")}` : "nothing missing"));
+    li.addEventListener("click", () => loadQuestion(q.id));
+    return li;
+  }));
+}
+$("held-refresh").addEventListener("click", loadHeld);
+$("held-source").addEventListener("change", loadHeld);
+
+// Reads the question's view again after a saving run or a release: only the left side is
+// redrawn, so the run's results stay on the right.
+async function refreshOriginal() {
+  if (!question) return;
+  const id = question;
+  const res = await fetch(`${API}/questions/${id}`, { headers: headers() });
+  if (!res.ok || id !== question) return;
+  const view = await res.json();
+  current.original = view.original;
+  renderOriginal(current.original);
+}
+
+async function setHold(held) {
+  if (!question) return;
+  const res = await fetch(`${API}/questions/${question}/${held ? "hold" : "release"}`, { method: "POST", headers: headers() });
+  if (!res.ok) { $("find-error").textContent = await failure(res); return; }
+  await refreshOriginal();
+  await loadHeld();
+}
+
+// Ticks exactly the steps the question still needs and switches to a saving run.
+function selectMissing(missing) {
+  if (!$("persist").checked) { $("persist").checked = true; $("persist").dispatchEvent(new Event("change")); }
+  for (const input of $("stages").querySelectorAll("input")) input.checked = missing.includes(input.value);
+}
+
+function holdRow(o) {
+  const missing = o.missing || [];
+  return h("div", { class: "row", style: "margin:6px 0" },
+    o.held ? chip("held: not in the game", "warn") : chip("in the game", "ok"),
+    missing.length ? h("span", { class: "muted" }, "needs:", missing.map((m) => chip(m))) : chip("nothing missing", "ok"),
+    missing.length ? h("button", { type: "button", class: "ghost", onclick: () => selectMissing(missing) }, "Select missing steps") : "",
+    o.held
+      ? h("button", { type: "button", class: "ghost", onclick: () => { if (confirm("Release this question into the game as it is?")) setHold(false); } }, "Release to game")
+      : h("button", { type: "button", class: "ghost", onclick: () => setHold(true) }, "Hold"));
+}
 
 // --- left: the original ---------------------------------------------------------------
 function answerList(answers, correctOf, feedbackOf) {
@@ -323,6 +394,7 @@ function renderOriginal(o) {
     h("h2", {}, "Original question"),
     h("div", { class: "row" }, chip(o.section || "no section"), o.assessment_type ? chip(o.assessment_type) : "",
       o.chapter ? chip(`chapter: ${o.chapter}`) : chip("no chapter", "warn"), story.stage ? chip(`stage: ${story.stage}`) : ""),
+    holdRow(o),
     o.scenario ? h("details", {}, h("summary", { class: "muted" }, "Scenario paragraph"), h("p", {}, o.scenario)) : "",
     h("p", {}, h("strong", {}, o.stem || o.question)),
     answerList(o.answers.map((a) => a.text), (i) => o.answers[i].correct, (i) => o.answers[i].feedback),
@@ -505,6 +577,7 @@ function renderResults(r, source, steps, planned) {
 }
 
 await loadOptions();
+loadHeld();
 if (IS_ID.test(location.hash.slice(1))) loadQuestion(location.hash.slice(1));
 </script>
 </body>

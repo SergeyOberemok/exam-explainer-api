@@ -3,17 +3,21 @@ pipeline steps on it (`pipeline_preview.run_dry`: computed in memory, nothing wr
 with `persist`, really run them (`batch.run_simplification_job`: the records are written).
 
 The page itself is static (`api/static/evaluate/index.html`, served at `/evaluate/ui/`).
+It also lists the questions held for manual processing (an import with `manual=true`,
+see `hold.py`) and releases or holds one by hand.
 """
 
 import time
 from collections.abc import AsyncIterable
-from typing import Any, get_args
+from typing import Annotated, Any, get_args
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from claude_exam.api.batch import STAGES, new_job, run_simplification_job
+from claude_exam.api import hold
+from claude_exam.api.batch import STAGES, Stores, missing_stages, new_job, run_simplification_job
 from claude_exam.api.dependencies import (
+    AsyncCollectionDep,
     AsyncMongoClientDep,
     AsyncDecompositionCollectionDep,
     AsyncObjectivesCollectionDep,
@@ -26,6 +30,7 @@ from claude_exam.api.dependencies import (
 from claude_exam.api.pipeline_preview import DRY_STAGES, Result, original_view, run_dry
 from claude_exam.api.schemas import IcaModelId, JobStage
 from claude_exam.api.security import require_api_key
+from claude_exam.html_clean import clean_question
 
 router = APIRouter(
     prefix="/evaluate", tags=["evaluate"], dependencies=[Depends(require_api_key)]
@@ -62,6 +67,29 @@ class EvaluationEvent(BaseModel):
     result: dict[str, Any]
 
 
+class HeldQuestion(BaseModel):
+    id: str
+    source: str
+    section: str
+    question: str
+    missing: list[str]
+
+
+class HeldQuestionList(BaseModel):
+    items: list[HeldQuestion]
+    total: int
+
+
+class HoldState(BaseModel):
+    id: str
+    held: bool
+    missing: list[str]
+
+
+# Characters of the question text a list item shows.
+_SNIPPET = 160
+
+
 class EvaluationOptions(BaseModel):
     stages: list[str]
     dry_stages: list[str]
@@ -80,24 +108,101 @@ async def get_options() -> EvaluationOptions:
     )
 
 
+@router.get("/questions")
+async def list_held_questions(
+    collection: AsyncCollectionDep,
+    simplified: AsyncSimplifiedCollectionDep,
+    decomposition: AsyncDecompositionCollectionDep,
+    story: AsyncStoryCollectionDep,
+    objectives: AsyncObjectivesCollectionDep,
+    source: Annotated[
+        str | None, Query(max_length=300, description="Only questions imported from this file")
+    ] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
+) -> HeldQuestionList:
+    """The questions held for manual processing (imported with `manual=true`), oldest
+    first, each with the steps of the full pipeline it still needs."""
+    stores = Stores(collection, simplified, objectives, story, decomposition)
+    query = {**hold.HELD, **({"source": source} if source else {})}
+    items = []
+    async for doc in collection.find(query).sort("_id", 1).limit(limit):
+        text = " ".join(clean_question((doc.get("prompt") or {}).get("question", "")).split())
+        items.append(
+            HeldQuestion(
+                id=str(doc["_id"]),
+                source=doc.get("source", ""),
+                section=doc.get("section", ""),
+                question=text[:_SNIPPET],
+                missing=await missing_stages("full", stores, doc),
+            )
+        )
+    return HeldQuestionList(items=items, total=await collection.count_documents(query))
+
+
 @router.get("/questions/{question_id}")
 async def get_evaluation(
     doc: ExaminationDocDep,
+    collection: AsyncCollectionDep,
     simplified: AsyncSimplifiedCollectionDep,
     decomposition: AsyncDecompositionCollectionDep,
     story: AsyncStoryCollectionDep,
     objectives: AsyncObjectivesCollectionDep,
 ) -> EvaluationView:
-    """The original question (with its key) and what the pipeline stored for it."""
+    """The original question (with its key, whether it is held for manual processing and
+    the steps it still needs) and what the pipeline stored for it."""
     query = {"question_id": str(doc["_id"])}
     result = Result.from_records(
         doc, await simplified.find_one(query), await decomposition.find_one(query)
     )
+    stores = Stores(collection, simplified, objectives, story, decomposition)
     return EvaluationView(
-        original=original_view(
-            doc, await story.find_one(query), await objectives.find_one(query)
-        ),
+        original={
+            **original_view(doc, await story.find_one(query), await objectives.find_one(query)),
+            "held": hold.is_held(doc),
+            "missing": await missing_stages("full", stores, doc),
+        },
         stored=result.as_json(doc),
+    )
+
+
+async def _set_hold(doc: dict, held: bool, stores: Stores) -> HoldState:
+    update = {"$set": {hold.FIELD: hold.MANUAL}} if held else {"$unset": {hold.FIELD: ""}}
+    await stores.examination.update_one({"_id": doc["_id"]}, update)
+    return HoldState(
+        id=str(doc["_id"]), held=held, missing=await missing_stages("full", stores, doc)
+    )
+
+
+@router.post("/questions/{question_id}/release")
+async def release_question(
+    doc: ExaminationDocDep,
+    collection: AsyncCollectionDep,
+    simplified: AsyncSimplifiedCollectionDep,
+    decomposition: AsyncDecompositionCollectionDep,
+    story: AsyncStoryCollectionDep,
+    objectives: AsyncObjectivesCollectionDep,
+) -> HoldState:
+    """Releases a held question into the game (and the backfills) as it is, whatever
+    steps it still lacks. A real run releases it by itself once its steps are done."""
+    return await _set_hold(
+        doc, False, Stores(collection, simplified, objectives, story, decomposition)
+    )
+
+
+@router.post("/questions/{question_id}/hold")
+async def hold_question(
+    doc: ExaminationDocDep,
+    collection: AsyncCollectionDep,
+    simplified: AsyncSimplifiedCollectionDep,
+    decomposition: AsyncDecompositionCollectionDep,
+    story: AsyncStoryCollectionDep,
+    objectives: AsyncObjectivesCollectionDep,
+) -> HoldState:
+    """Holds a question for manual processing: the game no longer plays it and the
+    backfills skip it. A real run that leaves none of its required steps missing
+    releases it again."""
+    return await _set_hold(
+        doc, True, Stores(collection, simplified, objectives, story, decomposition)
     )
 
 

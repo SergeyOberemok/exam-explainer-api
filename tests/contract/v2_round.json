@@ -12,6 +12,9 @@
         "tools-errors"
       ],
       "difficulty": 2,
+      "requirements": [
+        "No edit before review"
+      ],
       "icon": "api",
       "beat": "The first API call of the support agent is refused.",
       "question": "SCENARIO: You are building a customer support resolution agent.\n\nQUESTION: Which header carries the API key?",
@@ -112,6 +115,7 @@
             "type": "start",
             "label": "Work starts",
             "entity_ids": [],
+            "icon": "",
             "condition_id": "",
             "source_status": "inferred",
             "is_question": false,
@@ -122,6 +126,7 @@
             "type": "process",
             "label": "Edits happen",
             "entity_ids": [],
+            "icon": "",
             "condition_id": "",
             "source_status": "inferred",
             "is_question": false,
@@ -132,6 +137,7 @@
             "type": "decision",
             "label": "Which mode?",
             "entity_ids": [],
+            "icon": "",
             "condition_id": "",
             "source_status": "inferred",
             "is_question": true,

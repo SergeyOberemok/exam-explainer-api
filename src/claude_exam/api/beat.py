@@ -3,7 +3,8 @@
 The story step (`story.py`) places a question in its chapter and stage and writes the
 lines shown after the answer; it reads the key, which those lines need. The beat is read
 before answering, so it is written here, from the
-`KeyFreeQuestion`: the model sees the company, the chapter with its people, the stage
+`KeyFreeQuestion`: the model sees the company, the chapter (with its people, when it
+has any), the stage
 the story step chose, the question and the answers the player will see, and never the
 correct answer, the feedback or the explanation.
 
@@ -32,7 +33,13 @@ from claude_exam.api.question_view import KeyFreeQuestion, key_free
 from claude_exam.api.scenario_catalog import BY_KEY, COMPANY, COMPANY_INTRO, STAGES
 from claude_exam.api.schemas import IcaMeta, IcaModelId, QuestionDecomposition, QuestionStory
 from claude_exam.api.step_key import key_or_none, step_key
-from claude_exam.api.story import MAX_LINE_CHARS, MAX_LINE_WORDS, PROMPT_LINE_WORDS, people
+from claude_exam.api.story import (
+    MAX_LINE_CHARS,
+    MAX_LINE_WORDS,
+    PROMPT_LINE_WORDS,
+    people_line,
+    person_rule,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -63,8 +70,7 @@ do not say what should be done.
 STYLE
 - At most {{LINE_WORDS}} words, plain English, present tense, about {{COMPANY}}'s \
 people and systems.
-- Use a person only where it adds something, and then only one of the people listed \
-for the chapter, by first name. Most lines need no person at all.
+{{PERSON_RULE}}
 - No exclamation marks, no "you".
 - Do not repeat the question's sentences. The line is a symptom or a situation, not a \
 summary.
@@ -76,7 +82,7 @@ EXAMPLES OF THE STYLE - from other questions; never reuse their content.
 are missing."
 - "On pull requests with 40 files the reviewer contradicts itself and misses changes \
 that span files."
-- "Omar wants every pull request on the refund tools reviewed by Claude in CI, with a \
+- "The support team wants every pull request on the refund tools reviewed by Claude in CI, with a \
 script deciding pass or fail."
 
 OUTPUT FORMAT - respond with ONLY a single valid JSON object and nothing else - no \
@@ -91,8 +97,8 @@ def _chapter(key: str) -> str:
     if scenario is None:
         return f"{COMPANY}'s team (no chapter)"
     return (
-        f'THIS QUESTION\'S CHAPTER - "{scenario.title}"\n{scenario.intro}\n'
-        f"People: {people(scenario)}"
+        f'THIS QUESTION\'S CHAPTER - "{scenario.title}"\n{scenario.intro}'
+        f"{people_line(scenario)}"
     )
 
 
@@ -106,12 +112,14 @@ def messages(q: KeyFreeQuestion, place: dict) -> tuple[str, str]:
     stage = next((s for s in STAGES if s.key == place.get("stage")), None)
     if stage is None:
         raise HTTPException(status_code=422, detail="question has no story stage")
+    scenario = BY_KEY.get(place.get("scenario") or "")
     system = (
         _SYSTEM_MESSAGE.replace("{{COMPANY_INTRO}}", COMPANY_INTRO)
         .replace("{{COMPANY}}", COMPANY)
         .replace("{{CHAPTER}}", _chapter(place.get("scenario") or ""))
         .replace("{{STAGE}}", f"{stage.title}: {stage.description}")
         .replace("{{LINE_WORDS}}", str(PROMPT_LINE_WORDS))
+        .replace("{{PERSON_RULE}}", person_rule(bool(scenario and scenario.cast)))
     )
     choices = "\n".join(f"  {chr(65 + i)}. {a}" for i, a in enumerate(q.answers))
     user = (

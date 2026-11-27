@@ -317,7 +317,7 @@ def test_derived_entities_keep_their_ids_and_follow_the_answer_options():
         e1=("mode", "concept"), e2=("acceptEdits mode", "object"), e3=("plan mode", "object")
     )
     result = derive_entities(d, VIEW)
-    # A concept is never drawn; each answer lists what its option relies on.
+    # Each answer lists what its option relies on; the concept is not in the scene.
     assert [(e.name, e.ref) for e in result.answers[0].entities] == [("acceptEdits mode", "e2")]
     assert [(e.name, e.ref) for e in result.answers[1].entities] == [("plan mode", "e3")]
     # Grounded in the original question's words: "Which mode?" names neither.
@@ -328,3 +328,49 @@ def test_derived_entities_need_no_game_text_and_read_no_key():
     d = _decomposition(e2=("acceptEdits mode", "object"), e3=("plan mode", "object"))
     assert len(derive_entities(d, VIEW).answers) == len(DOC["prompt"]["answers"])
     assert not hasattr(VIEW, "correct_response") and not hasattr(VIEW, "feedbacks")
+
+
+def test_answer_keeps_its_options_entities_without_the_text_naming_them():
+    d = _decomposition(
+        e1=("Shared Runner", "system"),
+        e2=("--continue Flag", "concept"),
+        e3=("Session ID", "object"),
+    )
+    d.answer_options[0].entity_ids = ["e2", "e1"]
+    d.answer_options[1].entity_ids = ["e3"]
+    result = derive_entities(d, VIEW)
+    # The option's entities stay though the answer's words never name them, concept
+    # included; the scene's other entities still need the text.
+    assert [e.ref for e in result.answers[0].entities] == ["e2", "e1"]
+    assert [e.ref for e in result.answers[1].entities] == ["e3"]
+    # The question names drawable entities only.
+    assert all(e.ref != "e2" for e in result.question)
+
+
+def test_rederive_script_keeps_icons_and_adds_the_options_entities():
+    import importlib.util
+    from pathlib import Path
+
+    from claude_exam.api.scenario_catalog import text_hash
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "rederive_entities.py"
+    spec = importlib.util.spec_from_file_location("rederive_entities", path)
+    script = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(script)
+
+    d = _decomposition(e1=("Shared Runner", "system"), e2=("--continue Flag", "concept"))
+    d.answer_options[0].entity_ids = ["e2"]
+    d.answer_options[1].entity_ids = ["e1"]
+    record = {
+        "text_hash": text_hash(DOC),
+        "semantic": d.model_dump(),
+        # The old derivation: nothing for the answers; icons by id from the icons step.
+        "entities": {"question_icon": "workflow", "question": [], "answers": [{"entities": [], "icon": "a"}, {"entities": [], "icon": "b"}]},
+        "icons": {"entities": {"e1": "server", "e2": "cli-flag"}},
+    }
+    new = script.rederived(record, DOC)
+    assert [(e["ref"], e["icon"]) for e in new["answers"][0]["entities"]] == [("e2", "cli-flag")]
+    assert [(e["ref"], e["icon"]) for e in new["answers"][1]["entities"]] == [("e1", "server")]
+    assert (new["question_icon"], [a["icon"] for a in new["answers"]]) == ("workflow", ["a", "b"])
+    # A decomposition written for another text is left alone.
+    assert script.rederived({**record, "text_hash": "other"}, DOC) is None

@@ -2,7 +2,7 @@
   "about": "Hand-written story records. Load with scripts/load_story_seed.py. `hash` is scenario_catalog.text_hash of the question; the order of items inside a chapter's stage is the play order.",
   "items": [
     {"hash": "ba8e3faea8960dc9", "scenario": "dev-tools", "stage": "design",
-     "beat": "Ines opens with the oldest wish on the backlog: tests for the billing module nobody dares to touch.",
+     "beat": "The oldest wish on the backlog: tests for the billing module nobody dares to touch.",
      "win": "The agent maps the module first, and each finding shapes the next task. Coverage grows where it matters.",
      "fail": "The fixed plan meets code nobody predicted, and half the subtasks turn out to be pointless."},
     {"hash": "e5533a1bcbc9f24e", "scenario": "dev-tools", "stage": "design",
@@ -105,7 +105,7 @@
      "win": "That developer now gets the team's checklist like everyone else.",
      "fail": "The old steps keep running on that one machine."},
     {"hash": "2472d3c2522c3fd0", "scenario": "support", "stage": "team",
-     "beat": "Omar wants every pull request on the refund tools reviewed by Claude in CI, with a script deciding pass or fail.",
+     "beat": "The support team wants every pull request on the refund tools reviewed by Claude in CI, with a script deciding pass or fail.",
      "win": "The pipeline reads the review and fails the build on critical findings, with nobody involved.",
      "fail": "The job waits for input nobody will give, or produces text the script cannot read."},
 

@@ -695,6 +695,11 @@
           "title": "Entity Ids",
           "type": "array"
         },
+        "icon": {
+          "default": "",
+          "title": "Icon",
+          "type": "string"
+        },
         "id": {
           "title": "Id",
           "type": "string"
@@ -907,6 +912,14 @@
           "title": "Question",
           "type": "string"
         },
+        "requirements": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Requirements",
+          "type": "array"
+        },
         "scenario": {
           "default": "",
           "title": "Scenario",
@@ -969,6 +982,14 @@
         },
         "outcome": {
           "$ref": "#/components/schemas/GameOutcome"
+        },
+        "outcomes": {
+          "default": [],
+          "items": {
+            "$ref": "#/components/schemas/GameOutcome"
+          },
+          "title": "Outcomes",
+          "type": "array"
         },
         "question_id": {
           "title": "Question Id",
@@ -1353,6 +1374,14 @@
           "default": "",
           "title": "Reason",
           "type": "string"
+        },
+        "supported_requirements": {
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "title": "Supported Requirements",
+          "type": "array"
         },
         "verdict": {
           "enum": [

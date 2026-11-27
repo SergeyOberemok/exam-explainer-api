@@ -153,6 +153,18 @@ def test_messages_carry_the_chapter_and_the_stem_only():
     assert "CORRECT ANSWER: B" in user and "  C. Lower the temperature" in user
 
 
+def test_without_a_cast_the_prompts_name_no_person():
+    from claude_exam.api import beat
+    from claude_exam.api.question_view import key_free
+
+    assert not any(s.cast for s in SCENARIOS)
+    no_paragraph = with_question("The agent escalates too often. What should change?")
+    beat_system, _ = beat.messages(key_free(DOC), {"scenario": "support", "stage": "incident"})
+    for system in (_build_system_message(DOC), _build_system_message(no_paragraph), beat_system):
+        assert "People" not in system and "{{" not in system
+        assert "Name no person." in system
+
+
 def test_record_fields_identify_the_question():
     fields = record_fields(DOC, SEED, "seed", 3)
     assert (fields["scenario"], fields["order"], fields["origin"]) == ("support", 3, "seed")

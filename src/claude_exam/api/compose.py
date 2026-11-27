@@ -228,6 +228,7 @@ def compose(
         stage=place["stage"],
         objectives=objectives_of(objectives),
         difficulty=difficulty_of(objectives),
+        requirements=list(resolution.answer_requirements),
         icon=known(picked.question) or entities.question_icon or "",
         beat=place["beat"],
         question=(doc.get("prompt") or {}).get("question") or "",
@@ -255,6 +256,7 @@ def compose(
                 misconception=misconceptions[o.index],
                 reason=o.reason,
                 gaps=list(o.gaps),
+                supported_requirements=list(o.supported_requirements),
             )
             for o in resolution.options
         ],

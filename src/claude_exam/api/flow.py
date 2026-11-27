@@ -41,6 +41,7 @@ from claude_exam.api.decompose import (
 from claude_exam.api.game.domain import correct_indices
 from claude_exam.api.ica import IcaClient
 from claude_exam.api.ica_json import ask_validated, schema_skeleton
+from claude_exam.api.icon_catalog import ICON_KEYS, ICONS
 from claude_exam.api.leaks import answer_only, leak_errors, points_at_correct
 from claude_exam.api.question_view import KeyFreeQuestion, key_free, the_ask
 from claude_exam.api.scenario_catalog import BY_KEY, COMPANY, COMPANY_INTRO, STAGES
@@ -90,6 +91,8 @@ dead ends, no edge to a node that does not exist.
 - entity_ids name the decomposition entities a node shows. source_status: "explicit" \
 when the question states the step, "inferred" when it only connects the scenario.
 - Do not add facts, numbers, thresholds or actors the question does not give.
+- icon is the key of the ICON KEYS entry that best shows what the step is or does \
+(what runs, is read or is produced); "" only when none fits.
 - Edges go from "source" to "target" (node ids n1, n2, ...).
 
 VISUALIZATION - choose the primary view that matches the question's reasoning:
@@ -170,7 +173,8 @@ gaps (why it falls short; [] for the correct one), one sentence of reason, and:
    - consequence: ONE line of the game's story (at most {{CONSEQUENCE_WORDS}} words, \
 present tense, no letter or option number) telling what happens in the STORY below \
 when the team does what this option proposes: the correct one solves the problem, a \
-wrong one fails the way its gaps say. Show the effect, do not explain the rule.
+wrong one fails the way its gaps say. Show the effect, do not explain the rule. Name \
+no person unless the STORY lists people; say the team or a role instead.
    - impact: "success" for the correct answer; "partial" for a wrong answer that would \
 partly work (it meets some requirements, the situation improves but the problem stays); \
 "failure" for one that does not help or makes it worse.
@@ -193,9 +197,11 @@ def _system(template: str, model) -> str:
 
 
 def _rules() -> str:
-    return _FLOW_RULES.replace("{{MAX_NODES}}", str(MAX_NODES)).replace(
+    rules = _FLOW_RULES.replace("{{MAX_NODES}}", str(MAX_NODES)).replace(
         "{{MAX_LABEL_WORDS}}", str(MAX_LABEL_WORDS)
     )
+    catalog = "\n".join(f"- {icon.key}: {icon.meaning}" for icon in ICONS)
+    return f"{rules}\n\nICON KEYS (the only values icon may have):\n{catalog}"
 
 
 def _compact(model) -> str:
@@ -308,6 +314,8 @@ def graph_errors(
                 f"node {node.id} asks a question but is a {node.type} node: only a "
                 "decision node asks (and before answering, only one the question states)"
             )
+        if node.icon and node.icon not in ICON_KEYS:
+            errors.append(f"node {node.id} icon \"{node.icon}\" is not one of the ICON KEYS")
         unknown = [i for i in node.entity_ids if i not in entity_ids]
         if unknown:
             errors.append(f"node {node.id} refers to entities that do not exist: {', '.join(unknown)}")
@@ -617,7 +625,8 @@ def _story_block(place: dict | None) -> str:
     scenario = BY_KEY.get(place.get("scenario") or "")
     if scenario is not None:
         lines.append(f'Chapter "{scenario.title}": {scenario.intro}')
-        lines.append(f"People: {people(scenario)}")
+        if scenario.cast:
+            lines.append(f"People: {people(scenario)}")
     stage = next((s for s in STAGES if s.key == place.get("stage")), None)
     if stage is not None:
         lines.append(f"Stage {stage.title}: {stage.description}")

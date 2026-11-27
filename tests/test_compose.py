@@ -88,6 +88,8 @@ async def test_a_full_job_composes_the_game_document():
     assert key.outcomes[1].consequence == "The review goes well."
     assert key.outcomes[0].misconception == "Auto-accepting edits keeps files unchanged."
     assert key.outcomes[1].misconception == ""
+    assert key.outcomes[1].supported_requirements == ["No edit before review"]
+    assert (key.outcomes[0].supported_requirements, key.outcomes[0].gaps) == ([], ["Edits before review"])
     assert (key.win, key.fail) == ("Reviews happen before edits.", "Edits land unreviewed.")
     assert any(n.added for n in key.resolution_flow.nodes)
 

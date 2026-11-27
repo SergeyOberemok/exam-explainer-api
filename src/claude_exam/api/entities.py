@@ -26,7 +26,8 @@ from claude_exam.api.schemas import (
 logger = logging.getLogger(__name__)
 
 # Entity types a diagram draws, and the `VisualEntity.kind` each becomes. A `concept`
-# stays in the decomposition but is never drawn.
+# is not drawn in the scene or named by the question, but an answer lists the ones its
+# option relies on (see `ANSWER_KIND`).
 VISUAL_KIND = {
     "actor": "actor",
     "system": "object",
@@ -35,6 +36,10 @@ VISUAL_KIND = {
     "artifact": "object",
     "external_service": "object",
 }
+
+# What an answer card may also show: the concept its option proposes (a flag, a kind of
+# state), which is usually the very thing that tells the answers apart.
+ANSWER_KIND = {**VISUAL_KIND, "concept": "object"}
 
 # A question is a short scenario; more than this means the model is listing nouns.
 # Beyond the limits the reply is trimmed (in order), not rejected.
@@ -67,6 +72,7 @@ def parse_entities(
     parsed: dict,
     n_answers: int,
     texts: tuple[str, list[str]] | None = None,
+    trusted: list[list[str]] | None = None,
 ) -> PromptEntities:
     """
     Validate the model's reply and build the stored structure. The reply uses a
@@ -80,6 +86,10 @@ def parse_entities(
     `texts` = (question text, answer texts). When given, a reference is also dropped (and logged) if the entity's name
     or aliases do not occur in that text, and aliases found nowhere in the question
     are pruned. Without it only the structure is checked.
+
+    `trusted` = per answer, entity ids kept without the text check: the answer option's
+    own entities from the decomposition, which was written from that very text (it
+    names the mechanism, not always the entity words). Generic names are still dropped.
     """
 
     def bad(msg: str) -> HTTPException:
@@ -131,7 +141,9 @@ def parse_entities(
                 if a.lower() in everything and a.lower() not in _GENERIC_ALIASES
             ]
 
-    def refs(value: object, where: str, text: str | None) -> list[VisualEntity]:
+    def refs(
+        value: object, where: str, text: str | None, trust: frozenset[str] = frozenset()
+    ) -> list[VisualEntity]:
         if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
             raise bad(f"{where} must be a list of entity ids")
         # Unknown ids and repeats are dropped; order is kept. Each place gets its own
@@ -143,7 +155,7 @@ def parse_entities(
             if entities[i].name.lower() in _GENERIC_NAMES:
                 logger.info("dropped generic entity %r from %s", entities[i].name, where)
                 continue
-            if text is not None and not _mentions(entities[i], text):
+            if i not in trust and text is not None and not _mentions(entities[i], text):
                 logger.info(
                     "dropped ungrounded entity %r from %s", entities[i].name, where
                 )
@@ -181,7 +193,8 @@ def parse_entities(
     answers = []
     for i, r in enumerate(raw_answers):
         text = texts[1][i] if texts and i < len(texts[1]) else None
-        found = refs(r, f"'answers_entities[{i}]'", text)
+        trust = frozenset(trusted[i]) if trusted and i < len(trusted) else frozenset()
+        found = refs(r, f"'answers_entities[{i}]'", text, trust)
         answers.append(AnswerEntities(entities=with_stable_actors(found, text)[:MAX_PER_ANSWER]))
     return PromptEntities(question=question_refs, answers=answers)
 
@@ -199,19 +212,21 @@ def derive_entities(decomposition: QuestionDecomposition, question: KeyFreeQuest
         {
             "id": e.id,
             "name": e.name,
-            "kind": VISUAL_KIND[e.type],
+            "kind": ANSWER_KIND[e.type],
             "aliases": e.aliases,
             "ref": e.id,
         }
         for e in decomposition.entities
-        if e.type in VISUAL_KIND
+        if e.type in ANSWER_KIND
     ]
-    ids = [e["id"] for e in catalog]
+    all_ids = [e["id"] for e in catalog]
+    # The scene (what the question names) holds drawable entities only.
+    ids = [e.id for e in decomposition.entities if e.type in VISUAL_KIND]
     options = {o.index: o.entity_ids for o in decomposition.answer_options}
     count = len(question.answers)
-    answers = [
-        list(dict.fromkeys([*(i for i in options.get(n, []) if i in ids), *ids]))
-        for n in range(count)
-    ]
+    # An option's own entities (concepts too) come first and are kept as they are; the
+    # rest of the scene follows and has to occur in the answer's text.
+    own = [list(dict.fromkeys(i for i in options.get(n, []) if i in all_ids)) for n in range(count)]
+    answers = [list(dict.fromkeys([*own[n], *ids])) for n in range(count)]
     reply = {"entities": catalog, "question_entities": ids, "answers_entities": answers}
-    return parse_entities(reply, count, _source_texts(question))
+    return parse_entities(reply, count, _source_texts(question), trusted=own)

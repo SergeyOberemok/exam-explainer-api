@@ -52,6 +52,7 @@ def card_answer_result(question_id: str, answer_index: int, entry: dict) -> Game
         is_correct=is_correct,
         correct_index=key.correct,
         outcome=key.outcomes[answer_index],
+        outcomes=key.outcomes,
         story_line=key.win if is_correct else key.fail,
         review=key.review,
         rule=key.rule,

@@ -184,7 +184,8 @@ def game_flow(flow: dict | None) -> GameFlow:
         secondary=list(parsed.visualization.secondary),
         reason=parsed.visualization.reason,
         trigger=parsed.trigger,
-        nodes=parsed.nodes,
+        # A stored key can outlive its catalog entry: serve it as "no icon".
+        nodes=[n.model_copy(update={"icon": known_icon(n.icon) or ""}) for n in parsed.nodes],
         edges=parsed.edges,
     )
 

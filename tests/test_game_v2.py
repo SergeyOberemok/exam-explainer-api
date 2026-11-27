@@ -112,6 +112,8 @@ def test_answering_returns_the_outcome_of_that_answer_once(bank):
     assert result["outcome"]["index"] == 2 and result["outcome"]["impact"] == "failure"
     assert result["outcome"]["consequence"] == "The edits land unreviewed."
     assert result["outcome"]["misconception"] == "Auto mode asks before each edit."
+    assert [o["index"] for o in result["outcomes"]] == list(range(len(result["outcomes"])))
+    assert result["outcomes"][2] == result["outcome"]
     assert result["story_line"] == "Edits land unreviewed."
     assert result["review"]["explanation"] == "Plan mode blocks edits."
     assert result["rule"] and result["resolution_flow"]["nodes"]

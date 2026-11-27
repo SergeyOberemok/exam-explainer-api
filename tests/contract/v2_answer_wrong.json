@@ -10,8 +10,49 @@
     "consequence": "The edits land unreviewed.",
     "misconception": "Header names are free to choose.",
     "reason": "Because.",
-    "gaps": []
+    "gaps": [
+      "Edits before review"
+    ],
+    "supported_requirements": []
   },
+  "outcomes": [
+    {
+      "index": 0,
+      "verdict": "incorrect",
+      "impact": "failure",
+      "consequence": "The edits land unreviewed.",
+      "misconception": "Any HTTP auth header carries the key.",
+      "reason": "Because.",
+      "gaps": [
+        "Edits before review"
+      ],
+      "supported_requirements": []
+    },
+    {
+      "index": 1,
+      "verdict": "correct",
+      "impact": "success",
+      "consequence": "The review goes well.",
+      "misconception": "",
+      "reason": "Because.",
+      "gaps": [],
+      "supported_requirements": [
+        "No edit before review"
+      ]
+    },
+    {
+      "index": 2,
+      "verdict": "incorrect",
+      "impact": "partial",
+      "consequence": "The edits land unreviewed.",
+      "misconception": "Header names are free to choose.",
+      "reason": "Because.",
+      "gaps": [
+        "Edits before review"
+      ],
+      "supported_requirements": []
+    }
+  ],
   "story_line": "Every call still comes back unauthorized.",
   "review": {
     "explanation": "Why: SCENARIO: You are building a customer support resolution agent.\n\nQUESTION: Which header carries the API key?",
@@ -36,6 +77,7 @@
         "type": "start",
         "label": "Work starts",
         "entity_ids": [],
+        "icon": "",
         "condition_id": "",
         "source_status": "inferred",
         "is_question": false,
@@ -46,6 +88,7 @@
         "type": "process",
         "label": "Edits happen",
         "entity_ids": [],
+        "icon": "",
         "condition_id": "",
         "source_status": "inferred",
         "is_question": false,
@@ -56,6 +99,7 @@
         "type": "process",
         "label": "Plan before editing",
         "entity_ids": [],
+        "icon": "",
         "condition_id": "",
         "source_status": "inferred",
         "is_question": false,
@@ -66,6 +110,7 @@
         "type": "end",
         "label": "Reviewed changes",
         "entity_ids": [],
+        "icon": "",
         "condition_id": "",
         "source_status": "inferred",
         "is_question": false,

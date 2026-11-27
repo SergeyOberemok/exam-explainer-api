@@ -284,8 +284,8 @@ def resolution_reply(n_answers=2, correct=(1,)):
             {
                 "index": i,
                 "verdict": "correct" if i in correct else "incorrect",
-                "supported_requirements": [],
-                "gaps": [],
+                "supported_requirements": ["No edit before review"] if i in correct else [],
+                "gaps": [] if i in correct else ["Edits before review"],
                 "reason": "Because.",
                 "consequence": "The review goes well." if i in correct else "The edits land unreviewed.",
                 "impact": "success" if i in correct else "failure",

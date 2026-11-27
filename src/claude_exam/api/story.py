@@ -84,8 +84,7 @@ result. Do not name or hint at the correct answer.
 STYLE
 - Each line is at most {{LINE_WORDS}} words, plain English, present tense, about \
 {{COMPANY}}'s people and systems.
-- Use a person only where it adds something, and then only one of the people listed \
-for the chapter, by first name. Most lines need no person at all.
+{{PERSON_RULE}}
 - No exclamation marks, no praise or blame for the player, no "you".
 - Do not repeat the question's sentences. A line is a consequence or a symptom, not a \
 summary.
@@ -99,7 +98,7 @@ synthesis has finished, and citations are missing."
 changes that span files."
   win: "Each file gets full attention, and what spans files is caught as well."
   fail: "The reviewer still flags a pattern in one file and approves it in the next."
-- situation: "Omar wants every pull request on the refund tools reviewed by Claude in CI, \
+- situation: "The support team wants every pull request on the refund tools reviewed by Claude in CI, \
 with a script deciding pass or fail."
   win: "The pipeline reads the review and fails the build on critical findings, with \
 nobody involved."
@@ -121,6 +120,25 @@ def people(scenario: ScenarioDef) -> str:
     return ", ".join(f"{name} ({role})" for name, role in scenario.cast) or "(none named)"
 
 
+def people_line(scenario: ScenarioDef) -> str:
+    """The chapter's `People:` line for a prompt, after a newline; "" without a cast."""
+    return f"\nPeople: {people(scenario)}" if scenario.cast else ""
+
+
+def person_rule(has_cast: bool) -> str:
+    """The STYLE rule on people: the chapter's cast by first name when there is one,
+    else no person at all (the casts are empty until the characters are designed)."""
+    if has_cast:
+        return (
+            "- Use a person only where it adds something, and then only one of the people "
+            "listed for the chapter, by first name. Most lines need no person at all."
+        )
+    return (
+        "- Name no person. Say who acts by team or role (the support team, a reviewer), "
+        "or not at all."
+    )
+
+
 def needs_chapter_pick(doc: dict) -> bool:
     """True for a question without a scenario paragraph: the model then picks the
     chapter. A paragraph no chapter claims is not that case (it needs a new chapter)."""
@@ -131,13 +149,17 @@ def _build_system_message(doc: dict) -> str:
     scenario = scenario_of(doc)
     if scenario is not None:
         chapter = (
-            f'THIS QUESTION\'S CHAPTER - "{scenario.title}"\n{scenario.intro}\n'
-            f"People: {people(scenario)}"
+            f'THIS QUESTION\'S CHAPTER - "{scenario.title}"\n{scenario.intro}'
+            f"{people_line(scenario)}"
         )
+        has_cast = bool(scenario.cast)
         pick, field = "- ", ""
     else:
-        chapter = 'CHAPTERS - "key: what the team builds. People"\n' + "\n".join(
-            f"- {s.key}: {s.intro} People: {people(s)}" for s in SCENARIOS
+        has_cast = any(s.cast for s in SCENARIOS)
+        header = "key: what the team builds. People" if has_cast else "key: what the team builds"
+        chapter = f'CHAPTERS - "{header}"\n' + "\n".join(
+            f"- {s.key}: {s.intro}" + (f" People: {people(s)}" if s.cast else "")
+            for s in SCENARIOS
         )
         pick = (
             '- "scenario": the key of the one chapter whose system the question is '
@@ -152,6 +174,7 @@ def _build_system_message(doc: dict) -> str:
         .replace("{{PICK}}", pick)
         .replace("{{SCENARIO_FIELD}}", field)
         .replace("{{LINE_WORDS}}", str(PROMPT_LINE_WORDS))
+        .replace("{{PERSON_RULE}}", person_rule(has_cast))
         .replace("{{STAGES}}", "\n".join(f"- {s.key}: {s.description}" for s in STAGES))
         .replace("{{STAGE_KEYS}}", " | ".join(f'"{s.key}"' for s in STAGES))
     )

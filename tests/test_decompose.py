@@ -131,6 +131,28 @@ def decomposition(q):
     return QuestionDecomposition.model_validate(explicit())
 
 
+def test_a_nodes_icon_must_be_a_catalog_key_and_the_game_never_serves_another():
+    from claude_exam.api.game.domain import game_flow
+    from claude_exam.api.icon_catalog import ICON_KEYS
+
+    q = review_question()
+    d = decomposition(q)
+    key = sorted(ICON_KEYS)[0]
+
+    ok = flow_reply()
+    ok["nodes"][0]["icon"] = key
+    assert flow_errors(q, d, ok) == []
+
+    bad = flow_reply()
+    bad["nodes"][1]["icon"] = "not-a-key"
+    assert any("not one of the ICON KEYS" in e for e in flow_errors(q, d, bad))
+
+    # A stored key can outlive its catalog entry.
+    served = game_flow(bad).nodes
+    assert [n.icon for n in served] == ["", "", ""]
+    assert [n.icon for n in game_flow(ok).nodes] == [key, "", ""]
+
+
 def test_a_pre_answer_flow_ends_at_the_question_node_and_adds_nothing():
     q = review_question()
     d = decomposition(q)

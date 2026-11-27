@@ -16,6 +16,10 @@ list them.
 A chapter's intro and people are in the prompts written from it, so changing them
 outdates (by input key, `step_key.py`) only that chapter's questions; adding a chapter
 costs nothing for the others. Titles, districts and outros can change freely.
+
+The casts are empty for now (no named people until the characters are designed): the
+prompts then tell the model to name no person. Giving a chapter a cast puts its names
+back into the story, beat and resolution prompts and outdates that chapter's records.
 """
 
 import hashlib
@@ -35,7 +39,8 @@ class ScenarioDef(NamedTuple):
     # Lower-case words found in the source's scenario paragraph, and in no other.
     marker: str
     # The people of the chapter, as (name, role). The model uses these names and no
-    # others, so every question of a chapter is brought by the same few people.
+    # others, so every question of a chapter is brought by the same few people. Empty
+    # for now: the prompts then name no person.
     cast: tuple[tuple[str, str], ...] = ()
 
 
@@ -63,7 +68,6 @@ SCENARIOS: tuple[ScenarioDef, ...] = (
         "Engineers now ask the agent before they ask each other, and the billing code "
         "has a map.",
         "developer productivity tools",
-        (("Ines", "platform lead"), ("Tomas", "senior engineer on the billing code")),
     ),
     ScenarioDef(
         "support", "The Front Desk", "Front Desk",
@@ -74,7 +78,6 @@ SCENARIOS: tuple[ScenarioDef, ...] = (
         "The agent closes most cases alone, and the people behind it get cases they can "
         "act on.",
         "customer support resolution agent",
-        (("Mara", "head of support"), ("Omar", "engineer on the support agent")),
     ),
     ScenarioDef(
         "pipeline", "Guard the Pipeline", "The Pipeline",
@@ -83,7 +86,6 @@ SCENARIOS: tuple[ScenarioDef, ...] = (
         "false positives.",
         "Reviews arrive before the coffee does, and developers read them.",
         "continuous integration",
-        (("Lena", "delivery lead"), ("Sam", "developer whose pull requests get reviewed")),
     ),
     ScenarioDef(
         "research", "The Research Desk", "Research Desk",
@@ -92,7 +94,6 @@ SCENARIOS: tuple[ScenarioDef, ...] = (
         "produces reports whose every claim has a source.",
         "Leadership reads the reports and, more to the point, trusts the citations.",
         "multi-agent research system",
-        (("Noor", "head of strategy"), ("Viktor", "analyst who reads the reports")),
     ),
 )
 

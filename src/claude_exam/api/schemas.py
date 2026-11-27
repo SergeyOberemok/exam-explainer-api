@@ -633,6 +633,8 @@ class FlowNode(BaseModel):
     type: FlowNodeType
     label: str
     entity_ids: list[str]
+    # The `icon_catalog` key that fits the step ("" when none does).
+    icon: str = ""
     # The decomposition condition a decision node tests ("" when none).
     condition_id: str
     source_status: SourceStatus
@@ -827,6 +829,9 @@ class GameCard(BaseModel):
     stage: str = ""
     objectives: list[str] = []
     difficulty: int = 0
+    # What a correct answer has to achieve (the same texts the key's outcomes list as
+    # `supported_requirements`; which answer meets which stays in the key).
+    requirements: list[str] = []
     icon: str = ""
     beat: str = ""
     # The full original text (a fallback); `stem` is it without the scenario paragraph.
@@ -855,6 +860,8 @@ class GameOutcome(BaseModel):
     misconception: str = ""
     reason: str = ""
     gaps: list[str] = []
+    # The `answer_requirements` this answer meets, by their text.
+    supported_requirements: list[str] = []
 
 
 class GameCardKey(BaseModel):
@@ -901,6 +908,9 @@ class GameCardAnswerResult(BaseModel):
     correct_index: int
     # The outcome of the answer given, and the story line that follows it.
     outcome: GameOutcome
+    # Every answer's outcome, by index (the key is out once the question is answered), so a
+    # client can show what each tool would have led to.
+    outcomes: list[GameOutcome] = []
     story_line: str = ""
     review: GameReview
     rule: str = ""

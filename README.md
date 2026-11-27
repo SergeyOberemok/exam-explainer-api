@@ -67,7 +67,39 @@ Progress report:
 uv run python scripts/pipeline_report.py [DATABASE_URL] [--source FILE] [--check]
 ```
 
-Other scripts in `scripts/`: `objective_coverage.py`, `story_coverage.py`, `propose_objectives.py`, `propose_scenarios.py`, `load_story_seed.py`, `export_game_icons.py`, `run_pipeline.py`, `reset_db.py`.
+After changing how the visual entities are derived from a decomposition (`entities.derive_entities`), rebuild the stored ones without asking the model. Icons already picked are kept:
+
+```bash
+uv run python scripts/rederive_entities.py [DATABASE_URL] [--dry-run]
+```
+
+Other scripts in `scripts/`: `objective_coverage.py`, `story_coverage.py`, `propose_objectives.py`, `propose_scenarios.py`, `load_story_seed.py`, `export_game_icons.py`, `run_pipeline.py`, `reset_db.py`, `rederive_entities.py`.
+
+### Clearing the local database
+
+`scripts/reset_db.py` empties every collection except `examination` (the imported original questions), so the pipeline starts again from the questions alone: the pipeline records (`question_objectives`, `question_story`, `question_decomposition`, `game_question`), the jobs (`simplification_jobs`) and the game rounds (`game_rounds`). Documents are deleted but indexes are kept, so a running API needs no restart.
+
+```bash
+uv run python scripts/reset_db.py                  # dry run: lists what would be emptied
+uv run python scripts/reset_db.py --yes            # do it
+uv run python scripts/reset_db.py --yes --unhold   # also release questions held for manual processing
+```
+
+Options:
+
+- `[DATABASE_URL]`: positional; defaults to `DATABASE_URL` from the environment or `.env`.
+- `--keep NAME ...`: also keep these collections.
+- `--force`: go on although a job is marked `running` (e.g. left behind by a killed server); otherwise the script refuses.
+
+The story seed lives in `question_story`, so after a reset load it again and rebuild everything:
+
+```bash
+uv run python scripts/load_story_seed.py
+# then, with the API running:
+curl -X POST "http://127.0.0.1:8000/examination/pipeline/backfill?only_missing=true"
+```
+
+To remove the questions too, drop the database in `mongosh` (`use <db>; db.dropDatabase()`) and import the exam file again.
 
 ## Tests
 
